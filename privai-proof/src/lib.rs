@@ -1,5 +1,6 @@
 pub mod batch;
 pub mod artifact;
+pub mod halo2;
 pub mod store;
 pub mod transfer;
 pub mod verify;
