@@ -70,6 +70,148 @@ Important note:
 - `privai-proof` is still a structural/proof-envelope layer, not yet a final cryptographic ZK verifier.
 - This is known and intentional.
 
+### 2A. Custom LWE privacy model: hidden amounts, hidden addresses, noise-budget accounting
+
+This part is important for the next chat because it is not just "privacy by transport".
+The chain model itself already assumes hidden-value notes and hidden recipients.
+
+The intended v0 model is:
+
+- each output note contains a fresh LWE ciphertext `ct_amt`,
+- recipient identity is hidden behind a one-time `ReceiveBundle`,
+- ownership recovery data lives inside `RecipientBox`,
+- spendability is controlled by `SpendPolicy`,
+- replay / double-spend prevention uses `Nullifier`,
+- future proof statements bind all of the above through commitments.
+
+Core objects:
+
+- `OutputNote`
+  - `note_commit`
+  - `spend_policy_commit`
+  - `ct_amt`
+  - `aux_commit`
+  - `recipient_box`
+- `RecipientBox`
+  - on-chain encrypted payload for the receiver
+- `RecipientBoxPlaintext`
+  - receiver-side opening with bundle binding, witness seed, nullifier key and policy opening
+- `AuxWitness`
+  - private witness material bound by `aux_commit`
+
+The privacy split is deliberate:
+
+- `ct_amt` hides the amount,
+- `ReceiveBundle` + `RecipientBox` hide the destination,
+- `SpendPolicy` can encode single-owner or escrow semantics without exposing private receiver state,
+- `note_commit` binds the entire output object so nothing can be swapped independently.
+
+#### Hidden amounts
+
+Amounts are not stored as plaintext balances.
+Each note carries its own fresh LWE ciphertext.
+
+Important design point:
+
+- we are not treating LWE as an endlessly reused homomorphic account balance,
+- we treat it as a per-note hidden amount container,
+- spending a note means consuming it and creating new fresh notes.
+
+This keeps the model closer to private note/UTXO accounting than to a long-lived encrypted account state.
+
+#### Hidden addresses
+
+Receiver privacy is based on one-time receive bundles rather than stable public addresses.
+
+The intended flow is:
+
+1. receiver generates many `ReceiveBundle`s,
+2. sender picks one unused bundle,
+3. sender creates a note whose receiver-side recovery data is encrypted to that bundle,
+4. chain only sees the encrypted `RecipientBox` plus a non-secret scan `hint`,
+5. wallet identifies ownership by being able to open the box.
+
+This means:
+
+- chain observers do not see a stable public recipient address,
+- recipient reuse is discouraged,
+- receiver discovery is wallet-side, not account-index-side.
+
+#### Commitments and private openings
+
+The current note structure is commitment-heavy on purpose.
+
+- `note_commit` binds the full output payload,
+- `spend_policy_commit` binds the spend rule,
+- `aux_commit` binds private witness material needed later for spending/proving,
+- `RecipientBoxPlaintext` contains openings needed by the owner but not by the public chain.
+
+This gives us a layered privacy model:
+
+- public chain sees commitments and encrypted boxes,
+- owner reconstructs the real spend data from bundle keys,
+- prover later shows correctness of spending without publishing those openings.
+
+#### Custom noise-budget accounting
+
+The intended LWE accounting model is not "let ciphertext noise drift forever and hope decoding survives".
+We explicitly track and reset the usable decoding margin through note lifecycle events.
+
+The practical design direction is:
+
+- every newly created output uses fresh encryption noise,
+- every spend consumes old notes and creates new notes with new fresh noise,
+- we do not rely on arbitrary long homomorphic accumulation inside one ciphertext,
+- private witness data records enough metadata to classify the allowed decoding margin of that note.
+
+In the current format direction this is represented by `AuxWitness`, which already contains:
+
+- `amount`
+- `witness_seed`
+- `noise_class`
+- `bundle_id`
+
+Meaning of `noise_class` in the design:
+
+- it is a compact wallet/prover-side classification of the admissible noise regime for that note,
+- it allows proofs and wallet logic to reason about which decoding safety envelope was used,
+- it prevents the system from treating all ciphertexts as if they had identical noise history.
+
+The accounting idea is:
+
+1. fresh outputs start in a known safe noise class,
+2. proof/witness generation knows the class and witness seed,
+3. spend proofs show that the consumed notes were valid under their declared class,
+4. outputs are re-randomized / freshly encrypted so the budget is reset on the new notes.
+
+So the chain-level privacy accounting is closer to:
+
+- "consume hidden notes, prove valid openings and conservation, issue fresh hidden notes"
+
+than to:
+
+- "mutate one encrypted balance in place forever".
+
+#### ZK relation we are moving toward
+
+The final intended proof relation is roughly:
+
+- prover knows openings for consumed notes,
+- prover knows plaintext amounts hidden inside input `ct_amt`,
+- prover knows nullifier secrets and spend-policy witnesses,
+- prover proves input conservation against outputs and fee,
+- prover proves each output note commitment matches its hidden payload,
+- prover proves each output ciphertext is well-formed and within the allowed noise/decode regime,
+- prover proves each nullifier is derived correctly and is unlinkable to a public receiver identity.
+
+In short:
+
+- hidden amounts come from LWE ciphertexts,
+- hidden addresses come from one-time bundle addressing plus encrypted recipient boxes,
+- commitments bind every note component,
+- ZK is the layer that proves conservation and correctness without opening recipients or values,
+- custom noise-budget accounting is the rule that keeps LWE-based hidden amounts decodable and auditable across note creation/spend cycles.
+
 ### 3. `nxms-transport` protocol and runtime
 
 Completed:
