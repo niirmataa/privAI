@@ -16,6 +16,9 @@ fn main() {
     build.define("FF_FALCON_LOGN", "10"); // Falcon-1024 (logn=10)
     build.define("FALCON_FPEMU", "1");
     build.define("FALCON_FPNATIVE", "0");
+    if std::env::var_os("CARGO_FEATURE_FALCON_AUDIT_RAW_API").is_some() {
+        build.define("NXMS_FALCON_AUDIT_RAW_API", "1");
+    }
 
     // Include dirs
     build.include("native");

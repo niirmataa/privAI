@@ -263,9 +263,8 @@ static int prekeys_upload_with_loaded(const char *base, const char *socks5,
 
     uint8_t sig[FF_FALCON_SIG_MAX];
     size_t sig_len = sizeof(sig);
-    if (ff_falcon_sign_ct_auto(v->falcon_signer,
-                               v->falcon_sk, v->falcon_sk_len,
-                               msg, msg_len, sig, &sig_len) != 0) {
+    if (ff_falcon_sign_ct_with_ctx(v->falcon_signer,
+                                   msg, msg_len, sig, &sig_len) != 0) {
         sodium_memzero(msg, msg_len);
         free(msg);
         free(idx);
@@ -640,25 +639,14 @@ int cmd_dm_send(const char *dir, const char *base, const char *socks5,
     uint8_t *ct = NULL, *dm_nonce = NULL, *ciphertext = NULL, *tag = NULL, *sig = NULL;
     size_t ct_len = 0, dm_nonce_len = 0, ciphertext_len = 0, tag_len = 0, sig_len = 0;
     int dm_encrypt_rc;
-    if (v.falcon_signer) {
-        dm_encrypt_rc = ff_dm_encrypt_packet_with_signer(v.nick, to_nick, kem_id,
-                                                         prekey_id_raw, prekey_id_len,
-                                                         pk_ot, pk_ot_len,
-                                                         v.falcon_signer,
-                                                         (uint8_t*)msg_buf, msg_len,
-                                                         &ct, &ct_len, &dm_nonce, &dm_nonce_len,
-                                                         &ciphertext, &ciphertext_len, &tag, &tag_len,
-                                                         &sig, &sig_len);
-    } else {
-        dm_encrypt_rc = ff_dm_encrypt_packet(v.nick, to_nick, kem_id,
-                                             prekey_id_raw, prekey_id_len,
-                                             pk_ot, pk_ot_len,
-                                             v.falcon_sk, v.falcon_sk_len,
-                                             (uint8_t*)msg_buf, msg_len,
-                                             &ct, &ct_len, &dm_nonce, &dm_nonce_len,
-                                             &ciphertext, &ciphertext_len, &tag, &tag_len,
-                                             &sig, &sig_len);
-    }
+    dm_encrypt_rc = ff_dm_encrypt_packet_with_signer(v.nick, to_nick, kem_id,
+                                                     prekey_id_raw, prekey_id_len,
+                                                     pk_ot, pk_ot_len,
+                                                     v.falcon_signer,
+                                                     (uint8_t*)msg_buf, msg_len,
+                                                     &ct, &ct_len, &dm_nonce, &dm_nonce_len,
+                                                     &ciphertext, &ciphertext_len, &tag, &tag_len,
+                                                     &sig, &sig_len);
     if (dm_encrypt_rc != 0) {
         free(prekey_id_b64u); free(kem_id); free(pk_b64);
         free(prekey_id_raw); free(pk_ot);

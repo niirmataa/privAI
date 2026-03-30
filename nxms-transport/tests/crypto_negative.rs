@@ -2,7 +2,8 @@
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
 use nxms_transport::crypto::{
-    Keys, SealedPacket, decrypt, decrypt_for_context, encrypt, encrypt_for_context,
+    Keys, PreparedTransportSigner, SealedPacket, decrypt, decrypt_for_context,
+    encrypt_for_context_with_signer, encrypt_with_signer, kem_decaps,
 };
 use nxms_transport::wire::{MsgType, msg_type_key};
 
@@ -14,20 +15,21 @@ fn setup_packet() -> (Vec<u8>, Vec<u8>, [u8; 16], u64, SealedPacket, MsgType) {
     let sender_sig_pk = sender.sig_pk().expect("sender sig pk");
     let recipient_kem_pk = recipient.kem_pk().expect("recipient kem pk");
     let recipient_kem_sk = recipient.kem_sk_zeroizing().expect("recipient kem sk");
+    let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).expect("prepared signer");
 
     let escrow_id = [9u8; 16];
     let seq: u64 = 11;
     let msg_type = MsgType::TxSignReq;
     let plaintext = br#"{"kind":"tx_sign_req","data":"abcd"}"#.to_vec();
 
-    let sealed = encrypt(
+    let sealed = encrypt_with_signer(
         "alice",
         "bob",
         msg_type_key(&msg_type),
         &escrow_id,
         seq,
         &recipient_kem_pk,
-        sender_sig_sk.as_slice(),
+        &signer,
         &plaintext,
     )
     .expect("encrypt");
@@ -50,20 +52,21 @@ fn setup_context_packet() -> (Vec<u8>, Vec<u8>, [u8; 16], u64, SealedPacket, &'s
     let sender_sig_pk = sender.sig_pk().expect("sender sig pk");
     let recipient_kem_pk = recipient.kem_pk().expect("recipient kem pk");
     let recipient_kem_sk = recipient.kem_sk_zeroizing().expect("recipient kem sk");
+    let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).expect("prepared signer");
 
     let context_id = [0x33u8; 16];
     let seq: u64 = 17;
     let msg_type = "market_offer";
     let plaintext = br#"{"kind":"market_offer","data":"vector"}"#.to_vec();
 
-    let sealed = encrypt_for_context(
+    let sealed = encrypt_for_context_with_signer(
         "alice",
         "bob",
         msg_type,
         &context_id,
         seq,
         &recipient_kem_pk,
-        sender_sig_sk.as_slice(),
+        &signer,
         &plaintext,
     )
     .expect("encrypt");
@@ -202,6 +205,54 @@ fn decrypt_rejects_wrong_sender_key() {
         &wrong_sender_pk,
     )
     .expect_err("wrong sender key must fail");
+}
+
+#[test]
+fn decrypt_rejects_wrong_recipient_kem_key() {
+    let (_recipient_kem_sk, sender_sig_pk, escrow_id, seq, sealed, msg_type) = setup_packet();
+    let wrong_recipient = Keys::generate().expect("wrong recipient keys");
+    let wrong_recipient_kem_sk = wrong_recipient.kem_sk_zeroizing().expect("wrong recipient sk");
+
+    decrypt(
+        "alice",
+        "bob",
+        msg_type_key(&msg_type),
+        &escrow_id,
+        seq,
+        &sealed,
+        wrong_recipient_kem_sk.as_slice(),
+        &sender_sig_pk,
+    )
+    .expect_err("wrong recipient key must fail");
+}
+
+#[test]
+fn kem_decaps_rejects_truncated_ciphertext_even_above_minimum() {
+    let sender = Keys::generate().expect("sender keys");
+    let recipient = Keys::generate().expect("recipient keys");
+
+    let sender_sig_sk = sender.sig_sk_zeroizing().expect("sender sig sk");
+    let recipient_kem_pk = recipient.kem_pk().expect("recipient kem pk");
+    let recipient_kem_sk = recipient.kem_sk_zeroizing().expect("recipient kem sk");
+    let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).expect("prepared signer");
+
+    let sealed = encrypt_with_signer(
+        "alice",
+        "bob",
+        msg_type_key(&MsgType::TxSignReq),
+        &[0x55; 16],
+        19,
+        &recipient_kem_pk,
+        &signer,
+        br#"{\"kind\":\"tx_sign_req\",\"data\":\"kem\"}"#,
+    )
+    .expect("encrypt");
+
+    let kem_ct = B64.decode(sealed.kem_ct_b64.as_bytes()).expect("decode kem ct");
+    assert!(kem_ct.len() > 128, "fixture should exceed minimum test length");
+
+    kem_decaps(recipient_kem_sk.as_slice(), &kem_ct[..128])
+        .expect_err("truncated kem ciphertext must fail");
 }
 
 #[test]

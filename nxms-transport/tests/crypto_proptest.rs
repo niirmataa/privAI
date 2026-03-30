@@ -1,6 +1,6 @@
 #![cfg(feature = "crypto")]
 
-use nxms_transport::crypto::{Keys, decrypt, encrypt};
+use nxms_transport::crypto::{Keys, PreparedTransportSigner, decrypt, encrypt_with_signer};
 use proptest::prelude::*;
 
 proptest! {
@@ -21,16 +21,17 @@ proptest! {
         let sender_sig_pk = sender.sig_pk().expect("sender sig pk");
         let recipient_kem_pk = recipient.kem_pk().expect("recipient kem pk");
         let recipient_kem_sk = recipient.kem_sk_zeroizing().expect("recipient kem sk");
+        let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).expect("prepared signer");
         let escrow_id = [0xAAu8; 16];
 
-        let sealed = encrypt(
+        let sealed = encrypt_with_signer(
             "alice",
             "bob",
             "tx_sign_req",
             &escrow_id,
             seq,
             &recipient_kem_pk,
-            sender_sig_sk.as_slice(),
+            &signer,
             &plaintext,
         )
         .expect("encrypt");

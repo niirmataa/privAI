@@ -63,31 +63,6 @@ typedef struct nxms_ms_signer_ctx nxms_ms_signer_ctx;
 #define NXMS_SIG_ID "Falcon-1024-CT"
 
 /*
- * Encrypt + authenticate + sign an application payload.
- *
- * Inputs:
- *   - sender_id / to_id / msg_type are cryptographically bound into AAD
- *   - escrow_id_raw is a 16-byte context identifier bound into KDF and AAD
- *   - seq is a monotonic sequence number per (context, sender)
- *
- * Outputs are heap-allocated and owned by the caller.
- * Free non-secret buffers with nxms_ms_free().
- */
-int nxms_ms_encrypt_packet(const char *sender_id,
-                           const char *to_id,
-                           const char *msg_type,
-                           const uint8_t escrow_id_raw[NXMS_ESCROW_ID_LEN],
-                           uint64_t seq,
-                           const uint8_t *recipient_pk_kem, size_t recipient_pk_kem_len,
-                           const uint8_t *sender_sk_sig, size_t sender_sk_sig_len,
-                           const uint8_t *plaintext, size_t plaintext_len,
-                           uint8_t **kem_ct, size_t *kem_ct_len,
-                           uint8_t **nonce, size_t *nonce_len,
-                           uint8_t **ciphertext, size_t *ciphertext_len,
-                           uint8_t **tag, size_t *tag_len,
-                           uint8_t **sig, size_t *sig_len);
-
-/*
  * Prepared signer context for the Falcon-CT sign path.
  *
  * This keeps the same wire format and the same Falcon reference algorithm,
@@ -102,6 +77,19 @@ nxms_ms_signer_ctx *nxms_ms_signer_ctx_new(const uint8_t *sender_sk_sig,
                                            size_t sender_sk_sig_len);
 void nxms_ms_signer_ctx_free(nxms_ms_signer_ctx *ctx);
 
+/*
+ * Encrypt + authenticate + sign an application payload.
+ *
+ * Inputs:
+ *   - sender_id / to_id / msg_type are cryptographically bound into AAD
+ *   - escrow_id_raw is a 16-byte context identifier bound into KDF and AAD
+ *   - seq is a monotonic sequence number per (context, sender)
+ *   - signer is a prepared Falcon signer context; raw encoded secret-key
+ *     signing is intentionally not exposed as a transport runtime path
+ *
+ * Outputs are heap-allocated and owned by the caller.
+ * Free non-secret buffers with nxms_ms_free().
+ */
 int nxms_ms_encrypt_packet_with_signer(const char *sender_id,
                                        const char *to_id,
                                        const char *msg_type,

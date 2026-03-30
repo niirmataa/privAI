@@ -12,20 +12,18 @@ typedef struct ff_falcon_signer_ctx ff_falcon_signer_ctx;
 
 int ff_falcon_keygen(uint8_t *sk, size_t *sk_len, uint8_t *pk, size_t *pk_len);
 
-// CT signature. Caller provides sig buffer and sets *sig_len to max.
+#if defined(NXMS_FALCON_AUDIT_RAW_API) && NXMS_FALCON_AUDIT_RAW_API
+/* Audit/test-only raw signing surface. Runtime must use signer ctx. */
 int ff_falcon_sign_ct(const uint8_t *sk, size_t sk_len,
                       const uint8_t *msg, size_t msg_len,
                       uint8_t *sig, size_t *sig_len);
+#endif
 
 ff_falcon_signer_ctx *ff_falcon_signer_ctx_new(const uint8_t *sk, size_t sk_len);
 void ff_falcon_signer_ctx_free(ff_falcon_signer_ctx *ctx);
 int ff_falcon_sign_ct_with_ctx(const ff_falcon_signer_ctx *ctx,
                                const uint8_t *msg, size_t msg_len,
                                uint8_t *sig, size_t *sig_len);
-int ff_falcon_sign_ct_auto(const ff_falcon_signer_ctx *ctx,
-                           const uint8_t *sk, size_t sk_len,
-                           const uint8_t *msg, size_t msg_len,
-                           uint8_t *sig, size_t *sig_len);
 
 int ff_falcon_verify(const uint8_t *pk, size_t pk_len,
                      const uint8_t *msg, size_t msg_len,

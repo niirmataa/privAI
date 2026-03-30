@@ -63,24 +63,14 @@ static void nxms_ms_reset_encrypt_outputs(uint8_t **kem_ct, size_t *kem_ct_len,
 }
 
 static int nxms_ms_sign_message(const nxms_ms_signer_ctx *signer,
-                                const uint8_t *sender_sk_sig,
-                                size_t sender_sk_sig_len,
                                 const uint8_t *sig_msg,
                                 size_t sig_msg_len,
                                 uint8_t *sig_out,
                                 size_t *sig_out_len) {
-    if (signer != NULL) {
-        if (!nxms_ms_signer_ctx_is_valid(signer)) {
-            return -1;
-        }
-        return ff_falcon_sign_ct_prepared(&signer->prepared,
-                                          sig_msg, sig_msg_len,
-                                          sig_out, sig_out_len);
-    }
-    if (sender_sk_sig == NULL || sender_sk_sig_len == 0) {
+    if (!nxms_ms_signer_ctx_is_valid(signer)) {
         return -1;
     }
-    return ff_falcon_sign_ct(sender_sk_sig, sender_sk_sig_len,
+    return ff_falcon_sign_ct_prepared(&signer->prepared,
                              sig_msg, sig_msg_len,
                              sig_out, sig_out_len);
 }
@@ -532,7 +522,6 @@ static int nxms_ms_encrypt_packet_impl(const char *sender_id,
                                        const uint8_t escrow_id_raw[NXMS_ESCROW_ID_LEN],
                                        uint64_t seq,
                                        const uint8_t *recipient_pk_kem, size_t recipient_pk_kem_len,
-                                       const uint8_t *sender_sk_sig, size_t sender_sk_sig_len,
                                        const nxms_ms_signer_ctx *signer,
                                        const uint8_t *plaintext, size_t plaintext_len,
                                        uint8_t **kem_ct, size_t *kem_ct_len,
@@ -585,12 +574,7 @@ static int nxms_ms_encrypt_packet_impl(const char *sender_id,
     if (recipient_pk_kem_len < NXMS_MIN_KEM_BYTES || recipient_pk_kem_len > NXMS_MAX_KEM_PK_LEN) {
         return -1;
     }
-    if (signer == NULL &&
-        (sender_sk_sig == NULL || sender_sk_sig_len == 0 ||
-         sender_sk_sig_len > NXMS_MAX_SIG_SK_LEN)) {
-        return -1;
-    }
-    if (signer != NULL && !nxms_ms_signer_ctx_is_valid(signer)) {
+    if (!nxms_ms_signer_ctx_is_valid(signer)) {
         return -1;
     }
 
@@ -717,7 +701,7 @@ static int nxms_ms_encrypt_packet_impl(const char *sender_id,
         return -1;
     }
 
-    if (nxms_ms_sign_message(signer, sender_sk_sig, sender_sk_sig_len,
+    if (nxms_ms_sign_message(signer,
                              sig_msg, sig_msg_len,
                              sig_loc, &sig_loc_len) != 0) {
         free(sig_loc);
@@ -750,25 +734,6 @@ static int nxms_ms_encrypt_packet_impl(const char *sender_id,
     return 0;
 }
 
-int nxms_ms_encrypt_packet(const char *sender_id,
-                           const char *to_id,
-                           const char *msg_type,
-                           const uint8_t escrow_id_raw[NXMS_ESCROW_ID_LEN],
-                           uint64_t seq,
-                           const uint8_t *recipient_pk_kem, size_t recipient_pk_kem_len,
-                           const uint8_t *sender_sk_sig, size_t sender_sk_sig_len,
-                           const uint8_t *plaintext, size_t plaintext_len,
-                           uint8_t **kem_ct, size_t *kem_ct_len,
-                           uint8_t **nonce, size_t *nonce_len,
-                           uint8_t **ciphertext, size_t *ciphertext_len,
-                           uint8_t **tag, size_t *tag_len,
-                           uint8_t **sig, size_t *sig_len) {
-    return nxms_ms_encrypt_packet_impl(
-        sender_id, to_id, msg_type, escrow_id_raw, seq, recipient_pk_kem, recipient_pk_kem_len,
-        sender_sk_sig, sender_sk_sig_len, NULL, plaintext, plaintext_len, kem_ct, kem_ct_len,
-        nonce, nonce_len, ciphertext, ciphertext_len, tag, tag_len, sig, sig_len);
-}
-
 int nxms_ms_encrypt_packet_with_signer(const char *sender_id,
                                        const char *to_id,
                                        const char *msg_type,
@@ -784,7 +749,7 @@ int nxms_ms_encrypt_packet_with_signer(const char *sender_id,
                                        uint8_t **sig, size_t *sig_len) {
     return nxms_ms_encrypt_packet_impl(
         sender_id, to_id, msg_type, escrow_id_raw, seq, recipient_pk_kem, recipient_pk_kem_len,
-        NULL, 0, signer, plaintext, plaintext_len, kem_ct, kem_ct_len, nonce, nonce_len,
+        signer, plaintext, plaintext_len, kem_ct, kem_ct_len, nonce, nonce_len,
         ciphertext, ciphertext_len, tag, tag_len, sig, sig_len);
 }
 

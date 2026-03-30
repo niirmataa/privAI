@@ -86,6 +86,7 @@ ff_falcon_keygen_with_rng(shake256_context *rng,
     return 0;
 }
 
+#if defined(NXMS_FALCON_AUDIT_RAW_API) && NXMS_FALCON_AUDIT_RAW_API
 static int
 ff_falcon_sign_ct_with_rng(shake256_context *rng,
                            const uint8_t *sk, size_t sk_len,
@@ -115,6 +116,7 @@ ff_falcon_sign_ct_with_rng(shake256_context *rng,
     free(tmp);
     return (r == 0) ? 0 : -1;
 }
+#endif
 
 static int
 ff_falcon_sign_ct_prepared_finish_with_rng(
@@ -237,6 +239,7 @@ ff_falcon_keygen_seeded(const uint8_t *seed, size_t seed_len,
     return ff_falcon_keygen_with_rng(&rng, sk, sk_len, pk, pk_len);
 }
 
+#if defined(NXMS_FALCON_AUDIT_RAW_API) && NXMS_FALCON_AUDIT_RAW_API
 int
 ff_falcon_sign_ct(const uint8_t *sk, size_t sk_len,
                   const uint8_t *msg, size_t msg_len,
@@ -259,6 +262,7 @@ ff_falcon_sign_ct_seeded(const uint8_t *seed, size_t seed_len,
     init_rng_from_seed(&rng, seed, seed_len);
     return ff_falcon_sign_ct_with_rng(&rng, sk, sk_len, msg, msg_len, sig, sig_len);
 }
+#endif
 
 int
 ff_falcon_prepare_sk(const uint8_t *sk, size_t sk_len,

@@ -1,4 +1,4 @@
-#![cfg(feature = "crypto")]
+#![cfg(all(feature = "crypto", feature = "falcon-audit-raw-api"))]
 
 use nxms_transport::crypto::{
     FF_FALCON_TEST_SEED_LEN, falcon_keygen_seeded, falcon_sign_ct_prepared_seeded,

@@ -21,6 +21,7 @@ zeroize = { version = "1", optional = true }
 default = ["crypto"]
 crypto = ["dep:base64", "dep:libc", "dep:zeroize"]
 security = ["dep:zeroize"]
+falcon-audit-raw-api = ["crypto"]
 
 [build-dependencies]
 cc = "1"

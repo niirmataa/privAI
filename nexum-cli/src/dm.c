@@ -57,7 +57,6 @@ static int ff_dm_encrypt_packet_impl(const char *sender_nick,
                                      const uint8_t *prekey_id_raw, size_t prekey_id_len,
                                      const uint8_t *pk_ot, size_t pk_ot_len,
                                      const ff_falcon_signer_ctx *sender_signer,
-                                     const uint8_t *sender_sk_sig, size_t sender_sk_sig_len,
                                      const uint8_t *plaintext, size_t plaintext_len,
                                      uint8_t **ct, size_t *ct_len,
                                      uint8_t **dm_nonce, size_t *dm_nonce_len,
@@ -65,7 +64,7 @@ static int ff_dm_encrypt_packet_impl(const char *sender_nick,
                                      uint8_t **tag, size_t *tag_len,
                                      uint8_t **sig, size_t *sig_len) {
     if (!sender_nick || !to_nick || !kem_id || !prekey_id_raw || prekey_id_len != 16 ||
-        !pk_ot || (!sender_signer && !sender_sk_sig) || !ct || !ct_len || !dm_nonce || !dm_nonce_len ||
+        !pk_ot || !sender_signer || !ct || !ct_len || !dm_nonce || !dm_nonce_len ||
         !ciphertext || !ciphertext_len || !tag || !tag_len || !sig || !sig_len) {
         return -1;
     }
@@ -180,9 +179,9 @@ static int ff_dm_encrypt_packet_impl(const char *sender_nick,
         goto encrypt_out;
     }
     size_t sig_loc_len = FF_FALCON_SIG_MAX;
-    if (ff_falcon_sign_ct_auto(sender_signer,
-                               sender_sk_sig, sender_sk_sig_len,
-                               sig_msg, sig_msg_len, sig_loc, &sig_loc_len) != 0) {
+    if (ff_falcon_sign_ct_with_ctx(sender_signer,
+                                   sig_msg, sig_msg_len,
+                                   sig_loc, &sig_loc_len) != 0) {
         free(sig_loc); sig_loc = NULL; free(sig_msg); sig_msg = NULL; free(tag_loc); tag_loc = NULL; free(aad); aad = NULL; free(ctext); ctext = NULL; free(nonce); nonce = NULL; free(ct_loc); sodium_memzero(ss, ss_len); free(ss);
         goto encrypt_out;
     }
@@ -205,31 +204,6 @@ encrypt_out:
     return enc_ret;
 }
 
-int ff_dm_encrypt_packet(const char *sender_nick,
-                         const char *to_nick,
-                         const char *kem_id,
-                         const uint8_t *prekey_id_raw, size_t prekey_id_len,
-                         const uint8_t *pk_ot, size_t pk_ot_len,
-                         const uint8_t *sender_sk_sig, size_t sender_sk_sig_len,
-                         const uint8_t *plaintext, size_t plaintext_len,
-                         uint8_t **ct, size_t *ct_len,
-                         uint8_t **dm_nonce, size_t *dm_nonce_len,
-                         uint8_t **ciphertext, size_t *ciphertext_len,
-                         uint8_t **tag, size_t *tag_len,
-                         uint8_t **sig, size_t *sig_len) {
-    return ff_dm_encrypt_packet_impl(sender_nick, to_nick, kem_id,
-                                     prekey_id_raw, prekey_id_len,
-                                     pk_ot, pk_ot_len,
-                                     NULL,
-                                     sender_sk_sig, sender_sk_sig_len,
-                                     plaintext, plaintext_len,
-                                     ct, ct_len,
-                                     dm_nonce, dm_nonce_len,
-                                     ciphertext, ciphertext_len,
-                                     tag, tag_len,
-                                     sig, sig_len);
-}
-
 int ff_dm_encrypt_packet_with_signer(const char *sender_nick,
                                      const char *to_nick,
                                      const char *kem_id,
@@ -246,7 +220,6 @@ int ff_dm_encrypt_packet_with_signer(const char *sender_nick,
                                      prekey_id_raw, prekey_id_len,
                                      pk_ot, pk_ot_len,
                                      sender_signer,
-                                     NULL, 0,
                                      plaintext, plaintext_len,
                                      ct, ct_len,
                                      dm_nonce, dm_nonce_len,

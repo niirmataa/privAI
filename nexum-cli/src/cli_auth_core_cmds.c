@@ -318,9 +318,8 @@ int cmd_register(const char *dir, const char *base, const char *nick, const char
 
     uint8_t sig[FF_FALCON_SIG_MAX];
     size_t sig_len = sizeof(sig);
-    if (ff_falcon_sign_ct_auto(v.falcon_signer,
-                               v.falcon_sk, v.falcon_sk_len,
-                               tr, tr_len, sig, &sig_len) != 0) {
+    if (ff_falcon_sign_ct_with_ctx(v.falcon_signer,
+                                   tr, tr_len, sig, &sig_len) != 0) {
         sodium_memzero(challenge, sizeof(challenge));
         sodium_memzero(tr, tr_len); free(tr);
         ff_pkt_free(&pkt);
@@ -479,9 +478,8 @@ int cmd_login(const char *dir, const char *base, const char *nick, const char *s
 
     uint8_t sig[FF_FALCON_SIG_MAX];
     size_t sig_len = sizeof(sig);
-    if (ff_falcon_sign_ct_auto(v.falcon_signer,
-                               v.falcon_sk, v.falcon_sk_len,
-                               tr, tr_len, sig, &sig_len) != 0) {
+    if (ff_falcon_sign_ct_with_ctx(v.falcon_signer,
+                                   tr, tr_len, sig, &sig_len) != 0) {
         sodium_memzero(challenge, sizeof(challenge));
         sodium_memzero(tr, tr_len); free(tr);
         ff_pkt_free(&pkt);
@@ -665,9 +663,8 @@ int cmd_respond(const char *dir, const char *challenge_path) {
 
     uint8_t sig[FF_FALCON_SIG_MAX];
     size_t sig_len = sizeof(sig);
-    if (ff_falcon_sign_ct_auto(v.falcon_signer,
-                               v.falcon_sk, v.falcon_sk_len,
-                               tr, tr_len, sig, &sig_len) != 0) {
+    if (ff_falcon_sign_ct_with_ctx(v.falcon_signer,
+                                   tr, tr_len, sig, &sig_len) != 0) {
         sodium_memzero(challenge, sizeof(challenge));
         sodium_memzero(tr, tr_len); free(tr);
         ff_pkt_free(&pkt);

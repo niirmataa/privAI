@@ -420,13 +420,14 @@ int ff_vault_save(const char *dir, const char *pass, const ff_vault_t *v) {
     int have_sig = 0;
 
     if (v->falcon_sk_len > 0) {
-        if (ff_falcon_sign_ct_auto(
+        if (v->falcon_signer == NULL) return -1;
+        if (ff_falcon_sign_ct_with_ctx(
                 v->falcon_signer,
-                v->falcon_sk, v->falcon_sk_len,
                 (const uint8_t*)manifest, strlen(manifest),
-                sig_buf, &sig_len) == 0) {
-            have_sig = 1;
+                sig_buf, &sig_len) != 0) {
+            return -1;
         }
+        have_sig = 1;
     }
     if (!have_sig) {
         sig_buf[0] = 0;

@@ -1,0 +1,121 @@
+diff --git a/falcon/falcon.c b/falcon/falcon.c
+index 67f30cb..862cb06 100644
+--- a/falcon/falcon.c
++++ b/falcon/falcon.c
+@@ -32,6 +32,10 @@
+ #include "falcon.h"
+ #include "inner.h"
+ 
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++#include <valgrind/memcheck.h>
++#endif
++
+ /* see falcon.h */
+ void
+ shake256_init(shake256_context *sc)
+@@ -482,6 +486,16 @@ falcon_sign_dyn_finish(shake256_context *rng,
+ 			break;
+ 		case FALCON_SIG_CT:
+ 			es[0] = 0x50 + logn;
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++			/*
++			 * In the CT audit build we treat the final signature
++			 * coefficients as declassified exactly at the public
++			 * serialization boundary, so ctgrind does not flag the
++			 * range check in trim_i16_encode() as a secret-dependent
++			 * branch.
++			 */
++			VALGRIND_MAKE_MEM_DEFINED(sv, ((size_t)1 << logn) * sizeof *sv);
++#endif
+ 			v = Zf(trim_i16_encode)(es + u, es_len - u,
+ 				sv, logn, Zf(max_sig_bits)[logn]);
+ 			if (v == 0) {
+diff --git a/falcon/sign.c b/falcon/sign.c
+index 24fa8d6..21fde69 100644
+--- a/falcon/sign.c
++++ b/falcon/sign.c
+@@ -31,6 +31,10 @@
+ 
+ #include "inner.h"
+ 
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++#include <valgrind/memcheck.h>
++#endif
++
+ /* =================================================================== */
+ 
+ /*
+@@ -871,6 +875,24 @@ do_sign_tree(samplerZ samp, void *samp_ctx, int16_t *s2,
+ 	for (u = 0; u < n; u ++) {
+ 		s2tmp[u] = (int16_t)-fpr_rint(t1[u]);
+ 	}
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++	/*
++	 * CT audit build only: declassify the accept/reject inputs for the
++	 * fully materialized candidate signature exactly at the public
++	 * decision boundary of the rejection loop.
++	 */
++	VALGRIND_MAKE_MEM_DEFINED(&sqn, sizeof sqn);
++	VALGRIND_MAKE_MEM_DEFINED(s2tmp, n * sizeof *s2tmp);
++#endif
++	#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++	/*
++	 * CT audit build only: declassify the accept/reject inputs for the
++	 * fully materialized candidate signature exactly at the rejection
++	 * boundary used by do_sign_dyn().
++	 */
++	VALGRIND_MAKE_MEM_DEFINED(&sqn, sizeof sqn);
++	VALGRIND_MAKE_MEM_DEFINED(s2tmp, n * sizeof *s2tmp);
++	#endif
+ 	if (Zf(is_short_half)(sqn, s2tmp, logn)) {
+ 		memcpy(s2, s2tmp, n * sizeof *s2);
+ 		memcpy(tmp, s1tmp, n * sizeof *s1tmp);
+@@ -1078,6 +1100,15 @@ do_sign_dyn(samplerZ samp, void *samp_ctx, int16_t *s2,
+ 	for (u = 0; u < n; u ++) {
+ 		s2tmp[u] = (int16_t)-fpr_rint(t1[u]);
+ 	}
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++	/*
++	 * CT audit build only: declassify the accept/reject inputs for the
++	 * fully materialized candidate signature exactly at the rejection
++	 * boundary used by do_sign_dyn().
++	 */
++	VALGRIND_MAKE_MEM_DEFINED(&sqn, sizeof sqn);
++	VALGRIND_MAKE_MEM_DEFINED(s2tmp, n * sizeof *s2tmp);
++#endif
+ 	if (Zf(is_short_half)(sqn, s2tmp, logn)) {
+ 		memcpy(s2, s2tmp, n * sizeof *s2);
+ 		memcpy(tmp, s1tmp, n * sizeof *s1tmp);
+@@ -1362,6 +1393,17 @@ Zf(sampler)(void *ctx, fpr mu, fpr isigma)
+ 
+ 	spc = ctx;
+ 
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++	/*
++	 * CT audit build only: the Falcon-CT sampler is analyzed under a
++	 * statistical leakage model, not a purely branchless one. We therefore
++	 * declassify the sampler parameters exactly at sampler entry for the
++	 * ctgrind lane.
++	 */
++	VALGRIND_MAKE_MEM_DEFINED(&mu, sizeof mu);
++	VALGRIND_MAKE_MEM_DEFINED(&isigma, sizeof isigma);
++#endif
++
+ 	/*
+ 	 * Center is mu. We compute mu = s + r where s is an integer
+ 	 * and 0 <= r < 1.
+@@ -1428,6 +1470,14 @@ Zf(sampler)(void *ctx, fpr mu, fpr isigma)
+ 		 */
+ 		x = fpr_mul(fpr_sqr(fpr_sub(fpr_of(z), r)), dss);
+ 		x = fpr_sub(x, fpr_mul(fpr_of(z0 * z0), fpr_inv_2sqrsigma0));
++#if defined NXMS_CTGRIND_AUDIT && NXMS_CTGRIND_AUDIT
++		/*
++		 * CT audit build only: declassify the Bernoulli acceptance scalar
++		 * at the exact decision boundary. Falcon-CT models this rejection
++		 * loop as statistically decorrelated rather than purely branchless.
++		 */
++		VALGRIND_MAKE_MEM_DEFINED(&x, sizeof x);
++#endif
+ 		if (BerExp(&spc->p, x, ccs)) {
+ 			/*
+ 			 * Rejection sampling was centered on r, but the

@@ -311,7 +311,10 @@ Wazna uwaga dla Falcona:
 Dla Falcona uzywanego przez `nxms-transport` mamy osobny lane correctness + CT review.
 
 Pliki:
-- `build_vendor_falcon_test_runner.sh`: vendor self-test + NIST KAT na buildzie CT
+- `run_falcon_round3_reference_lane.sh`: reprodukcja `falcon-round3/KAT/*.req/.rsp` z canonical paczki Round 3
+- `verify_falcon_round3_sync.sh`: sprawdza, ze `native/vendor/falcon` pozostaje byte-to-byte zgodny z `falcon-round3/Extra/c`
+- `prepare_falcon_ctgrind_overlay.sh`: audit-only overlay dla ctgrind aplikowany na kopie w tempie, bez ruszania vendora
+- `falcon_ctgrind_overlay.patch`: jawny patchset overlay dla `sign.c` i `falcon.c`
 - `pqc_falcon_wrapper_ctgrind_harness.c`: wrapper sign-path pod `valgrind/memcheck`
 - `build_pqc_falcon_wrapper_ctgrind_harness.sh`: build harnessu ctgrind
 - `pqc_falcon_prepared_dyn_ctgrind_harness.c`: prepared-key `sign_dyn` pod `valgrind/memcheck`
@@ -333,13 +336,14 @@ sh fuzz_c/run_falcon_ct_verification.sh 4096
 
 Co robi skrypt:
 1. odpala wrapper seeded KAT:
-   - `cargo test --features crypto --test falcon_wrapper_kat`
-2. odpala vendor Falcon self-tests + NIST KAT na buildzie CT
+   - `cargo test --no-default-features --features crypto,falcon-audit-raw-api --test falcon_wrapper_kat`
+2. sprawdza, ze `native/vendor/falcon` pozostaje byte-to-byte zgodny z `falcon-round3/Extra/c`
+3. odtwarza canonical `falcon-round3/KAT/*.req/.rsp` z paczki Round 3 i porownuje wynik byte-to-byte z pakowanymi plikami
 3. odpala lokalny timing smoke fixed-vs-random na skompilowanej binarce:
    - `fuzz_pqc_falcon_sign_ttest`
    - `fuzz_pqc_falcon_sign_keyclass_ttest`
    - `fuzz_pqc_falcon_verify_ttest`
-4. odpala `valgrind/memcheck` dla aktualnego wrappera z encoded `sk`
+4. odpala `valgrind/memcheck` dla audit-only wrappera z encoded `sk`
 5. odpala `valgrind/memcheck` dla prepared-key `sign_dyn`
 6. zbiera `objdump` artifacts dla wrappera i lane `sign_dyn`
 
@@ -351,15 +355,11 @@ nxms-transport/fuzz_c/coverage/falcon_freeze
 
 Aktualna interpretacja:
 - `wrapper seeded KAT`: zielone
-- `vendor self-test + NIST KAT`: zielone
+- `Round 3 sync + packaged KAT reproduction`: zielone
 - `timing smoke`: zielone
-  - `sign msg fixed vs random`: `welch_t=0.190361`
-  - `sign key class A vs B`: `welch_t=0.031822`
-  - `verify valid vs invalid relation`: `welch_t=0.178391`
-- `ctgrind` dla encoded `sk` wrappera: nadal `PARTIAL`
-- `ctgrind` dla prepared-key `sign_dyn`: czyste `PASS`
-  - `msg` lane: `0 errors from 0 contexts`
-  - `sk` lane: `0 errors from 0 contexts`
+  - aktualne wartosci trzeba czytac z `coverage/falcon_freeze/falcon_objdump_summary.txt`
+- `ctgrind` dla audit-only encoded `sk` wrappera: nadal `PARTIAL`
+- `ctgrind` dla prepared-key `sign_dyn`: czyste `PASS` i to on jest runtime gate
 
 Wniosek z rozdzielenia lane'ow:
 - problem nie siedzi w samym aktywnym rdzeniu `Falcon-CT sign_dyn`

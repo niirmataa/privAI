@@ -2,7 +2,7 @@
 
 use anyhow::{Context, Result, bail};
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use nxms_transport::crypto::{Keys, encrypt};
+use nxms_transport::crypto::{Keys, PreparedTransportSigner, encrypt_with_signer};
 use std::env;
 use std::fs;
 use std::ops::Range;
@@ -381,17 +381,18 @@ fn main() -> Result<()> {
     let sender_sig_pk = sender.sig_pk().context("sender sig pk")?;
     let recipient_kem_pk = recipient.kem_pk().context("recipient kem pk")?;
     let recipient_kem_sk = recipient.kem_sk_zeroizing().context("recipient kem sk")?;
+    let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).context("prepared signer")?;
 
     let variants = valid_variants();
     let base_variant = &variants[0];
-    let sealed = encrypt(
+    let sealed = encrypt_with_signer(
         &base_variant.sender_id,
         &base_variant.to_id,
         &base_variant.msg_type,
         &base_variant.escrow_id,
         base_variant.seq,
         &recipient_kem_pk,
-        sender_sig_sk.as_slice(),
+        &signer,
         &base_variant.plaintext,
     )
     .context("encrypt valid seed packet")?;
@@ -736,14 +737,14 @@ fn main() -> Result<()> {
     )?;
 
     for variant in variants.iter().skip(1) {
-        let sealed_variant = encrypt(
+        let sealed_variant = encrypt_with_signer(
             &variant.sender_id,
             &variant.to_id,
             &variant.msg_type,
             &variant.escrow_id,
             variant.seq,
             &recipient_kem_pk,
-            sender_sig_sk.as_slice(),
+            &signer,
             &variant.plaintext,
         )
         .with_context(|| format!("encrypt {}", variant.name))?;

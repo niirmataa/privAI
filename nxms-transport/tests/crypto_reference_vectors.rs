@@ -1,7 +1,9 @@
 #![cfg(feature = "crypto")]
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
-use nxms_transport::crypto::{Keys, decrypt, encrypt, falcon_verify, kem_decaps};
+use nxms_transport::crypto::{
+    Keys, PreparedTransportSigner, decrypt, encrypt_with_signer, falcon_verify, kem_decaps,
+};
 use sha3::{
     Shake256,
     digest::{ExtendableOutput, Update, XofReader},
@@ -204,19 +206,20 @@ fn c_transport_packet_matches_reference_reconstruction() {
     let sender_sig_pk = sender.sig_pk().expect("sender sig pk");
     let recipient_kem_pk = recipient.kem_pk().expect("recipient kem pk");
     let recipient_kem_sk = recipient.kem_sk_zeroizing().expect("recipient kem sk");
+    let signer = PreparedTransportSigner::new(sender_sig_sk.as_slice()).expect("prepared signer");
 
     let escrow_id = [0x55u8; 16];
     let seq = 23u64;
     let plaintext = b"cross-check against reference".to_vec();
 
-    let sealed = encrypt(
+    let sealed = encrypt_with_signer(
         "alice",
         "bob",
         "tx_sign_req",
         &escrow_id,
         seq,
         &recipient_kem_pk,
-        sender_sig_sk.as_slice(),
+        &signer,
         &plaintext,
     )
     .expect("encrypt");

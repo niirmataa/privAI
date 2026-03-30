@@ -226,6 +226,7 @@ ff_falcon_keygen(uint8_t *sk, size_t *sk_len, uint8_t *pk, size_t *pk_len)
     return 0;
 }
 
+#if defined(NXMS_FALCON_AUDIT_RAW_API) && NXMS_FALCON_AUDIT_RAW_API
 int
 ff_falcon_sign_ct(const uint8_t *sk, size_t sk_len,
                   const uint8_t *msg, size_t msg_len,
@@ -258,6 +259,7 @@ ff_falcon_sign_ct(const uint8_t *sk, size_t sk_len,
     free(tmp);
     return (r == 0) ? 0 : -1;
 }
+#endif
 
 ff_falcon_signer_ctx *
 ff_falcon_signer_ctx_new(const uint8_t *sk, size_t sk_len)
@@ -321,18 +323,6 @@ ff_falcon_sign_ct_with_ctx(const ff_falcon_signer_ctx *ctx,
         return -1;
     }
     return ff_falcon_sign_ct_prepared_with_rng(&rng, &ctx->prepared, msg, msg_len, sig, sig_len);
-}
-
-int
-ff_falcon_sign_ct_auto(const ff_falcon_signer_ctx *ctx,
-                       const uint8_t *sk, size_t sk_len,
-                       const uint8_t *msg, size_t msg_len,
-                       uint8_t *sig, size_t *sig_len)
-{
-    if (ctx != NULL) {
-        return ff_falcon_sign_ct_with_ctx(ctx, msg, msg_len, sig, sig_len);
-    }
-    return ff_falcon_sign_ct(sk, sk_len, msg, msg_len, sig, sig_len);
 }
 
 int

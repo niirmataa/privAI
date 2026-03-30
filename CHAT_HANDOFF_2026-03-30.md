@@ -2,6 +2,38 @@
 
 This file is the handoff for a new chat after a long implementation and audit session.
 
+## Update 2026-03-31
+
+Falcon audit status moved from "prepared path accepted, raw path still visible" to a cleaner production boundary:
+
+- raw Falcon signing surface is now compiled only behind explicit audit switches:
+  - Rust feature: `falcon-audit-raw-api`
+  - C define: `NXMS_FALCON_AUDIT_RAW_API=1`
+- default runtime builds of `nxms-transport` and `nexum-cli` stay on prepared signer flow only
+- canonical upstream package is now `falcon-round3/`
+- `nxms-transport/fuzz_c/verify_falcon_round3_sync.sh` checks that `native/vendor/falcon` remains byte-to-byte aligned with `falcon-round3/Extra/c`
+- `nxms-transport/fuzz_c/run_falcon_ct_verification.sh` now uses:
+  - wrapper seeded KAT under explicit audit feature gate
+  - Round 3 sync check
+  - Round 3 packaged KAT reproduction
+  - timing smoke
+  - legacy raw ctgrind as audit-only evidence
+  - prepared ctgrind as the runtime gate
+
+Fresh Alpine evidence from `2026-03-31`:
+
+- `cd /home/nxms-server/privAI/nxms-transport && sh fuzz_c/run_falcon_ct_verification.sh 2048`
+  - `legacy_ctgrind_sk_status=99`
+  - `legacy_ctgrind_msg_status=0`
+  - `prepared_ctgrind_sk_status=0`
+  - `prepared_ctgrind_msg_status=0`
+- `cd /home/nxms-server/privAI/nxms-transport && cargo test --features crypto --test crypto_roundtrip --test crypto_negative --test crypto_reference_vectors --test crypto_proptest`
+  - `PASS`
+- `cd /home/nxms-server/privAI/nxms-transport && cargo test --no-default-features --features crypto,falcon-audit-raw-api --test falcon_wrapper_kat`
+  - `PASS`
+- `cd /home/nxms-server/privAI/nexum-cli && make -j2`
+  - `PASS`
+
 ## Canonical environment
 
 - Canonical runtime and build environment: `WSL Alpine`

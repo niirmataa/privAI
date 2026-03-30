@@ -87,6 +87,7 @@ unsafe extern "C" {
         pk: *mut u8,
         pk_len: *mut usize,
     ) -> i32;
+    #[cfg(feature = "falcon-audit-raw-api")]
     fn ff_falcon_sign_ct(
         sk: *const u8,
         sk_len: usize,
@@ -95,6 +96,7 @@ unsafe extern "C" {
         sig: *mut u8,
         sig_len: *mut usize,
     ) -> i32;
+    #[cfg(feature = "falcon-audit-raw-api")]
     fn ff_falcon_sign_ct_seeded(
         seed: *const u8,
         seed_len: usize,
@@ -136,29 +138,6 @@ unsafe extern "C" {
         sig_len: usize,
     ) -> i32;
 
-    fn nxms_ms_encrypt_packet(
-        sender_id: *const c_char,
-        to_id: *const c_char,
-        msg_type: *const c_char,
-        escrow_id_raw: *const u8,
-        seq: u64,
-        recipient_pk_kem: *const u8,
-        recipient_pk_kem_len: usize,
-        sender_sk_sig: *const u8,
-        sender_sk_sig_len: usize,
-        plaintext: *const u8,
-        plaintext_len: usize,
-        kem_ct: *mut *mut u8,
-        kem_ct_len: *mut usize,
-        nonce: *mut *mut u8,
-        nonce_len: *mut usize,
-        ciphertext: *mut *mut u8,
-        ciphertext_len: *mut usize,
-        tag: *mut *mut u8,
-        tag_len: *mut usize,
-        sig: *mut *mut u8,
-        sig_len: *mut usize,
-    ) -> i32;
     fn nxms_ms_signer_ctx_new(
         sender_sk_sig: *const u8,
         sender_sk_sig_len: usize,
@@ -434,29 +413,6 @@ impl Drop for PreparedTransportSigner {
 type EncryptOutputs = (Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>, Vec<u8>);
 
 #[allow(clippy::too_many_arguments)]
-pub fn encrypt_for_context(
-    sender_id: &str,
-    to_id: &str,
-    msg_type: &str,
-    context_id: &[u8; NXMS_CONTEXT_ID_LEN],
-    seq: u64,
-    recipient_kem_pk: &[u8],
-    sender_sig_sk: &[u8],
-    plaintext: &[u8],
-) -> Result<SealedPacket> {
-    encrypt(
-        sender_id,
-        to_id,
-        msg_type,
-        context_id,
-        seq,
-        recipient_kem_pk,
-        sender_sig_sk,
-        plaintext,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn encrypt_for_context_with_signer(
     sender_id: &str,
     to_id: &str,
@@ -474,8 +430,7 @@ pub fn encrypt_for_context_with_signer(
         context_id,
         seq,
         recipient_kem_pk,
-        None,
-        Some(signer),
+        signer,
         plaintext,
     )
 }
@@ -504,30 +459,6 @@ pub fn decrypt_for_context(
 }
 
 #[allow(clippy::too_many_arguments)]
-pub fn encrypt(
-    sender_id: &str,
-    to_id: &str,
-    msg_type: &str,
-    escrow_id: &[u8; 16],
-    seq: u64,
-    recipient_kem_pk: &[u8],
-    sender_sig_sk: &[u8],
-    plaintext: &[u8],
-) -> Result<SealedPacket> {
-    encrypt_internal(
-        sender_id,
-        to_id,
-        msg_type,
-        escrow_id,
-        seq,
-        recipient_kem_pk,
-        Some(sender_sig_sk),
-        None,
-        plaintext,
-    )
-}
-
-#[allow(clippy::too_many_arguments)]
 pub fn encrypt_with_signer(
     sender_id: &str,
     to_id: &str,
@@ -545,8 +476,7 @@ pub fn encrypt_with_signer(
         escrow_id,
         seq,
         recipient_kem_pk,
-        None,
-        Some(signer),
+        signer,
         plaintext,
     )
 }
@@ -559,8 +489,7 @@ fn encrypt_internal(
     escrow_id: &[u8; 16],
     seq: u64,
     recipient_kem_pk: &[u8],
-    sender_sig_sk: Option<&[u8]>,
-    signer: Option<&PreparedTransportSigner>,
+    signer: &PreparedTransportSigner,
     plaintext: &[u8],
 ) -> Result<SealedPacket> {
     if plaintext.len() > NXMS_MAX_PAYLOAD {
@@ -577,17 +506,6 @@ fn encrypt_internal(
             NXMS_MAX_KEM_PK_LEN
         ));
     }
-    if signer.is_none() {
-        let sender_sig_sk = sender_sig_sk.ok_or_else(|| anyhow!("missing sender sig sk"))?;
-        if sender_sig_sk.is_empty() || sender_sig_sk.len() > NXMS_MAX_SIG_SK_LEN {
-            return Err(anyhow!(
-                "invalid sender sig sk length {} (expected 1..={})",
-                sender_sig_sk.len(),
-                NXMS_MAX_SIG_SK_LEN
-            ));
-        }
-    }
-
     let sender_id = CString::new(sender_id)?;
     let to_id = CString::new(to_id)?;
     let msg_type = CString::new(msg_type)?;
@@ -604,61 +522,32 @@ fn encrypt_internal(
     let mut sig_len: usize = 0;
 
     let rc = unsafe {
-        match signer {
-            Some(signer) => nxms_ms_encrypt_packet_with_signer(
-                sender_id.as_ptr(),
-                to_id.as_ptr(),
-                msg_type.as_ptr(),
-                escrow_id.as_ptr(),
-                seq,
-                recipient_kem_pk.as_ptr(),
-                recipient_kem_pk.len(),
-                signer.raw,
-                plaintext.as_ptr(),
-                plaintext.len(),
-                &mut kem_ct_ptr,
-                &mut kem_ct_len,
-                &mut nonce_ptr,
-                &mut nonce_len,
-                &mut ciphertext_ptr,
-                &mut ciphertext_len,
-                &mut tag_ptr,
-                &mut tag_len,
-                &mut sig_ptr,
-                &mut sig_len,
-            ),
-            None => {
-                let sender_sig_sk =
-                    sender_sig_sk.expect("sender_sig_sk validated when signer is absent");
-                nxms_ms_encrypt_packet(
-                    sender_id.as_ptr(),
-                    to_id.as_ptr(),
-                    msg_type.as_ptr(),
-                    escrow_id.as_ptr(),
-                    seq,
-                    recipient_kem_pk.as_ptr(),
-                    recipient_kem_pk.len(),
-                    sender_sig_sk.as_ptr(),
-                    sender_sig_sk.len(),
-                    plaintext.as_ptr(),
-                    plaintext.len(),
-                    &mut kem_ct_ptr,
-                    &mut kem_ct_len,
-                    &mut nonce_ptr,
-                    &mut nonce_len,
-                    &mut ciphertext_ptr,
-                    &mut ciphertext_len,
-                    &mut tag_ptr,
-                    &mut tag_len,
-                    &mut sig_ptr,
-                    &mut sig_len,
-                )
-            }
-        }
+        nxms_ms_encrypt_packet_with_signer(
+            sender_id.as_ptr(),
+            to_id.as_ptr(),
+            msg_type.as_ptr(),
+            escrow_id.as_ptr(),
+            seq,
+            recipient_kem_pk.as_ptr(),
+            recipient_kem_pk.len(),
+            signer.raw,
+            plaintext.as_ptr(),
+            plaintext.len(),
+            &mut kem_ct_ptr,
+            &mut kem_ct_len,
+            &mut nonce_ptr,
+            &mut nonce_len,
+            &mut ciphertext_ptr,
+            &mut ciphertext_len,
+            &mut tag_ptr,
+            &mut tag_len,
+            &mut sig_ptr,
+            &mut sig_len,
+        )
     };
     if rc != 0 {
         // C contract resets output pointers to NULL on error.
-        return Err(anyhow!("nxms_ms_encrypt_packet failed rc={}", rc));
+        return Err(anyhow!("nxms_ms_encrypt_packet_with_signer failed rc={}", rc));
     }
 
     let (kem_ct, nonce, ciphertext, tag, sig) = unsafe {
@@ -863,10 +752,12 @@ fn falcon_keygen_internal(
     Ok((Zeroizing::new(sig_sk), sig_pk))
 }
 
+#[cfg(feature = "falcon-audit-raw-api")]
 pub fn falcon_sign_ct(sig_sk: &[u8], msg: &[u8]) -> Result<Vec<u8>> {
     falcon_sign_ct_internal(None, sig_sk, msg)
 }
 
+#[cfg(feature = "falcon-audit-raw-api")]
 pub fn falcon_sign_ct_seeded(
     seed: &[u8; FF_FALCON_TEST_SEED_LEN],
     sig_sk: &[u8],
@@ -875,6 +766,7 @@ pub fn falcon_sign_ct_seeded(
     falcon_sign_ct_internal(Some(seed), sig_sk, msg)
 }
 
+#[cfg(feature = "falcon-audit-raw-api")]
 fn falcon_sign_ct_internal(
     seed: Option<&[u8; FF_FALCON_TEST_SEED_LEN]>,
     sig_sk: &[u8],

@@ -29,7 +29,11 @@ int ff_falcon_keygen_seeded(const uint8_t *seed, size_t seed_len,
                             uint8_t *sk, size_t *sk_len,
                             uint8_t *pk, size_t *pk_len);
 
-// CT signature. Caller provides sig buffer and sets *sig_len to max.
+#if defined(NXMS_FALCON_AUDIT_RAW_API) && NXMS_FALCON_AUDIT_RAW_API
+/*
+ * Audit/test-only raw signing surface. Production/runtime callers must
+ * stay on the prepared signer path instead.
+ */
 int ff_falcon_sign_ct(const uint8_t *sk, size_t sk_len,
                       const uint8_t *msg, size_t msg_len,
                       uint8_t *sig, size_t *sig_len);
@@ -38,6 +42,7 @@ int ff_falcon_sign_ct_seeded(const uint8_t *seed, size_t seed_len,
                              const uint8_t *sk, size_t sk_len,
                              const uint8_t *msg, size_t msg_len,
                              uint8_t *sig, size_t *sig_len);
+#endif
 
 /*
  * Prepared-key CT sign path for audits and long-lived signer processes.
