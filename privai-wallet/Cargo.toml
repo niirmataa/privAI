@@ -1,0 +1,15 @@
+[package]
+name = "privai-wallet"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Wallet state and note tracking for privAI hidden notes"
+
+[dependencies]
+blake3 = "1.5"
+nxms-transport = { path = "../nxms-transport" }
+privai-chain = { path = "../privai-chain" }
+privai-proof = { path = "../privai-proof" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"

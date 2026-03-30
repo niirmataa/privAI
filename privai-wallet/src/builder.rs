@@ -1,0 +1,307 @@
+use crate::error::WalletError;
+use crate::state::{OwnedNoteStatus, SpendMaterial};
+use crate::store::WalletStore;
+use crate::wallet::PrivaiWallet;
+use privai_chain::{
+    derive_aux_commit, AuxWitness, CanonicalEncode, Hash32, InputAuth, InputRef, LweCiphertext, OutputNote,
+    ReceiveBundle, RecipientBoxPlaintext, SpendPolicy, TransferNoteTx, TxCore,
+    TX_TYPE_TRANSFER_NOTE, PRIVAI_V0,
+};
+use privai_proof::{
+    TransferInputWitness, TransferOutputWitness, TransferProvingData, TransferStatement,
+    TransferWitness,
+};
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TransferOutputPlan {
+    pub bundle: ReceiveBundle,
+    pub amount: privai_chain::Amount14,
+    pub ct_amt: LweCiphertext,
+    pub witness_seed: Hash32,
+    pub nullifier_key: Hash32,
+    pub spend_policy: SpendPolicy,
+    pub noise_class: u8,
+    pub sender_memo: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuiltTransferNote {
+    pub tx: TransferNoteTx,
+    pub proof: TransferProvingData,
+}
+
+impl<S: WalletStore> PrivaiWallet<S> {
+    pub fn build_transfer_note(
+        &self,
+        spend: &SpendMaterial,
+        outputs: Vec<TransferOutputPlan>,
+        fee: u64,
+        auth: Vec<InputAuth>,
+    ) -> Result<BuiltTransferNote, WalletError> {
+        if outputs.is_empty() {
+            return Err(WalletError::NoTransferOutputs);
+        }
+
+        let tracked = self
+            .snapshot()
+            .owned_notes
+            .get(&spend.note_commit)
+            .ok_or(WalletError::UnknownNote(spend.note_commit))?;
+
+        if !matches!(tracked.status, OwnedNoteStatus::Spendable) {
+            return Err(WalletError::InputNoteNotSpendable(spend.note_commit));
+        }
+        if tracked.derived_nullifier != spend.nullifier
+            || tracked.opened.witness_seed != spend.witness_seed
+            || tracked.opened.nullifier_key != spend.nullifier_key
+            || tracked.opened.spend_policy_opening != spend.spend_policy_opening
+            || tracked.opened.aux_opening != spend.aux_opening
+        {
+            return Err(WalletError::SpendMaterialMismatch(spend.note_commit));
+        }
+
+        let required = outputs.iter().try_fold(fee, |acc, output| {
+            acc.checked_add(output.amount.value() as u64)
+        });
+        let Some(required) = required else {
+            return Err(WalletError::TransferArithmeticOverflow);
+        };
+        let available = spend.amount.value() as u64;
+        if available != required {
+            return Err(WalletError::TransferImbalance { available, required });
+        }
+
+        let mut built_outputs = Vec::with_capacity(outputs.len());
+        let mut output_witnesses = Vec::with_capacity(outputs.len());
+
+        for output in outputs {
+            let spend_policy_commit = output.spend_policy.commitment();
+            let aux_witness = AuxWitness {
+                version: PRIVAI_V0,
+                amount: output.amount,
+                witness_seed: output.witness_seed,
+                noise_class: output.noise_class,
+                bundle_id: output.bundle.bundle_id,
+            };
+            let aux_commit = derive_aux_commit(&aux_witness);
+            let note_payload_commit = OutputNote::payload_commit_from_parts(
+                PRIVAI_V0,
+                &spend_policy_commit,
+                &output.ct_amt,
+                &aux_commit,
+            );
+            let recipient_opening = RecipientBoxPlaintext {
+                version: PRIVAI_V0,
+                bundle_id: output.bundle.bundle_id,
+                note_payload_commit,
+                amount: output.amount,
+                witness_seed: output.witness_seed,
+                nullifier_key: output.nullifier_key,
+                spend_policy_opening: output.spend_policy.to_canonical_bytes(),
+                aux_opening: aux_witness.to_canonical_bytes(),
+                sender_memo: output.sender_memo,
+            };
+            let recipient_box = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            let note = OutputNote::new(
+                spend_policy_commit,
+                output.ct_amt,
+                aux_commit,
+                recipient_box,
+            );
+
+            output_witnesses.push(TransferOutputWitness {
+                note_commit: note.note_commit,
+                recipient_opening,
+            });
+            built_outputs.push(note);
+        }
+
+        let statement = TransferStatement {
+            input_note_commits: vec![spend.note_commit],
+            input_nullifiers: vec![spend.nullifier],
+            output_note_commits: built_outputs.iter().map(|note| note.note_commit).collect(),
+            fee,
+        };
+
+        let tx = TransferNoteTx {
+            core: TxCore {
+                version: PRIVAI_V0,
+                tx_type: TX_TYPE_TRANSFER_NOTE,
+                inputs: vec![InputRef {
+                    note_commit: spend.note_commit,
+                }],
+                input_nullifiers: vec![spend.nullifier],
+                outputs: built_outputs,
+                fee,
+                statement_commit: statement.commitment(),
+                auth,
+            },
+        };
+        tx.validate_shape().map_err(WalletError::TxShape)?;
+
+        let proof = TransferProvingData::from_tx_and_witness(
+            &tx,
+            TransferWitness {
+                input: TransferInputWitness {
+                    amount: spend.amount,
+                    witness_seed: spend.witness_seed,
+                    nullifier_key: spend.nullifier_key,
+                    spend_policy_opening: spend.spend_policy_opening.clone(),
+                    aux_opening: spend.aux_opening.clone(),
+                },
+                outputs: output_witnesses,
+            },
+        )
+        .map_err(WalletError::ProofBuild)?;
+
+        Ok(BuiltTransferNote { tx, proof })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::MemoryWalletStore;
+    use crate::wallet::PrivaiWallet;
+    use privai_chain::{Amount14, CanonicalEncode};
+
+    fn generated_bundle(expires_at: u64, route_hint: Option<Vec<u8>>) -> ReceiveBundle {
+        let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
+        wallet
+            .create_local_bundle(expires_at, 0, route_hint)
+            .expect("generated bundle")
+    }
+
+    fn sample_output_plan(bundle: ReceiveBundle, amount: u16) -> TransferOutputPlan {
+        TransferOutputPlan {
+            bundle,
+            amount: Amount14::new(amount).expect("amount"),
+            ct_amt: LweCiphertext::default(),
+            witness_seed: [0x41; 32],
+            nullifier_key: [0x42; 32],
+            spend_policy: SpendPolicy::Single {
+                falcon_pk_hash: [0x51; 32],
+            },
+            noise_class: 1,
+            sender_memo: Some(b"memo".to_vec()),
+        }
+    }
+
+    fn prepare_spendable_wallet() -> (PrivaiWallet<MemoryWalletStore>, SpendMaterial, ReceiveBundle) {
+        let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
+        let input_bundle = wallet
+            .create_local_bundle(100, 0, Some(vec![1, 2]))
+            .expect("input bundle");
+
+        let amount = Amount14::new(77).expect("amount");
+        let spend_policy = SpendPolicy::Single {
+            falcon_pk_hash: [0x31; 32],
+        };
+        let aux_witness = AuxWitness {
+            version: PRIVAI_V0,
+            amount,
+            witness_seed: [0x21; 32],
+            noise_class: 1,
+            bundle_id: input_bundle.bundle_id,
+        };
+        let aux_commit = derive_aux_commit(&aux_witness);
+        let note_payload_commit = OutputNote::payload_commit_from_parts(
+            PRIVAI_V0,
+            &spend_policy.commitment(),
+            &LweCiphertext::default(),
+            &aux_commit,
+        );
+        let opened = RecipientBoxPlaintext {
+            version: PRIVAI_V0,
+            bundle_id: input_bundle.bundle_id,
+            note_payload_commit,
+            amount,
+            witness_seed: [0x21; 32],
+            nullifier_key: [0x22; 32],
+            spend_policy_opening: spend_policy.to_canonical_bytes(),
+            aux_opening: aux_witness.to_canonical_bytes(),
+            sender_memo: Some(vec![9]),
+        };
+        let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&input_bundle, &opened)
+            .expect("seal input box");
+        let input_note = OutputNote::new(
+            spend_policy.commitment(),
+            LweCiphertext::default(),
+            aux_commit,
+            recipient_box,
+        );
+        wallet
+            .record_opened_note(input_note.clone(), opened)
+            .expect("record note");
+        let spend = wallet
+            .spend_material(&input_note.note_commit)
+            .expect("spend material");
+
+        let recipient_bundle = generated_bundle(200, Some(vec![5, 6]));
+
+        (wallet, spend, recipient_bundle)
+    }
+
+    #[test]
+    fn build_transfer_note_creates_tx_and_proof_data() {
+        let (wallet, spend, recipient_bundle) = prepare_spendable_wallet();
+        let built = wallet
+            .build_transfer_note(
+                &spend,
+                vec![
+                    sample_output_plan(recipient_bundle, 50),
+                    sample_output_plan(generated_bundle(201, None), 24),
+                ],
+                3,
+                Vec::new(),
+            )
+            .expect("build transfer");
+
+        assert_eq!(built.tx.core.inputs.len(), 1);
+        assert_eq!(built.tx.core.outputs.len(), 2);
+        assert_eq!(built.tx.core.statement_commit, built.proof.statement.commitment());
+        assert_eq!(
+            built.proof.public_inputs.output_note_commits,
+            built.tx.core.outputs.iter().map(|note| note.note_commit).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn build_transfer_note_rejects_imbalanced_amounts() {
+        let (wallet, spend, recipient_bundle) = prepare_spendable_wallet();
+        let err = wallet
+            .build_transfer_note(
+                &spend,
+                vec![sample_output_plan(recipient_bundle, 70)],
+                3,
+                Vec::new(),
+            )
+            .expect_err("must reject imbalance");
+
+        assert!(matches!(
+            err,
+            WalletError::TransferImbalance {
+                available: 77,
+                required: 73,
+            }
+        ));
+    }
+
+    #[test]
+    fn build_transfer_note_rejects_non_spendable_input() {
+        let (mut wallet, spend, recipient_bundle) = prepare_spendable_wallet();
+        wallet.mark_note_spent(spend.note_commit).expect("mark spent");
+
+        let err = wallet
+            .build_transfer_note(
+                &spend,
+                vec![sample_output_plan(recipient_bundle, 74)],
+                3,
+                Vec::new(),
+            )
+            .expect_err("must reject spent input");
+
+        assert!(matches!(err, WalletError::InputNoteNotSpendable(note_commit) if note_commit == spend.note_commit));
+    }
+}

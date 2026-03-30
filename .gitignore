@@ -1,0 +1,28 @@
+# Rust / Cargo
+**/target/
+
+# C / build artifacts
+**/*.o
+**/*.a
+**/*.so
+**/*.profraw
+**/*.profdata
+**/*.gcno
+**/*.gcda
+
+# Local binaries
+/nexum-cli/nexum
+/nxms-transport/fuzz_c/fuzz_*
+/nxms-transport/crash-*
+
+# Fuzz outputs
+/nxms-transport/fuzz_c/out*/
+/nxms-transport/fuzz_c/campaign*/
+/nxms-transport/fuzz_c/findings*/
+/nxms-transport/fuzz_c/coverage/
+
+# Windows ADS artifacts copied into WSL
+**/*_Zone.Identifier
+
+# General
+.DS_Store

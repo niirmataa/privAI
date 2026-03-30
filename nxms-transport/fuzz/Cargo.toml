@@ -1,0 +1,53 @@
+[package]
+name = "nxms-transport-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+base64 = "0.22"
+libfuzzer-sys = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+nxms-transport = { path = "..", features = ["crypto"] }
+
+[build-dependencies]
+cc = "1"
+
+[[bin]]
+name = "decrypt_fuzz"
+path = "fuzz_targets/decrypt_fuzz.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "kem_decaps_smoke"
+path = "fuzz_targets/kem_decaps_smoke.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "openssl_malloc_smoke"
+path = "fuzz_targets/openssl_malloc_smoke.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "openssl_malloc_shim_smoke"
+path = "fuzz_targets/openssl_malloc_shim_smoke.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "noop_smoke"
+path = "fuzz_targets/noop_smoke.rs"
+test = false
+doc = false
+bench = false

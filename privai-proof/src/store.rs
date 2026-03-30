@@ -1,0 +1,163 @@
+#![allow(warnings)]
+#![allow(warnings)]
+use std::collections::BTreeMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use serde::{Deserialize, Serialize};
+use thiserror::Error;
+
+use privai_chain::Hash32;
+
+use crate::artifact::BlockProofArtifacts;
+
+pub trait ProofArtifactStore {
+    fn load_block(&self, block_hash: &Hash32) -> Result<Option<BlockProofArtifacts>, ProofArtifactStoreError>;
+    fn save_block(&mut self, bundle: &BlockProofArtifacts) -> Result<(), ProofArtifactStoreError>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct MemoryProofArtifactStore {
+    bundles: BTreeMap<Hash32, BlockProofArtifacts>,
+}
+
+impl MemoryProofArtifactStore {
+    pub fn new() -> Self {
+        Self {
+            bundles: BTreeMap::new(),
+        }
+    }
+}
+
+impl ProofArtifactStore for MemoryProofArtifactStore {
+    fn load_block(&self, block_hash: &Hash32) -> Result<Option<BlockProofArtifacts>, ProofArtifactStoreError> {
+        Ok(self.bundles.get(block_hash).cloned())
+    }
+
+    fn save_block(&mut self, bundle: &BlockProofArtifacts) -> Result<(), ProofArtifactStoreError> {
+        self.bundles.insert(bundle.block_hash, bundle.clone());
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct FileSystemProofArtifactStore {
+    root: PathBuf,
+}
+
+impl FileSystemProofArtifactStore {
+    pub fn new(root: impl AsRef<Path>) -> Self {
+        Self {
+            root: root.as_ref().to_path_buf(),
+        }
+    }
+
+    fn block_path(&self, block_hash: &Hash32) -> PathBuf {
+        self.root.join(format!("{}.json", hex32(block_hash)))
+    }
+}
+
+impl ProofArtifactStore for FileSystemProofArtifactStore {
+    fn load_block(&self, block_hash: &Hash32) -> Result<Option<BlockProofArtifacts>, ProofArtifactStoreError> {
+        let path = self.block_path(block_hash);
+        if !path.exists() {
+            return Ok(None);
+        }
+        let bytes = fs::read(path)?;
+        Ok(Some(serde_json::from_slice(&bytes)?))
+    }
+
+    fn save_block(&mut self, bundle: &BlockProofArtifacts) -> Result<(), ProofArtifactStoreError> {
+        fs::create_dir_all(&self.root)?;
+        let path = self.block_path(&bundle.block_hash);
+        let bytes = serde_json::to_vec_pretty(bundle)?;
+        fs::write(path, bytes)?;
+        Ok(())
+    }
+}
+
+#[derive(Debug, Error)]
+pub enum ProofArtifactStoreError {
+    #[error(transparent)]
+    Io(#[from] std::io::Error),
+    #[error(transparent)]
+    Serde(#[from] serde_json::Error),
+}
+
+fn hex32(bytes: &Hash32) -> String {
+    let mut out = String::with_capacity(64);
+    for byte in bytes {
+        use std::fmt::Write as _;
+        let _ = write!(&mut out, "{byte:02x}");
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    use super::*;
+    use crate::artifact::{BatchProofArtifact, BlockProofArtifacts, BlockProofEntry};
+    use privai_chain::{ExecutionBundle, ExecutionMode};
+
+    fn sample_bundle() -> BlockProofArtifacts {
+        BlockProofArtifacts {
+            block_hash: [7; 32],
+            execution_bundle: ExecutionBundle {
+                statement_commits: vec![[1; 32]],
+                covered_tx_indexes: vec![0],
+                public_inputs_root: [2; 32],
+                execution_mode: ExecutionMode::FullBatchProof,
+            },
+            entries: vec![BlockProofEntry {
+                tx_index: 0,
+                statement_commit: [1; 32],
+                public_inputs_hash: [3; 32],
+            }],
+            artifacts: vec![BatchProofArtifact {
+                proof_system_id: 1,
+                statement_root: privai_chain::merkle_root([[1; 32]]),
+                public_inputs_root: privai_chain::merkle_root([[3; 32]]),
+                covered_tx_indexes: vec![0],
+                proof_bytes: vec![4, 5, 6],
+                prover_ids: vec![[8; 32]],
+                proof_meta_hash: [9; 32],
+            }],
+        }
+    }
+
+    #[test]
+    fn memory_store_roundtrips_block_artifacts() {
+        let bundle = sample_bundle();
+        let mut store = MemoryProofArtifactStore::new();
+        store.save_block(&bundle).expect("save");
+
+        assert_eq!(
+            store.load_block(&bundle.block_hash).expect("load"),
+            Some(bundle)
+        );
+    }
+
+    #[test]
+    fn filesystem_store_roundtrips_block_artifacts() {
+        let root = std::env::temp_dir().join(format!(
+            "privai-proof-store-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("time")
+                .as_nanos()
+        ));
+        let bundle = sample_bundle();
+        let mut store = FileSystemProofArtifactStore::new(&root);
+        store.save_block(&bundle).expect("save");
+
+        assert_eq!(
+            store.load_block(&bundle.block_hash).expect("load"),
+            Some(bundle)
+        );
+
+        let _ = std::fs::remove_dir_all(root);
+    }
+}
