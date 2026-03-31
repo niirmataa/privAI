@@ -25,6 +25,7 @@ pub const PACKED_LWE_CIPHERTEXT_LEN_V0: usize = packed_u32_field_len(LWE_CIPHERT
 pub const PACKED_LWE_PUBLIC_KEY_LEN_V0: usize = packed_u32_field_len(LWE_DIMENSION_V0);
 const POSEIDON_WIDTH: usize = 3;
 const POSEIDON_RATE: usize = 2;
+const DOT_REDUCTION_QUOTIENT_BITS: usize = 42;
 
 /// First concrete stage of the future PKE-LWE amount gadget.
 ///
@@ -44,6 +45,11 @@ pub struct LweAmountConfig {
     pub q_dot_first: Selector,
     pub q_dot_mul: Selector,
     pub q_dot_acc: Selector,
+    pub q_reduce_eq: Selector,
+    pub q_reduce_bind: Selector,
+    pub q_reduce_bit: Selector,
+    pub q_reduce_acc_first: Selector,
+    pub q_reduce_acc_step: Selector,
     pub limb_value: Column<Advice>,
     pub limb_lo: Column<Advice>,
     pub limb_hi: Column<Advice>,
@@ -51,6 +57,12 @@ pub struct LweAmountConfig {
     pub dot_value: Column<Advice>,
     pub dot_product: Column<Advice>,
     pub dot_accumulator: Column<Advice>,
+    pub reduce_coeff: Column<Fixed>,
+    pub reduce_full: Column<Advice>,
+    pub reduce_reduced: Column<Advice>,
+    pub reduce_quotient: Column<Advice>,
+    pub reduce_bit: Column<Advice>,
+    pub reduce_accumulator: Column<Advice>,
     pub packed_word: Column<Advice>,
     pub noise_value: Column<Advice>,
     pub table_u16: TableColumn,
@@ -85,6 +97,11 @@ impl LweAmountChip {
         let q_dot_first = meta.selector();
         let q_dot_mul = meta.selector();
         let q_dot_acc = meta.selector();
+        let q_reduce_eq = meta.selector();
+        let q_reduce_bind = meta.selector();
+        let q_reduce_bit = meta.selector();
+        let q_reduce_acc_first = meta.selector();
+        let q_reduce_acc_step = meta.selector();
         let limb_value = meta.advice_column();
         let limb_lo = meta.advice_column();
         let limb_hi = meta.advice_column();
@@ -92,6 +109,12 @@ impl LweAmountChip {
         let dot_value = meta.advice_column();
         let dot_product = meta.advice_column();
         let dot_accumulator = meta.advice_column();
+        let reduce_coeff = meta.fixed_column();
+        let reduce_full = meta.advice_column();
+        let reduce_reduced = meta.advice_column();
+        let reduce_quotient = meta.advice_column();
+        let reduce_bit = meta.advice_column();
+        let reduce_accumulator = meta.advice_column();
         let packed_word = meta.advice_column();
         let noise_value = meta.advice_column();
         let table_u16 = meta.lookup_table_column();
@@ -105,6 +128,9 @@ impl LweAmountChip {
         meta.enable_equality(limb_value);
         meta.enable_equality(dot_value);
         meta.enable_equality(dot_accumulator);
+        meta.enable_equality(reduce_full);
+        meta.enable_equality(reduce_reduced);
+        meta.enable_equality(reduce_quotient);
         meta.enable_equality(packed_word);
         meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
@@ -180,6 +206,50 @@ impl LweAmountChip {
             vec![q * (acc - prev_acc - product)]
         });
 
+        meta.create_gate("dot-product mod 2^32 equality", |meta| {
+            let q = meta.query_selector(q_reduce_eq);
+            let full = meta.query_advice(reduce_full, Rotation::cur());
+            let reduced = meta.query_advice(reduce_reduced, Rotation::cur());
+            let quotient = meta.query_advice(reduce_quotient, Rotation::cur());
+            let two_pow_32 = Expression::Constant(Fp::from(1u64 << 32));
+
+            vec![q * (full - reduced - quotient * two_pow_32)]
+        });
+
+        meta.create_gate("dot-product quotient bit is boolean", |meta| {
+            let q = meta.query_selector(q_reduce_bit);
+            let bit = meta.query_advice(reduce_bit, Rotation::cur());
+
+            vec![q * bit.clone() * (bit - Expression::Constant(Fp::from(1u64)))]
+        });
+
+        meta.create_gate("dot-product quotient accumulator init", |meta| {
+            let q = meta.query_selector(q_reduce_acc_first);
+            let coeff = meta.query_fixed(reduce_coeff);
+            let bit = meta.query_advice(reduce_bit, Rotation::cur());
+            let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
+
+            vec![q * (acc - bit * coeff)]
+        });
+
+        meta.create_gate("dot-product quotient accumulator step", |meta| {
+            let q = meta.query_selector(q_reduce_acc_step);
+            let coeff = meta.query_fixed(reduce_coeff);
+            let bit = meta.query_advice(reduce_bit, Rotation::cur());
+            let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
+            let prev_acc = meta.query_advice(reduce_accumulator, Rotation::prev());
+
+            vec![q * (acc - prev_acc - bit * coeff)]
+        });
+
+        meta.create_gate("dot-product quotient matches accumulated bits", |meta| {
+            let q = meta.query_selector(q_reduce_bind);
+            let quotient = meta.query_advice(reduce_quotient, Rotation::cur());
+            let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
+
+            vec![q * (quotient - acc)]
+        });
+
         let poseidon = Pow5Chip::configure::<P128Pow5T3>(
             meta,
             state,
@@ -195,6 +265,11 @@ impl LweAmountChip {
             q_dot_first,
             q_dot_mul,
             q_dot_acc,
+            q_reduce_eq,
+            q_reduce_bind,
+            q_reduce_bit,
+            q_reduce_acc_first,
+            q_reduce_acc_step,
             limb_value,
             limb_lo,
             limb_hi,
@@ -202,6 +277,12 @@ impl LweAmountChip {
             dot_value,
             dot_product,
             dot_accumulator,
+            reduce_coeff,
+            reduce_full,
+            reduce_reduced,
+            reduce_quotient,
+            reduce_bit,
+            reduce_accumulator,
             packed_word,
             noise_value,
             table_u16,
@@ -456,6 +537,89 @@ impl LweAmountChip {
         )
     }
 
+    pub fn assign_dot_product_mod_u32_reduction(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        full_value: AssignedCell<Fp, Fp>,
+        reduced_value: &AssignedCell<Fp, Fp>,
+        quotient: u64,
+    ) -> Result<(), Error> {
+        if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
+            return Err(Error::Synthesis);
+        }
+
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                let quotient_cell = region.assign_advice(
+                    || format!("{name}_quotient_0"),
+                    self.config.reduce_quotient,
+                    0,
+                    || Value::known(Fp::from(quotient)),
+                )?;
+                full_value.copy_advice(
+                    || format!("{name}_full"),
+                    &mut region,
+                    self.config.reduce_full,
+                    0,
+                )?;
+                reduced_value.copy_advice(
+                    || format!("{name}_reduced"),
+                    &mut region,
+                    self.config.reduce_reduced,
+                    0,
+                )?;
+
+                let mut running_acc = 0u64;
+                for offset in 0..DOT_REDUCTION_QUOTIENT_BITS {
+                    let coeff = 1u64 << offset;
+                    let bit = (quotient >> offset) & 1;
+                    running_acc += bit * coeff;
+
+                    region.assign_fixed(
+                        || format!("{name}_coeff_{offset}"),
+                        self.config.reduce_coeff,
+                        offset,
+                        || Value::known(Fp::from(coeff)),
+                    )?;
+                    region.assign_advice(
+                        || format!("{name}_bit_{offset}"),
+                        self.config.reduce_bit,
+                        offset,
+                        || Value::known(Fp::from(bit)),
+                    )?;
+                    region.assign_advice(
+                        || format!("{name}_acc_{offset}"),
+                        self.config.reduce_accumulator,
+                        offset,
+                        || Value::known(Fp::from(running_acc)),
+                    )?;
+
+                    self.config.q_reduce_bit.enable(&mut region, offset)?;
+                    if offset == 0 {
+                        self.config.q_reduce_eq.enable(&mut region, offset)?;
+                        self.config.q_reduce_acc_first.enable(&mut region, offset)?;
+                    } else {
+                        self.config.q_reduce_acc_step.enable(&mut region, offset)?;
+                    }
+
+                    if offset == DOT_REDUCTION_QUOTIENT_BITS - 1 {
+                        quotient_cell.copy_advice(
+                            || format!("{name}_quotient_final"),
+                            &mut region,
+                            self.config.reduce_quotient,
+                            offset,
+                        )?;
+                        self.config.q_reduce_bind.enable(&mut region, offset)?;
+                    }
+                }
+
+                Ok(())
+            },
+        )
+    }
+
     pub fn assign(
         &self,
         mut layouter: impl Layouter<Fp>,
@@ -667,6 +831,73 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct LweAmountSingleColumnReductionCircuit {
+        u: [u32; LWE_DIMENSION_V0],
+        v: u32,
+        t: [u32; LWE_DIMENSION_V0],
+        r: [u32; LWE_DIMENSION_V0],
+        coeffs: [u32; LWE_DIMENSION_V0],
+        quotient: u64,
+    }
+
+    impl Default for LweAmountSingleColumnReductionCircuit {
+        fn default() -> Self {
+            Self {
+                u: [0; LWE_DIMENSION_V0],
+                v: 0,
+                t: [0; LWE_DIMENSION_V0],
+                r: [0; LWE_DIMENSION_V0],
+                coeffs: [0; LWE_DIMENSION_V0],
+                quotient: 0,
+            }
+        }
+    }
+
+    impl Circuit<Fp> for LweAmountSingleColumnReductionCircuit {
+        type Config = LweAmountConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            LweAmountChip::configure(meta)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
+            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
+            let outputs = chip.assign(
+                layouter.namespace(|| "assign lwe amount"),
+                &self.u,
+                self.v,
+                &self.t,
+                &self.r,
+            )?;
+            let dot_output = chip.assign_fixed_dot_product_scaffold(
+                layouter.namespace(|| "column_0 dot scaffold"),
+                "column_0_dot",
+                &self.coeffs,
+                &outputs.r_cells,
+            )?;
+            chip.assign_dot_product_mod_u32_reduction(
+                layouter.namespace(|| "column_0 reduction"),
+                "column_0_reduction",
+                dot_output,
+                &outputs.u_cells[0],
+                self.quotient,
+            )?;
+            layouter.constrain_instance(outputs.u_cells[0].cell(), config.ct_amt_commit, 1)?;
+            Ok(())
+        }
+    }
+
     impl Circuit<Fp> for LweAmountDotProductCircuit {
         type Config = LweAmountConfig;
         type FloorPlanner = SimpleFloorPlanner;
@@ -815,6 +1046,88 @@ mod tests {
             18,
             &circuit,
             vec![vec![ct_commit, Fp::from(123456u64)], vec![t_commit]],
+        )
+        .expect("mock prover");
+        assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_single_column_reduction_accepts_expected_u0() {
+        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
+        let dot = coeffs
+            .iter()
+            .zip(r.iter())
+            .fold(0u128, |acc, (&coeff, &value)| {
+                acc + (coeff as u128) * (value as u128)
+            });
+        let expected_u0 = coeffs
+            .iter()
+            .zip(r.iter())
+            .fold(0u32, |acc, (&coeff, &value)| acc.wrapping_add(coeff.wrapping_mul(value)));
+        let quotient = (dot >> 32) as u64;
+
+        let mut u = [0u32; LWE_DIMENSION_V0];
+        u[0] = expected_u0;
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountSingleColumnReductionCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+            quotient,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+        )
+        .expect("mock prover");
+        prover.assert_satisfied();
+    }
+
+    #[test]
+    fn lwe_amount_single_column_reduction_rejects_wrong_quotient() {
+        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
+        let dot = coeffs
+            .iter()
+            .zip(r.iter())
+            .fold(0u128, |acc, (&coeff, &value)| {
+                acc + (coeff as u128) * (value as u128)
+            });
+        let expected_u0 = coeffs
+            .iter()
+            .zip(r.iter())
+            .fold(0u32, |acc, (&coeff, &value)| acc.wrapping_add(coeff.wrapping_mul(value)));
+        let quotient = (dot >> 32) as u64;
+
+        let mut u = [0u32; LWE_DIMENSION_V0];
+        u[0] = expected_u0;
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountSingleColumnReductionCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+            quotient: quotient + 1,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());
