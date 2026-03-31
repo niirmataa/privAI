@@ -48,6 +48,7 @@ pub struct LweAmountConfig {
     pub q_lt_modulus: Selector,
     pub q_dot_first: Selector,
     pub q_dot_mul: Selector,
+    pub q_dot_advice_mul: Selector,
     pub q_dot_acc: Selector,
     pub q_reduce_eq: Selector,
     pub q_reduce_bind: Selector,
@@ -61,6 +62,7 @@ pub struct LweAmountConfig {
     pub lt_q_slack: Column<Advice>,
     pub dot_coeff: Column<Fixed>,
     pub dot_value: Column<Advice>,
+    pub dot_other_value: Column<Advice>,
     pub dot_product: Column<Advice>,
     pub dot_accumulator: Column<Advice>,
     pub reduce_coeff: Column<Fixed>,
@@ -108,6 +110,7 @@ impl LweAmountChip {
         let q_lt_modulus = meta.complex_selector();
         let q_dot_first = meta.selector();
         let q_dot_mul = meta.selector();
+        let q_dot_advice_mul = meta.selector();
         let q_dot_acc = meta.selector();
         let q_reduce_eq = meta.selector();
         let q_reduce_bind = meta.selector();
@@ -121,6 +124,7 @@ impl LweAmountChip {
         let lt_q_slack = meta.advice_column();
         let dot_coeff = meta.fixed_column();
         let dot_value = meta.advice_column();
+        let dot_other_value = meta.advice_column();
         let dot_product = meta.advice_column();
         let dot_accumulator = meta.advice_column();
         let reduce_coeff = meta.fixed_column();
@@ -147,6 +151,7 @@ impl LweAmountChip {
         meta.enable_equality(limb_value);
         meta.enable_equality(lt_q_slack);
         meta.enable_equality(dot_value);
+        meta.enable_equality(dot_other_value);
         meta.enable_equality(dot_accumulator);
         meta.enable_equality(reduce_full);
         meta.enable_equality(reduce_reduced);
@@ -240,6 +245,15 @@ impl LweAmountChip {
             let product = meta.query_advice(dot_product, Rotation::cur());
 
             vec![q * (product - coeff * value)]
+        });
+
+        meta.create_gate("advice dot product multiply step", |meta| {
+            let q = meta.query_selector(q_dot_advice_mul);
+            let left = meta.query_advice(dot_value, Rotation::cur());
+            let right = meta.query_advice(dot_other_value, Rotation::cur());
+            let product = meta.query_advice(dot_product, Rotation::cur());
+
+            vec![q * (product - left * right)]
         });
 
         meta.create_gate("fixed-coefficient dot product accumulator init", |meta| {
@@ -338,6 +352,7 @@ impl LweAmountChip {
             q_lt_modulus,
             q_dot_first,
             q_dot_mul,
+            q_dot_advice_mul,
             q_dot_acc,
             q_reduce_eq,
             q_reduce_bind,
@@ -351,6 +366,7 @@ impl LweAmountChip {
             lt_q_slack,
             dot_coeff,
             dot_value,
+            dot_other_value,
             dot_product,
             dot_accumulator,
             reduce_coeff,
@@ -689,6 +705,75 @@ impl LweAmountChip {
 
                     let acc_value = value_fp.map(|value| {
                         running_acc += coeff_fp * value;
+                        running_acc
+                    });
+                    let acc_cell = region.assign_advice(
+                        || format!("{name}_acc_{offset}"),
+                        self.config.dot_accumulator,
+                        offset,
+                        || acc_value,
+                    )?;
+                    last_acc = Some(acc_cell);
+                }
+
+                last_acc.ok_or(Error::Synthesis)
+            },
+        )
+    }
+
+    pub fn assign_advice_dot_product_scaffold(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        left_cells: &[AssignedCell<Fp, Fp>],
+        right_cells: &[AssignedCell<Fp, Fp>],
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        if left_cells.len() != LWE_DIMENSION_V0 || right_cells.len() != LWE_DIMENSION_V0 {
+            return Err(Error::Synthesis);
+        }
+
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                let mut running_acc = Fp::from(0u64);
+                let mut last_acc = None;
+
+                for (offset, (left_cell, right_cell)) in
+                    left_cells.iter().zip(right_cells.iter()).enumerate()
+                {
+                    let left_fp = left_cell.value().map(|value| *value);
+                    let right_fp = right_cell.value().map(|value| *value);
+                    let product_fp = left_fp.zip(right_fp).map(|(left, right)| left * right);
+
+                    self.config.q_dot_advice_mul.enable(&mut region, offset)?;
+                    if offset == 0 {
+                        self.config.q_dot_first.enable(&mut region, offset)?;
+                    } else {
+                        self.config.q_dot_acc.enable(&mut region, offset)?;
+                    }
+
+                    left_cell.copy_advice(
+                        || format!("{name}_left_{offset}"),
+                        &mut region,
+                        self.config.dot_value,
+                        offset,
+                    )?;
+                    right_cell.copy_advice(
+                        || format!("{name}_right_{offset}"),
+                        &mut region,
+                        self.config.dot_other_value,
+                        offset,
+                    )?;
+
+                    region.assign_advice(
+                        || format!("{name}_product_{offset}"),
+                        self.config.dot_product,
+                        offset,
+                        || product_fp,
+                    )?;
+
+                    let acc_value = left_fp.zip(right_fp).map(|(left, right)| {
+                        running_acc += left * right;
                         running_acc
                     });
                     let acc_cell = region.assign_advice(
@@ -1095,6 +1180,25 @@ mod tests {
     }
 
     #[derive(Clone)]
+    struct LweAmountAdviceDotProductCircuit {
+        u: [u32; LWE_DIMENSION_V0],
+        v: u32,
+        t: [u32; LWE_DIMENSION_V0],
+        r: [u32; LWE_DIMENSION_V0],
+    }
+
+    impl Default for LweAmountAdviceDotProductCircuit {
+        fn default() -> Self {
+            Self {
+                u: [0; LWE_DIMENSION_V0],
+                v: 0,
+                t: [0; LWE_DIMENSION_V0],
+                r: [0; LWE_DIMENSION_V0],
+            }
+        }
+    }
+
+    #[derive(Clone)]
     struct LweAmountSingleColumnReductionCircuit {
         u: [u32; LWE_DIMENSION_V0],
         v: u32,
@@ -1311,6 +1415,43 @@ mod tests {
         }
     }
 
+    impl Circuit<Fp> for LweAmountAdviceDotProductCircuit {
+        type Config = LweAmountConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            LweAmountChip::configure(meta)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
+            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
+            let outputs = chip.assign(
+                layouter.namespace(|| "assign lwe amount"),
+                &self.u,
+                self.v,
+                &self.t,
+                &self.r,
+            )?;
+            let dot_output = chip.assign_advice_dot_product_scaffold(
+                layouter.namespace(|| "advice dot scaffold"),
+                "advice_dot_scaffold",
+                &outputs.t_cells,
+                &outputs.r_cells,
+            )?;
+            layouter.constrain_instance(dot_output.cell(), config.ct_amt_commit, 1)?;
+            Ok(())
+        }
+    }
+
     #[test]
     fn lwe_amount_chip_accepts_expected_public_commitments() {
         let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
@@ -1433,6 +1574,52 @@ mod tests {
             r,
             coeffs,
         };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(123456u64)], vec![t_commit]],
+        )
+        .expect("mock prover");
+        assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_advice_dot_product_scaffold_accepts_expected_output() {
+        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+        let expected_dot = t
+            .iter()
+            .zip(r.iter())
+            .fold(Fp::from(0u64), |acc, (&left, &right)| {
+                acc + Fp::from(left as u64) * Fp::from(right as u64)
+            });
+
+        let circuit = LweAmountAdviceDotProductCircuit { u, v, t, r };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, expected_dot], vec![t_commit]],
+        )
+        .expect("mock prover");
+        prover.assert_satisfied();
+    }
+
+    #[test]
+    fn lwe_amount_advice_dot_product_scaffold_rejects_wrong_output() {
+        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountAdviceDotProductCircuit { u, v, t, r };
         let prover = MockProver::run(
             18,
             &circuit,
