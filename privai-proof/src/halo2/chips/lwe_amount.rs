@@ -7,7 +7,10 @@ use halo2_gadgets::poseidon::{
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
-    plonk::{Advice, Column, ConstraintSystem, Error, Expression, Instance, Selector, TableColumn},
+    plonk::{
+        Advice, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector,
+        TableColumn,
+    },
     poly::Rotation,
 };
 
@@ -38,9 +41,16 @@ pub struct LweAmountConfig {
     pub poseidon: Pow5Config<Fp, POSEIDON_WIDTH, POSEIDON_RATE>,
     pub q_pack: Selector,
     pub q_limb: Selector,
+    pub q_dot_first: Selector,
+    pub q_dot_mul: Selector,
+    pub q_dot_acc: Selector,
     pub limb_value: Column<Advice>,
     pub limb_lo: Column<Advice>,
     pub limb_hi: Column<Advice>,
+    pub dot_coeff: Column<Fixed>,
+    pub dot_value: Column<Advice>,
+    pub dot_product: Column<Advice>,
+    pub dot_accumulator: Column<Advice>,
     pub packed_word: Column<Advice>,
     pub noise_value: Column<Advice>,
     pub table_u16: TableColumn,
@@ -72,9 +82,16 @@ impl LweAmountChip {
         let rc_b = array::from_fn(|_| meta.fixed_column());
         let q_pack = meta.selector();
         let q_limb = meta.complex_selector();
+        let q_dot_first = meta.selector();
+        let q_dot_mul = meta.selector();
+        let q_dot_acc = meta.selector();
         let limb_value = meta.advice_column();
         let limb_lo = meta.advice_column();
         let limb_hi = meta.advice_column();
+        let dot_coeff = meta.fixed_column();
+        let dot_value = meta.advice_column();
+        let dot_product = meta.advice_column();
+        let dot_accumulator = meta.advice_column();
         let packed_word = meta.advice_column();
         let noise_value = meta.advice_column();
         let table_u16 = meta.lookup_table_column();
@@ -86,6 +103,8 @@ impl LweAmountChip {
             meta.enable_equality(column);
         }
         meta.enable_equality(limb_value);
+        meta.enable_equality(dot_value);
+        meta.enable_equality(dot_accumulator);
         meta.enable_equality(packed_word);
         meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
@@ -135,6 +154,32 @@ impl LweAmountChip {
             vec![q * (packed - acc)]
         });
 
+        meta.create_gate("fixed-coefficient dot product multiply step", |meta| {
+            let q = meta.query_selector(q_dot_mul);
+            let coeff = meta.query_fixed(dot_coeff);
+            let value = meta.query_advice(dot_value, Rotation::cur());
+            let product = meta.query_advice(dot_product, Rotation::cur());
+
+            vec![q * (product - coeff * value)]
+        });
+
+        meta.create_gate("fixed-coefficient dot product accumulator init", |meta| {
+            let q = meta.query_selector(q_dot_first);
+            let acc = meta.query_advice(dot_accumulator, Rotation::cur());
+            let product = meta.query_advice(dot_product, Rotation::cur());
+
+            vec![q * (acc - product)]
+        });
+
+        meta.create_gate("fixed-coefficient dot product accumulator step", |meta| {
+            let q = meta.query_selector(q_dot_acc);
+            let acc = meta.query_advice(dot_accumulator, Rotation::cur());
+            let prev_acc = meta.query_advice(dot_accumulator, Rotation::prev());
+            let product = meta.query_advice(dot_product, Rotation::cur());
+
+            vec![q * (acc - prev_acc - product)]
+        });
+
         let poseidon = Pow5Chip::configure::<P128Pow5T3>(
             meta,
             state,
@@ -147,9 +192,16 @@ impl LweAmountChip {
             poseidon,
             q_pack,
             q_limb,
+            q_dot_first,
+            q_dot_mul,
+            q_dot_acc,
             limb_value,
             limb_lo,
             limb_hi,
+            dot_coeff,
+            dot_value,
+            dot_product,
+            dot_accumulator,
             packed_word,
             noise_value,
             table_u16,
@@ -332,6 +384,74 @@ impl LweAmountChip {
                     LWE_DIMENSION_V0,
                 )?;
                 Ok(())
+            },
+        )
+    }
+
+    pub fn assign_fixed_dot_product_scaffold(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        coeffs: &[u32; LWE_DIMENSION_V0],
+        value_cells: &[AssignedCell<Fp, Fp>],
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        if value_cells.len() != LWE_DIMENSION_V0 {
+            return Err(Error::Synthesis);
+        }
+
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                let mut running_acc = Fp::from(0u64);
+                let mut last_acc = None;
+
+                for (offset, (&coeff, value_cell)) in coeffs.iter().zip(value_cells.iter()).enumerate() {
+                    let coeff_fp = Fp::from(coeff as u64);
+                    let value_fp = value_cell.value().map(|value| *value);
+                    let product_fp = value_fp.map(|value| coeff_fp * value);
+
+                    self.config.q_dot_mul.enable(&mut region, offset)?;
+                    if offset == 0 {
+                        self.config.q_dot_first.enable(&mut region, offset)?;
+                    } else {
+                        self.config.q_dot_acc.enable(&mut region, offset)?;
+                    }
+
+                    region.assign_fixed(
+                        || format!("{name}_coeff_{offset}"),
+                        self.config.dot_coeff,
+                        offset,
+                        || Value::known(coeff_fp),
+                    )?;
+
+                    value_cell.copy_advice(
+                        || format!("{name}_value_{offset}"),
+                        &mut region,
+                        self.config.dot_value,
+                        offset,
+                    )?;
+
+                    region.assign_advice(
+                        || format!("{name}_product_{offset}"),
+                        self.config.dot_product,
+                        offset,
+                        || product_fp,
+                    )?;
+
+                    let acc_value = value_fp.map(|value| {
+                        running_acc += coeff_fp * value;
+                        running_acc
+                    });
+                    let acc_cell = region.assign_advice(
+                        || format!("{name}_acc_{offset}"),
+                        self.config.dot_accumulator,
+                        offset,
+                        || acc_value,
+                    )?;
+                    last_acc = Some(acc_cell);
+                }
+
+                last_acc.ok_or(Error::Synthesis)
             },
         )
     }
@@ -526,6 +646,64 @@ mod tests {
         }
     }
 
+    #[derive(Clone)]
+    struct LweAmountDotProductCircuit {
+        u: [u32; LWE_DIMENSION_V0],
+        v: u32,
+        t: [u32; LWE_DIMENSION_V0],
+        r: [u32; LWE_DIMENSION_V0],
+        coeffs: [u32; LWE_DIMENSION_V0],
+    }
+
+    impl Default for LweAmountDotProductCircuit {
+        fn default() -> Self {
+            Self {
+                u: [0; LWE_DIMENSION_V0],
+                v: 0,
+                t: [0; LWE_DIMENSION_V0],
+                r: [0; LWE_DIMENSION_V0],
+                coeffs: [0; LWE_DIMENSION_V0],
+            }
+        }
+    }
+
+    impl Circuit<Fp> for LweAmountDotProductCircuit {
+        type Config = LweAmountConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            LweAmountChip::configure(meta)
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
+            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
+            let outputs = chip.assign(
+                layouter.namespace(|| "assign lwe amount"),
+                &self.u,
+                self.v,
+                &self.t,
+                &self.r,
+            )?;
+            let dot_output = chip.assign_fixed_dot_product_scaffold(
+                layouter.namespace(|| "dot scaffold"),
+                "dot_scaffold",
+                &self.coeffs,
+                &outputs.r_cells,
+            )?;
+            layouter.constrain_instance(dot_output.cell(), config.ct_amt_commit, 1)?;
+            Ok(())
+        }
+    }
+
     #[test]
     fn lwe_amount_chip_accepts_expected_public_commitments() {
         let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
@@ -577,6 +755,66 @@ mod tests {
             17,
             &circuit,
             vec![vec![ct_commit], vec![wrong_t_commit]],
+        )
+        .expect("mock prover");
+        assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_fixed_dot_product_scaffold_accepts_expected_output() {
+        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
+        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(5));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+        let expected_dot = coeffs
+            .iter()
+            .zip(r.iter())
+            .fold(Fp::from(0u64), |acc, (&coeff, &value)| {
+                acc + Fp::from(coeff as u64) * Fp::from(value as u64)
+            });
+
+        let circuit = LweAmountDotProductCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, expected_dot], vec![t_commit]],
+        )
+        .expect("mock prover");
+        prover.assert_satisfied();
+    }
+
+    #[test]
+    fn lwe_amount_fixed_dot_product_scaffold_rejects_wrong_output() {
+        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
+        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(5));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountDotProductCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(123456u64)], vec![t_commit]],
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());
