@@ -15,6 +15,16 @@ System ma laczyc:
 
 Projekt nie jest wrapperem na inny chain. Budujemy wlasny stos pod wlasne komponenty.
 
+Ekonomia i produktowy model platnosci dla v0 sa opisane osobno w:
+
+- `PRIVAI_V0_PAYMENTS_AND_ECONOMICS.md`
+
+W szczegolnosci dokument ekonomiczny rozroznia:
+
+- `FullPrivacy` dla pelnych prywatnych settlementow,
+- `RecipientPrivacyLite` jako opcjonalny tryb dla drobnych platnosci
+  (`ukryty adres + jawna kwota`).
+
 ## 2. Zasady architektoniczne
 
 Kazdy komponent ma jedna glowna role:
