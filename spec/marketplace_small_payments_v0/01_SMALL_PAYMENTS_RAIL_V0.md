@@ -278,7 +278,7 @@ Przy zakupie wallet:
 1. wybiera rail,
 2. wybiera ticket,
 3. tworzy `purchase_commit`,
-4. wiąze purchase z merchant / service context,
+4. wiaze purchase z merchant / service context,
 5. podpisuje lub autoryzuje debit.
 
 ## 7.4. On-chain lightweight debit
@@ -304,7 +304,7 @@ Chain nie uczy sie:
 Merchant lub marketplace generuje receipt:
 
 - potwierdza wykonanie uslugi
-- wiąże wynik z `purchase_commit`
+- wiaze wynik z `purchase_commit`
 - przygotowuje dane do settlementu
 
 ## 7.6. Batch settlement
@@ -355,7 +355,7 @@ Opcjonalny dodatkowy marker:
 
 ## 8.3. Merchant / service binding
 
-Każdy debit powinien byc zwiazany co najmniej z:
+Kazdy debit powinien byc zwiazany co najmniej z:
 
 - `merchant_commit`
 - `service_commit`

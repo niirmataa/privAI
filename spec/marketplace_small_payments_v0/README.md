@@ -1,0 +1,24 @@
+# Marketplace Small Payments v0
+
+Ten katalog zawiera materialy specyfikacyjne dla lekkiego raila malych platnosci w `privAI v0`.
+
+To nie jest audyt.
+To nie jest tez finalna implementacja.
+
+To jest warstwa:
+
+- zalozen,
+- polityk prywatnosci,
+- modelu danych,
+- flow,
+- readiness przed implementacja.
+
+Pliki w tym katalogu:
+
+- `00_PREIMPLEMENTATION_READINESS.md`
+- `01_SMALL_PAYMENTS_RAIL_V0.md`
+- kolejne dokumenty specyfikacyjne, ktore beda dopinac:
+  - service policy
+  - ticket/nullifier semantics
+  - receipt/settlement root
+  - privacy tiers
