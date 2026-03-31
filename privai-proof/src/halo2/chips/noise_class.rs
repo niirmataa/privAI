@@ -1,5 +1,5 @@
 use halo2_proofs::{
-    circuit::{Layouter, Value},
+    circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
     plonk::{Advice, Column, ConstraintSystem, Error, Selector, TableColumn},
     poly::Rotation,
@@ -23,6 +23,12 @@ pub struct NoiseClassConfig {
 #[derive(Clone, Debug)]
 pub struct NoiseClassChip {
     config: NoiseClassConfig,
+}
+
+#[derive(Clone, Debug)]
+pub struct NoiseClassOutputs {
+    pub e1_cells: [AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
+    pub e2_cell: AssignedCell<Fp, Fp>,
 }
 
 impl NoiseClassChip {
@@ -140,17 +146,19 @@ impl NoiseClassChip {
         e1: &[i16; LWE_DIMENSION_V0],
         e2: i16,
         noise_class: u8,
-    ) -> Result<(), Error> {
+    ) -> Result<NoiseClassOutputs, Error> {
         if Self::noise_bound_for_class(noise_class).is_none() {
             return Err(Error::Synthesis);
         }
 
-        // TODO(privai-v0): wire these `e1`/`e2` witnesses directly to the
-        // cells used by `LweAmountChip`, so the prover cannot provide separate
-        // noise assignments to the well-formedness and noise-bound gadgets.
+        // `noise_value` is the canonical inter-chip representation of fresh
+        // encryption noise: centered signed field elements. `LweAmountChip`
+        // copies these same cells in the next stage, and later well-formedness
+        // constraints will connect them to `mod 2^32` ciphertext arithmetic.
         layouter.assign_region(
             || "assign noise witnesses",
             |mut region| {
+                let mut assigned_values = Vec::with_capacity(LWE_DIMENSION_V0 + 1);
                 for (offset, value) in e1
                     .iter()
                     .copied()
@@ -162,12 +170,13 @@ impl NoiseClassChip {
 
                     self.config.q_enable.enable(&mut region, offset)?;
 
-                    region.assign_advice(
+                    let noise_value_cell = region.assign_advice(
                         || format!("noise_value_{offset}"),
                         self.config.noise_value,
                         offset,
                         || Value::known(Self::signed_i16_to_field(value)),
                     )?;
+                    assigned_values.push(noise_value_cell);
                     region.assign_advice(
                         || format!("noise_abs_{offset}"),
                         self.config.noise_abs,
@@ -187,7 +196,10 @@ impl NoiseClassChip {
                         || Value::known(Fp::from(noise_class as u64)),
                     )?;
                 }
-                Ok(())
+
+                let e2_cell = assigned_values.pop().ok_or(Error::Synthesis)?;
+                let e1_cells = assigned_values.try_into().map_err(|_| Error::Synthesis)?;
+                Ok(NoiseClassOutputs { e1_cells, e2_cell })
             },
         )
     }
@@ -242,7 +254,7 @@ mod tests {
         ) -> Result<(), Error> {
             let chip = NoiseClassChip::new(config);
             chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
-            chip.assign(
+            let _noise_outputs = chip.assign(
                 layouter.namespace(|| "assign noise witnesses"),
                 &self.e1,
                 self.e2,

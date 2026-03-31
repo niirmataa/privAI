@@ -34,6 +34,7 @@ const POSEIDON_RATE: usize = 2;
 pub struct LweAmountConfig {
     pub poseidon: Pow5Config<Fp, POSEIDON_WIDTH, POSEIDON_RATE>,
     pub packed_word: Column<Advice>,
+    pub noise_value: Column<Advice>,
     pub ct_amt_commit: Column<Instance>,
     pub t_commit: Column<Instance>,
 }
@@ -57,6 +58,7 @@ impl LweAmountChip {
         let rc_a = array::from_fn(|_| meta.fixed_column());
         let rc_b = array::from_fn(|_| meta.fixed_column());
         let packed_word = meta.advice_column();
+        let noise_value = meta.advice_column();
         let ct_amt_commit = meta.instance_column();
         let t_commit = meta.instance_column();
 
@@ -65,6 +67,7 @@ impl LweAmountChip {
             meta.enable_equality(column);
         }
         meta.enable_equality(packed_word);
+        meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
         meta.enable_equality(t_commit);
 
@@ -79,6 +82,7 @@ impl LweAmountChip {
         LweAmountConfig {
             poseidon,
             packed_word,
+            noise_value,
             ct_amt_commit,
             t_commit,
         }
@@ -149,6 +153,35 @@ impl LweAmountChip {
                     assigned.push(cell);
                 }
                 assigned.try_into().map_err(|_| Error::Synthesis)
+            },
+        )
+    }
+
+    fn copy_noise_cells(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
+        e2_cell: &AssignedCell<Fp, Fp>,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || "copy centered noise into lwe amount",
+            |mut region| {
+                for (offset, cell) in e1_cells.iter().enumerate() {
+                    cell.copy_advice(
+                        || format!("wired_e1_{offset}"),
+                        &mut region,
+                        self.config.noise_value,
+                        offset,
+                    )?;
+                }
+
+                e2_cell.copy_advice(
+                    || "wired_e2",
+                    &mut region,
+                    self.config.noise_value,
+                    LWE_DIMENSION_V0,
+                )?;
+                Ok(())
             },
         )
     }
@@ -225,6 +258,29 @@ impl LweAmountChip {
             ct_amt_commit: ct_output,
             t_commit: t_output,
         })
+    }
+
+    pub fn assign_with_noise_cells(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        u: &[u32; LWE_DIMENSION_V0],
+        v: u32,
+        t: &[u32; LWE_DIMENSION_V0],
+        e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
+        e2_cell: &AssignedCell<Fp, Fp>,
+    ) -> Result<LweAmountOutputs, Error> {
+        // Canonical inter-chip representation for fresh encryption noise is
+        // centered signed field elements, exactly as enforced by
+        // `NoiseClassChip`. Future well-formedness constraints will lift these
+        // same cells into the `mod 2^32` arithmetic of `u` and `v` with
+        // explicit carry / wrap constraints instead of re-encoding them as
+        // standalone `u32` witnesses.
+        self.copy_noise_cells(
+            layouter.namespace(|| "wire noise cells into lwe amount"),
+            e1_cells,
+            e2_cell,
+        )?;
+        self.assign(layouter, u, v, t)
     }
 }
 

@@ -92,20 +92,20 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
 
         noise_class_chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
 
-        let amount_outputs = lwe_amount_chip.assign(
-            layouter.namespace(|| "assign lwe amount"),
-            &self.output_u,
-            self.output_v,
-            &self.output_t,
-        )?;
-
-        // TODO(privai-v0): wire `e1` and `e2` directly from `LweAmountChip`
-        // once ciphertext well-formedness is modeled in-circuit.
-        noise_class_chip.assign(
+        let noise_outputs = noise_class_chip.assign(
             layouter.namespace(|| "assign output noise"),
             &self.output_e1,
             self.output_e2,
             self.output_noise_class,
+        )?;
+
+        let amount_outputs = lwe_amount_chip.assign_with_noise_cells(
+            layouter.namespace(|| "assign lwe amount"),
+            &self.output_u,
+            self.output_v,
+            &self.output_t,
+            &noise_outputs.e1_cells,
+            &noise_outputs.e2_cell,
         )?;
 
         let _output_note_commit_cell = note_commit_chip.assign_with_cells(
