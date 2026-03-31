@@ -205,6 +205,7 @@ impl TransferProvingData {
             &[
                 &self.statement.commitment(),
                 &public_inputs_hash,
+                &job_fee.to_le_bytes(),
                 &deadline_height.to_le_bytes(),
                 &requester_hint,
             ],
@@ -379,5 +380,16 @@ mod tests {
             TransferProvingData::from_tx_and_witness(&tx, witness),
             Err(TransferBuildError::OutputNoteCommitMismatch { index: 0, .. })
         ));
+    }
+
+    #[test]
+    fn proof_job_id_changes_when_job_fee_changes() {
+        let (tx, witness) = sample_tx_and_witness();
+        let proving = TransferProvingData::from_tx_and_witness(&tx, witness).expect("proving");
+
+        let low_fee = proving.to_proof_job(10, 100, [0x11; 32]);
+        let high_fee = proving.to_proof_job(11, 100, [0x11; 32]);
+
+        assert_ne!(low_fee.job_id, high_fee.job_id);
     }
 }

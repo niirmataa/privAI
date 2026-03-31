@@ -94,7 +94,7 @@ fn fully_covered_block(execution_mode: ExecutionMode) -> Block {
 fn accepts_fully_covered_full_batch_block() {
     let block = fully_covered_block(ExecutionMode::FullBatchProof);
     StructuralProofVerifier
-        .verify_block(&block, 2)
+        .verify_block(&block)
         .expect("full batch proof block");
 }
 
@@ -102,7 +102,7 @@ fn accepts_fully_covered_full_batch_block() {
 fn accepts_fully_covered_multi_proof_block() {
     let block = fully_covered_block(ExecutionMode::MultiProofBundle);
     StructuralProofVerifier
-        .verify_block(&block, 2)
+        .verify_block(&block)
         .expect("multi proof bundle block");
 }
 
@@ -112,7 +112,7 @@ fn rejects_duplicate_covered_index() {
     block.body.execution_bundle.covered_tx_indexes = vec![0, 0];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::DuplicateCoveredIndex(0))
     );
 }
@@ -123,7 +123,7 @@ fn rejects_invalid_covered_index() {
     block.body.execution_bundle.covered_tx_indexes = vec![0, 2];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::InvalidCoveredIndex(2))
     );
 }
@@ -134,7 +134,7 @@ fn rejects_statement_commit_mismatch() {
     block.body.execution_bundle.statement_commits[1] = [0xAA; 32];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::StatementCommitMismatch {
             tx_index: 1,
             expected: [22; 32],
@@ -144,7 +144,7 @@ fn rejects_statement_commit_mismatch() {
 }
 
 #[test]
-fn rejects_incomplete_coverage_even_if_minimum_is_met() {
+    fn rejects_incomplete_coverage() {
     let mut block = fully_covered_block(ExecutionMode::FullBatchProof);
     block.body.execution_bundle.covered_tx_indexes = vec![0];
     block.body.execution_bundle.statement_commits = vec![block.body.txs[0].statement_commit()];
@@ -160,34 +160,9 @@ fn rejects_incomplete_coverage_even_if_minimum_is_met() {
     }];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 1),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::IncompleteProofCoverage {
             expected: 2,
-            actual: 1,
-        })
-    );
-}
-
-#[test]
-fn rejects_insufficient_coverage_before_full_coverage() {
-    let mut block = fully_covered_block(ExecutionMode::FullBatchProof);
-    block.body.execution_bundle.covered_tx_indexes = vec![0];
-    block.body.execution_bundle.statement_commits = vec![block.body.txs[0].statement_commit()];
-    let public_inputs_root = block.body.execution_bundle.public_inputs_root;
-    let statement_root = merkle_root(block.body.execution_bundle.statement_commits.iter().copied());
-    block.body.proof_certificates = vec![ProofCertificate {
-        proof_system_id: 1,
-        statement_root,
-        public_inputs_root,
-        proof_bytes_hash: [6; 32],
-        prover_ids: vec![[8; 32]],
-        proof_meta_hash: [7; 32],
-    }];
-
-    assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
-        Err(ProofError::InsufficientProofCoverage {
-            required: 2,
             actual: 1,
         })
     );
@@ -199,7 +174,7 @@ fn rejects_certificate_statement_root_mismatch() {
     block.body.proof_certificates[0].statement_root = [0x55; 32];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::CertificateStatementRootMismatch)
     );
 }
@@ -210,7 +185,7 @@ fn rejects_certificate_public_inputs_root_mismatch() {
     block.body.proof_certificates[0].public_inputs_root = [0x44; 32];
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::CertificatePublicInputsRootMismatch)
     );
 }
@@ -221,7 +196,7 @@ fn rejects_zero_proof_system_id() {
     block.body.proof_certificates[0].proof_system_id = 0;
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::InvalidProofSystemId)
     );
 }
@@ -232,7 +207,7 @@ fn rejects_empty_prover_set() {
     block.body.proof_certificates[0].prover_ids.clear();
 
     assert_eq!(
-        StructuralProofVerifier.verify_block(&block, 2),
+        StructuralProofVerifier.verify_block(&block),
         Err(ProofError::EmptyProverSet)
     );
 }

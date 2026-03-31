@@ -67,7 +67,6 @@ pub trait BlockArtifactVerifier {
         &self,
         block: &Block,
         artifacts: &BlockProofArtifacts,
-        min_proof_coverage: u32,
     ) -> Result<(), ArtifactVerificationError>;
 }
 
@@ -97,9 +96,8 @@ impl<B: BatchProofVerifierBackend> BlockArtifactVerifier for SidecarProofVerifie
         &self,
         block: &Block,
         artifacts: &BlockProofArtifacts,
-        min_proof_coverage: u32,
     ) -> Result<(), ArtifactVerificationError> {
-        self.structural.verify_block(block, min_proof_coverage)?;
+        self.structural.verify_block(block)?;
         artifacts.validate_against_block(block)?;
 
         let entries_by_index = artifacts
@@ -268,7 +266,7 @@ mod tests {
     fn sidecar_verifier_accepts_valid_block_artifacts() {
         let (block, artifacts) = sample_block_and_artifacts();
         SidecarProofVerifier::<ProofEnvelopeVerifier>::default()
-            .verify_block_artifacts(&block, &artifacts, 1)
+            .verify_block_artifacts(&block, &artifacts)
             .expect("verify");
     }
 
@@ -284,7 +282,7 @@ mod tests {
             .expect("certificate");
         assert!(matches!(
             SidecarProofVerifier::<ProofEnvelopeVerifier>::default()
-                .verify_block_artifacts(&block, &artifacts, 1),
+                .verify_block_artifacts(&block, &artifacts),
             Err(ArtifactVerificationError::Artifact(ArtifactError::ProofCertificateMismatch))
                 | Err(ArtifactVerificationError::Backend {
                     error: ArtifactBackendError::EmptyProofBytes,
@@ -312,7 +310,7 @@ mod tests {
         let (block, artifacts) = sample_block_and_artifacts();
         let verifier = SidecarProofVerifier::new(RejectingBackend);
         assert!(matches!(
-            verifier.verify_block_artifacts(&block, &artifacts, 1),
+            verifier.verify_block_artifacts(&block, &artifacts),
             Err(ArtifactVerificationError::Backend {
                 error: ArtifactBackendError::Rejected(message),
                 ..

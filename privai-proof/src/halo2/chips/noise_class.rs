@@ -158,6 +158,12 @@ impl NoiseClassChip {
         layouter.assign_region(
             || "assign noise witnesses",
             |mut region| {
+                let noise_class_cell = region.assign_advice(
+                    || "noise_class_0",
+                    self.config.noise_class,
+                    0,
+                    || Value::known(Fp::from(noise_class as u64)),
+                )?;
                 let mut assigned_values = Vec::with_capacity(LWE_DIMENSION_V0 + 1);
                 for (offset, value) in e1
                     .iter()
@@ -189,12 +195,14 @@ impl NoiseClassChip {
                         offset,
                         || Value::known(Fp::from(sign)),
                     )?;
-                    region.assign_advice(
-                        || format!("noise_class_{offset}"),
-                        self.config.noise_class,
-                        offset,
-                        || Value::known(Fp::from(noise_class as u64)),
-                    )?;
+                    if offset > 0 {
+                        noise_class_cell.copy_advice(
+                            || format!("noise_class_copy_{offset}"),
+                            &mut region,
+                            self.config.noise_class,
+                            offset,
+                        )?;
+                    }
                 }
 
                 let e2_cell = assigned_values.pop().ok_or(Error::Synthesis)?;

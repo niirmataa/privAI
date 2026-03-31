@@ -75,8 +75,6 @@ pub enum ProofError {
         expected: Hash32,
         actual: Hash32,
     },
-    #[error("proof coverage {actual} is below required minimum {required}")]
-    InsufficientProofCoverage { required: u32, actual: u32 },
     #[error("proof coverage {actual} does not cover every tx in block ({expected})")]
     IncompleteProofCoverage { expected: usize, actual: usize },
     #[error("proof certificate must declare non-zero proof system id")]
@@ -90,7 +88,7 @@ pub enum ProofError {
 }
 
 pub trait ProofVerifier {
-    fn verify_block(&self, block: &Block, min_proof_coverage: u32) -> Result<(), ProofError>;
+    fn verify_block(&self, block: &Block) -> Result<(), ProofError>;
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -110,10 +108,8 @@ impl StructuralProofVerifier {
         Ok(())
     }
 
-    fn verify_user_block(&self, block: &Block, min_proof_coverage: u32) -> Result<(), ProofError> {
+    fn verify_user_block(&self, block: &Block) -> Result<(), ProofError> {
         let execution_bundle = &block.body.execution_bundle;
-        let actual_coverage = execution_bundle.covered_tx_indexes.len() as u32;
-        let required_coverage = min_proof_coverage.min(block.body.txs.len() as u32);
 
         if execution_bundle.statement_commits.is_empty() || execution_bundle.covered_tx_indexes.is_empty() {
             return Err(ProofError::MissingProofCoverage);
@@ -123,12 +119,6 @@ impl StructuralProofVerifier {
         }
         if execution_bundle.statement_commits.len() != execution_bundle.covered_tx_indexes.len() {
             return Err(ProofError::CoverageLengthMismatch);
-        }
-        if actual_coverage < required_coverage {
-            return Err(ProofError::InsufficientProofCoverage {
-                required: required_coverage,
-                actual: actual_coverage,
-            });
         }
 
         let mut seen_indexes = BTreeSet::new();
@@ -192,14 +182,14 @@ impl StructuralProofVerifier {
 }
 
 impl ProofVerifier for StructuralProofVerifier {
-    fn verify_block(&self, block: &Block, min_proof_coverage: u32) -> Result<(), ProofError> {
+    fn verify_block(&self, block: &Block) -> Result<(), ProofError> {
         match block.body.execution_bundle.execution_mode {
             ExecutionMode::Housekeeping => self.verify_housekeeping(block),
             ExecutionMode::FullBatchProof | ExecutionMode::MultiProofBundle => {
                 if block.body.txs.is_empty() {
                     return Err(ProofError::MissingProofCoverage);
                 }
-                self.verify_user_block(block, min_proof_coverage)
+                self.verify_user_block(block)
             }
         }
     }
@@ -276,7 +266,7 @@ mod tests {
     fn structural_verifier_accepts_fully_covered_block() {
         let block = sample_block();
         StructuralProofVerifier
-            .verify_block(&block, 1)
+            .verify_block(&block)
             .expect("proof-carrying block");
     }
 
@@ -286,7 +276,7 @@ mod tests {
         block.body.proof_certificates.clear();
 
         assert_eq!(
-            StructuralProofVerifier.verify_block(&block, 1),
+            StructuralProofVerifier.verify_block(&block),
             Err(ProofError::MissingProofCertificates)
         );
     }
@@ -297,7 +287,7 @@ mod tests {
         block.body.execution_bundle.execution_mode = ExecutionMode::Housekeeping;
 
         assert_eq!(
-            StructuralProofVerifier.verify_block(&block, 1),
+            StructuralProofVerifier.verify_block(&block),
             Err(ProofError::HousekeepingCarriesTransactions)
         );
     }

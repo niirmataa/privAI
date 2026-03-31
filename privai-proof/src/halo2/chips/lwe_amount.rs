@@ -25,6 +25,10 @@ pub const PACKED_LWE_CIPHERTEXT_LEN_V0: usize = packed_u32_field_len(LWE_CIPHERT
 pub const PACKED_LWE_PUBLIC_KEY_LEN_V0: usize = packed_u32_field_len(LWE_DIMENSION_V0);
 const POSEIDON_WIDTH: usize = 3;
 const POSEIDON_RATE: usize = 2;
+// For n = 512 and 32-bit limbs:
+//   max dot product < 512 * (2^32 - 1)^2 < 2^73
+// After reduction mod 2^32, the quotient therefore fits below 2^41.
+// We keep one extra bit of slack and constrain the witness quotient to 42 bits.
 const DOT_REDUCTION_QUOTIENT_BITS: usize = 42;
 
 /// First concrete stage of the future PKE-LWE amount gadget.
@@ -50,6 +54,7 @@ pub struct LweAmountConfig {
     pub q_reduce_bit: Selector,
     pub q_reduce_acc_first: Selector,
     pub q_reduce_acc_step: Selector,
+    pub q_noise_relation: Selector,
     pub limb_value: Column<Advice>,
     pub limb_lo: Column<Advice>,
     pub limb_hi: Column<Advice>,
@@ -63,6 +68,11 @@ pub struct LweAmountConfig {
     pub reduce_quotient: Column<Advice>,
     pub reduce_bit: Column<Advice>,
     pub reduce_accumulator: Column<Advice>,
+    pub noise_reduced: Column<Advice>,
+    pub noise_centered: Column<Advice>,
+    pub noise_output: Column<Advice>,
+    pub noise_wrap_positive: Column<Advice>,
+    pub noise_wrap_negative: Column<Advice>,
     pub packed_word: Column<Advice>,
     pub noise_value: Column<Advice>,
     pub table_u16: TableColumn,
@@ -102,6 +112,7 @@ impl LweAmountChip {
         let q_reduce_bit = meta.selector();
         let q_reduce_acc_first = meta.selector();
         let q_reduce_acc_step = meta.selector();
+        let q_noise_relation = meta.selector();
         let limb_value = meta.advice_column();
         let limb_lo = meta.advice_column();
         let limb_hi = meta.advice_column();
@@ -115,6 +126,11 @@ impl LweAmountChip {
         let reduce_quotient = meta.advice_column();
         let reduce_bit = meta.advice_column();
         let reduce_accumulator = meta.advice_column();
+        let noise_reduced = meta.advice_column();
+        let noise_centered = meta.advice_column();
+        let noise_output = meta.advice_column();
+        let noise_wrap_positive = meta.advice_column();
+        let noise_wrap_negative = meta.advice_column();
         let packed_word = meta.advice_column();
         let noise_value = meta.advice_column();
         let table_u16 = meta.lookup_table_column();
@@ -131,6 +147,9 @@ impl LweAmountChip {
         meta.enable_equality(reduce_full);
         meta.enable_equality(reduce_reduced);
         meta.enable_equality(reduce_quotient);
+        meta.enable_equality(noise_reduced);
+        meta.enable_equality(noise_centered);
+        meta.enable_equality(noise_output);
         meta.enable_equality(packed_word);
         meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
@@ -250,6 +269,26 @@ impl LweAmountChip {
             vec![q * (quotient - acc)]
         });
 
+        meta.create_gate("noise-adjusted u32 relation", |meta| {
+            let q = meta.query_selector(q_noise_relation);
+            let reduced = meta.query_advice(noise_reduced, Rotation::cur());
+            let noise = meta.query_advice(noise_centered, Rotation::cur());
+            let output = meta.query_advice(noise_output, Rotation::cur());
+            let wrap_positive = meta.query_advice(noise_wrap_positive, Rotation::cur());
+            let wrap_negative = meta.query_advice(noise_wrap_negative, Rotation::cur());
+            let one = Expression::Constant(Fp::from(1u64));
+            let two_pow_32 = Expression::Constant(Fp::from(1u64 << 32));
+
+            vec![
+                q.clone()
+                    * (output - reduced - noise - two_pow_32 * (wrap_positive.clone() - wrap_negative.clone())),
+                q.clone() * wrap_positive.clone() * (wrap_positive - one.clone()),
+                q.clone() * wrap_negative.clone() * (wrap_negative - one.clone()),
+                q * meta.query_advice(noise_wrap_positive, Rotation::cur())
+                    * meta.query_advice(noise_wrap_negative, Rotation::cur()),
+            ]
+        });
+
         let poseidon = Pow5Chip::configure::<P128Pow5T3>(
             meta,
             state,
@@ -270,6 +309,7 @@ impl LweAmountChip {
             q_reduce_bit,
             q_reduce_acc_first,
             q_reduce_acc_step,
+            q_noise_relation,
             limb_value,
             limb_lo,
             limb_hi,
@@ -283,6 +323,11 @@ impl LweAmountChip {
             reduce_quotient,
             reduce_bit,
             reduce_accumulator,
+            noise_reduced,
+            noise_centered,
+            noise_output,
+            noise_wrap_positive,
+            noise_wrap_negative,
             packed_word,
             noise_value,
             table_u16,
@@ -393,6 +438,16 @@ impl LweAmountChip {
         )
     }
 
+    fn assign_canonical_single_limb_cell(
+        &self,
+        layouter: impl Layouter<Fp>,
+        name: &'static str,
+        limb: u32,
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        let cells = self.assign_canonical_limb_cells(layouter, name, &[limb])?;
+        cells.into_iter().next().ok_or(Error::Synthesis)
+    }
+
     fn assign_packed_from_cells<const PACKED: usize>(
         &self,
         mut layouter: impl Layouter<Fp>,
@@ -464,6 +519,10 @@ impl LweAmountChip {
                     self.config.noise_value,
                     LWE_DIMENSION_V0,
                 )?;
+                // SECURITY_TODO(privai-v0): `e2` is wired into the chip, but
+                // the relation `v = t^T r + e2 + Δ·amount` is not constrained
+                // yet. This will be closed together with the scalar `v`
+                // well-formedness gate.
                 Ok(())
             },
         )
@@ -542,12 +601,19 @@ impl LweAmountChip {
         mut layouter: impl Layouter<Fp>,
         name: &'static str,
         full_value: AssignedCell<Fp, Fp>,
-        reduced_value: &AssignedCell<Fp, Fp>,
+        reduced_value: u32,
         quotient: u64,
-    ) -> Result<(), Error> {
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
         if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
             return Err(Error::Synthesis);
         }
+
+        let reduced_cell = self.assign_canonical_single_limb_cell(
+            layouter.namespace(|| format!("{name} reduced limb")),
+            "dot_reduced",
+            reduced_value,
+        )?;
+        let reduced_copy = reduced_cell.clone();
 
         layouter.assign_region(
             || name,
@@ -564,7 +630,7 @@ impl LweAmountChip {
                     self.config.reduce_full,
                     0,
                 )?;
-                reduced_value.copy_advice(
+                reduced_copy.copy_advice(
                     || format!("{name}_reduced"),
                     &mut region,
                     self.config.reduce_reduced,
@@ -615,6 +681,57 @@ impl LweAmountChip {
                     }
                 }
 
+                Ok(())
+            },
+        )?;
+
+        Ok(reduced_cell)
+    }
+
+    pub fn assign_noise_adjusted_u32_relation(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        reduced_value: AssignedCell<Fp, Fp>,
+        noise_value: &AssignedCell<Fp, Fp>,
+        output_value: &AssignedCell<Fp, Fp>,
+        wrap_positive: bool,
+        wrap_negative: bool,
+    ) -> Result<(), Error> {
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                self.config.q_noise_relation.enable(&mut region, 0)?;
+                reduced_value.copy_advice(
+                    || format!("{name}_reduced"),
+                    &mut region,
+                    self.config.noise_reduced,
+                    0,
+                )?;
+                noise_value.copy_advice(
+                    || format!("{name}_noise"),
+                    &mut region,
+                    self.config.noise_centered,
+                    0,
+                )?;
+                output_value.copy_advice(
+                    || format!("{name}_output"),
+                    &mut region,
+                    self.config.noise_output,
+                    0,
+                )?;
+                region.assign_advice(
+                    || format!("{name}_wrap_positive"),
+                    self.config.noise_wrap_positive,
+                    0,
+                    || Value::known(Fp::from(wrap_positive as u64)),
+                )?;
+                region.assign_advice(
+                    || format!("{name}_wrap_negative"),
+                    self.config.noise_wrap_negative,
+                    0,
+                    || Value::known(Fp::from(wrap_negative as u64)),
+                )?;
                 Ok(())
             },
         )
@@ -757,7 +874,7 @@ mod tests {
         plonk::{Circuit, ConstraintSystem, Error},
     };
 
-    use crate::halo2::params::AmountCipherParams;
+    use crate::halo2::{NoiseClassChip, NoiseClassConfig, params::AmountCipherParams};
 
     use super::{LWE_DIMENSION_V0, LweAmountChip, LweAmountConfig};
 
@@ -838,6 +955,7 @@ mod tests {
         t: [u32; LWE_DIMENSION_V0],
         r: [u32; LWE_DIMENSION_V0],
         coeffs: [u32; LWE_DIMENSION_V0],
+        reduced_u0: u32,
         quotient: u64,
     }
 
@@ -849,8 +967,120 @@ mod tests {
                 t: [0; LWE_DIMENSION_V0],
                 r: [0; LWE_DIMENSION_V0],
                 coeffs: [0; LWE_DIMENSION_V0],
+                reduced_u0: 0,
                 quotient: 0,
             }
+        }
+    }
+
+    #[derive(Clone)]
+    struct LweAmountSingleColumnNoiseRelationConfig {
+        lwe_amount: LweAmountConfig,
+        noise_class: NoiseClassConfig,
+    }
+
+    #[derive(Clone)]
+    struct LweAmountSingleColumnNoiseRelationCircuit {
+        u: [u32; LWE_DIMENSION_V0],
+        v: u32,
+        t: [u32; LWE_DIMENSION_V0],
+        r: [u32; LWE_DIMENSION_V0],
+        coeffs: [u32; LWE_DIMENSION_V0],
+        reduced_u0: u32,
+        quotient: u64,
+        e1: [i16; LWE_DIMENSION_V0],
+        e2: i16,
+        noise_class: u8,
+        wrap_positive: bool,
+        wrap_negative: bool,
+    }
+
+    impl Default for LweAmountSingleColumnNoiseRelationCircuit {
+        fn default() -> Self {
+            Self {
+                u: [0; LWE_DIMENSION_V0],
+                v: 0,
+                t: [0; LWE_DIMENSION_V0],
+                r: [0; LWE_DIMENSION_V0],
+                coeffs: [0; LWE_DIMENSION_V0],
+                reduced_u0: 0,
+                quotient: 0,
+                e1: [0; LWE_DIMENSION_V0],
+                e2: 0,
+                noise_class: 0,
+                wrap_positive: false,
+                wrap_negative: false,
+            }
+        }
+    }
+
+    impl Circuit<Fp> for LweAmountSingleColumnNoiseRelationCircuit {
+        type Config = LweAmountSingleColumnNoiseRelationConfig;
+        type FloorPlanner = SimpleFloorPlanner;
+
+        fn without_witnesses(&self) -> Self {
+            Self::default()
+        }
+
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
+            Self::Config {
+                lwe_amount: LweAmountChip::configure(meta),
+                noise_class: NoiseClassChip::configure(meta),
+            }
+        }
+
+        fn synthesize(
+            &self,
+            config: Self::Config,
+            mut layouter: impl Layouter<Fp>,
+        ) -> Result<(), Error> {
+            let chip = LweAmountChip::new(config.lwe_amount.clone(), AmountCipherParams::default());
+            let noise_chip = NoiseClassChip::new(config.noise_class);
+            noise_chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
+            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
+
+            let noise_outputs = noise_chip.assign(
+                layouter.namespace(|| "assign noise"),
+                &self.e1,
+                self.e2,
+                self.noise_class,
+            )?;
+            let outputs = chip.assign_with_noise_cells(
+                layouter.namespace(|| "assign lwe amount"),
+                &self.u,
+                self.v,
+                &self.t,
+                &self.r,
+                &noise_outputs.e1_cells,
+                &noise_outputs.e2_cell,
+            )?;
+            let dot_output = chip.assign_fixed_dot_product_scaffold(
+                layouter.namespace(|| "column_0 dot scaffold"),
+                "column_0_dot",
+                &self.coeffs,
+                &outputs.r_cells,
+            )?;
+            let reduced_cell = chip.assign_dot_product_mod_u32_reduction(
+                layouter.namespace(|| "column_0 reduction"),
+                "column_0_reduction",
+                dot_output.clone(),
+                self.reduced_u0,
+                self.quotient,
+            )?;
+            chip.assign_noise_adjusted_u32_relation(
+                layouter.namespace(|| "column_0 noise relation"),
+                "column_0_noise_relation",
+                reduced_cell,
+                &noise_outputs.e1_cells[0],
+                &outputs.u_cells[0],
+                self.wrap_positive,
+                self.wrap_negative,
+            )?;
+
+            layouter.constrain_instance(outputs.u_cells[0].cell(), config.lwe_amount.ct_amt_commit, 1)?;
+            layouter.constrain_instance(outputs.ct_amt_commit.cell(), config.lwe_amount.ct_amt_commit, 0)?;
+            layouter.constrain_instance(outputs.t_commit.cell(), config.lwe_amount.t_commit, 0)?;
+            Ok(())
         }
     }
 
@@ -886,14 +1116,14 @@ mod tests {
                 &self.coeffs,
                 &outputs.r_cells,
             )?;
-            chip.assign_dot_product_mod_u32_reduction(
+            let reduced_cell = chip.assign_dot_product_mod_u32_reduction(
                 layouter.namespace(|| "column_0 reduction"),
                 "column_0_reduction",
                 dot_output,
-                &outputs.u_cells[0],
+                self.reduced_u0,
                 self.quotient,
             )?;
-            layouter.constrain_instance(outputs.u_cells[0].cell(), config.ct_amt_commit, 1)?;
+            layouter.constrain_instance(reduced_cell.cell(), config.ct_amt_commit, 1)?;
             Ok(())
         }
     }
@@ -1081,6 +1311,7 @@ mod tests {
             t,
             r,
             coeffs,
+            reduced_u0: expected_u0,
             quotient,
         };
         let prover = MockProver::run(
@@ -1122,7 +1353,106 @@ mod tests {
             t,
             r,
             coeffs,
+            reduced_u0: expected_u0,
             quotient: quotient + 1,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+        )
+        .expect("mock prover");
+        assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_single_column_noise_relation_accepts_negative_wrap() {
+        let coeffs = {
+            let mut coeffs = [0u32; LWE_DIMENSION_V0];
+            coeffs[0] = 1;
+            coeffs
+        };
+        let r = {
+            let mut r = [0u32; LWE_DIMENSION_V0];
+            r[0] = 5;
+            r
+        };
+        let mut e1 = [0i16; LWE_DIMENSION_V0];
+        e1[0] = -12;
+        let reduced_dot = 5u32;
+        let expected_u0 = reduced_dot.wrapping_add(e1[0] as u32);
+        let quotient = 0u64;
+
+        let mut u = [0u32; LWE_DIMENSION_V0];
+        u[0] = expected_u0;
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountSingleColumnNoiseRelationCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+            reduced_u0: reduced_dot,
+            quotient,
+            e1,
+            e2: 0,
+            noise_class: 0,
+            wrap_positive: true,
+            wrap_negative: false,
+        };
+        let prover = MockProver::run(
+            18,
+            &circuit,
+            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+        )
+        .expect("mock prover");
+        prover.assert_satisfied();
+    }
+
+    #[test]
+    fn lwe_amount_single_column_noise_relation_rejects_wrong_wrap() {
+        let coeffs = {
+            let mut coeffs = [0u32; LWE_DIMENSION_V0];
+            coeffs[0] = 1;
+            coeffs
+        };
+        let r = {
+            let mut r = [0u32; LWE_DIMENSION_V0];
+            r[0] = 5;
+            r
+        };
+        let mut e1 = [0i16; LWE_DIMENSION_V0];
+        e1[0] = -12;
+        let reduced_dot = 5u32;
+        let expected_u0 = reduced_dot.wrapping_add(e1[0] as u32);
+        let quotient = 0u64;
+
+        let mut u = [0u32; LWE_DIMENSION_V0];
+        u[0] = expected_u0;
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountSingleColumnNoiseRelationCircuit {
+            u,
+            v,
+            t,
+            r,
+            coeffs,
+            reduced_u0: reduced_dot,
+            quotient,
+            e1,
+            e2: 0,
+            noise_class: 0,
+            wrap_positive: false,
+            wrap_negative: false,
         };
         let prover = MockProver::run(
             18,

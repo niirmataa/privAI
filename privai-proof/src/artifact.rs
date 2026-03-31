@@ -34,9 +34,8 @@ pub struct BatchProofArtifact {
 impl BatchProofArtifact {
     pub fn proof_bytes_hash(&self) -> Hash32 {
         let mut hasher = Hasher::new();
-        hasher.update(PROOF_BYTES_HASH_DOMAIN_V0);
-        hasher.update(&(self.proof_bytes.len() as u32).to_le_bytes());
-        hasher.update(&self.proof_bytes);
+        write_len_prefixed(&mut hasher, PROOF_BYTES_HASH_DOMAIN_V0);
+        write_len_prefixed(&mut hasher, &self.proof_bytes);
         *hasher.finalize().as_bytes()
     }
 
@@ -50,6 +49,11 @@ impl BatchProofArtifact {
             proof_meta_hash: self.proof_meta_hash,
         }
     }
+}
+
+fn write_len_prefixed(hasher: &mut Hasher, bytes: &[u8]) {
+    hasher.update(&(bytes.len() as u32).to_le_bytes());
+    hasher.update(bytes);
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
