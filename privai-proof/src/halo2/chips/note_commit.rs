@@ -5,7 +5,7 @@ use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength, P128Pow5T3},
 };
 use halo2_proofs::{
-    circuit::{Layouter, Value},
+    circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
     plonk::{Advice, Column, ConstraintSystem, Error, Instance},
 };
@@ -98,80 +98,71 @@ impl NoteCommitChip {
             ])
     }
 
-    pub fn assign(
+    pub fn assign_with_cells(
         &self,
         mut layouter: impl Layouter<Fp>,
         spend_policy_commit: Fp,
-        ct_amt_commit: Fp,
+        ct_amt_commit: AssignedCell<Fp, Fp>,
         aux_commit: Fp,
         recipient_box_commit: Fp,
         blinding: Fp,
-    ) -> Result<(), Error> {
-        let spend_policy_commit_cell = layouter.assign_region(
-            || "load spend_policy_commit",
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        let (
+            spend_policy_commit_cell,
+            ct_amt_commit_cell,
+            aux_commit_cell,
+            recipient_box_commit_cell,
+            blinding_cell,
+        ) = layouter.assign_region(
+            || "load note_commit inputs",
             |mut region| {
-                region.assign_advice(
+                let spend_policy_commit_cell = region.assign_advice(
                     || "spend_policy_commit",
                     self.config.spend_policy_commit,
                     0,
                     || Value::known(spend_policy_commit),
-                )
-            },
-        )?;
-
-        let ct_amt_commit_cell = layouter.assign_region(
-            || "load ct_amt_commit",
-            |mut region| {
-                region.assign_advice(
+                )?;
+                let ct_amt_commit_cell = ct_amt_commit.copy_advice(
                     || "ct_amt_commit",
+                    &mut region,
                     self.config.ct_amt_commit,
                     0,
-                    || Value::known(ct_amt_commit),
-                )
-            },
-        )?;
-
-        let aux_commit_cell = layouter.assign_region(
-            || "load aux_commit",
-            |mut region| {
-                region.assign_advice(
+                )?;
+                let aux_commit_cell = region.assign_advice(
                     || "aux_commit",
                     self.config.aux_commit,
                     0,
                     || Value::known(aux_commit),
-                )
-            },
-        )?;
-
-        let recipient_box_commit_cell = layouter.assign_region(
-            || "load recipient_box_commit",
-            |mut region| {
-                region.assign_advice(
+                )?;
+                let recipient_box_commit_cell = region.assign_advice(
                     || "recipient_box_commit",
                     self.config.recipient_box_commit,
                     0,
                     || Value::known(recipient_box_commit),
-                )
-            },
-        )?;
-
-        let blinding_cell = layouter.assign_region(
-            || "load blinding",
-            |mut region| {
-                region.assign_advice(
+                )?;
+                let blinding_cell = region.assign_advice(
                     || "blinding",
                     self.config.blinding,
                     0,
                     || Value::known(blinding),
-                )
+                )?;
+
+                Ok((
+                    spend_policy_commit_cell,
+                    ct_amt_commit_cell,
+                    aux_commit_cell,
+                    recipient_box_commit_cell,
+                    blinding_cell,
+                ))
             },
         )?;
 
         let chip = Pow5Chip::construct(self.config.poseidon.clone());
-        let hasher = Hash::<_, _, P128Pow5T3, ConstantLength<5>, POSEIDON_WIDTH, POSEIDON_RATE>::init(
-            chip,
-            layouter.namespace(|| "init poseidon"),
-        )?;
+        let hasher =
+            Hash::<_, _, P128Pow5T3, ConstantLength<5>, POSEIDON_WIDTH, POSEIDON_RATE>::init(
+                chip,
+                layouter.namespace(|| "init poseidon"),
+            )?;
         let output = hasher.hash(
             layouter.namespace(|| "hash note_commit"),
             [
@@ -184,7 +175,38 @@ impl NoteCommitChip {
         )?;
 
         layouter.constrain_instance(output.cell(), self.config.note_commit, 0)?;
-        Ok(())
+        Ok(output)
+    }
+
+    pub fn assign(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        spend_policy_commit: Fp,
+        ct_amt_commit: Fp,
+        aux_commit: Fp,
+        recipient_box_commit: Fp,
+        blinding: Fp,
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        let ct_amt_commit_cell = layouter.assign_region(
+            || "load standalone ct_amt_commit",
+            |mut region| {
+                region.assign_advice(
+                    || "ct_amt_commit",
+                    self.config.ct_amt_commit,
+                    0,
+                    || Value::known(ct_amt_commit),
+                )
+            },
+        )?;
+
+        self.assign_with_cells(
+            layouter,
+            spend_policy_commit,
+            ct_amt_commit_cell,
+            aux_commit,
+            recipient_box_commit,
+            blinding,
+        )
     }
 }
 
@@ -225,14 +247,15 @@ mod tests {
             config: Self::Config,
             layouter: impl Layouter<Fp>,
         ) -> Result<(), Error> {
-            NoteCommitChip::new(config).assign(
+            let _output = NoteCommitChip::new(config).assign(
                 layouter,
                 self.spend_policy_commit.ok_or(Error::Synthesis)?,
                 self.ct_amt_commit.ok_or(Error::Synthesis)?,
                 self.aux_commit.ok_or(Error::Synthesis)?,
                 self.recipient_box_commit.ok_or(Error::Synthesis)?,
                 self.blinding.ok_or(Error::Synthesis)?,
-            )
+            )?;
+            Ok(())
         }
     }
 

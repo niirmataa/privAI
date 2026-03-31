@@ -5,7 +5,7 @@ use halo2_gadgets::poseidon::{
     primitives::{self as poseidon, ConstantLength, P128Pow5T3},
 };
 use halo2_proofs::{
-    circuit::{Layouter, Value},
+    circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
     plonk::{Advice, Column, ConstraintSystem, Error, Instance},
 };
@@ -78,14 +78,55 @@ impl NullifierChip {
             .hash([note_commit, nullifier_key])
     }
 
+    pub fn assign_with_note_commit_cell(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        note_commit: AssignedCell<Fp, Fp>,
+        nullifier_key: Fp,
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        let (note_commit_cell, nullifier_key_cell) = layouter.assign_region(
+            || "load nullifier inputs",
+            |mut region| {
+                let note_commit_cell = note_commit.copy_advice(
+                    || "note_commit",
+                    &mut region,
+                    self.config.note_commit,
+                    0,
+                )?;
+                let nullifier_key_cell = region.assign_advice(
+                    || "nullifier_key",
+                    self.config.nullifier_key,
+                    0,
+                    || Value::known(nullifier_key),
+                )?;
+                Ok((note_commit_cell, nullifier_key_cell))
+            },
+        )?;
+
+        let chip = Pow5Chip::construct(self.config.poseidon.clone());
+        let hasher =
+            Hash::<_, _, P128Pow5T3, ConstantLength<2>, POSEIDON_WIDTH, POSEIDON_RATE>::init(
+                chip,
+                layouter.namespace(|| "init poseidon"),
+            )?;
+        let output = hasher.hash(
+            layouter.namespace(|| "hash nullifier"),
+            [note_commit_cell.clone(), nullifier_key_cell],
+        )?;
+
+        layouter.constrain_instance(note_commit_cell.cell(), self.config.public_inputs, 0)?;
+        layouter.constrain_instance(output.cell(), self.config.public_inputs, 1)?;
+        Ok(output)
+    }
+
     pub fn assign(
         &self,
         mut layouter: impl Layouter<Fp>,
         note_commit: Fp,
         nullifier_key: Fp,
-    ) -> Result<(), Error> {
+    ) -> Result<AssignedCell<Fp, Fp>, Error> {
         let note_commit_cell = layouter.assign_region(
-            || "load nullifier inputs",
+            || "load standalone note_commit",
             |mut region| {
                 region.assign_advice(
                     || "note_commit",
@@ -96,31 +137,7 @@ impl NullifierChip {
             },
         )?;
 
-        let nullifier_key_cell = layouter.assign_region(
-            || "load nullifier key",
-            |mut region| {
-                region.assign_advice(
-                    || "nullifier_key",
-                    self.config.nullifier_key,
-                    0,
-                    || Value::known(nullifier_key),
-                )
-            },
-        )?;
-
-        let chip = Pow5Chip::construct(self.config.poseidon.clone());
-        let hasher = Hash::<_, _, P128Pow5T3, ConstantLength<2>, POSEIDON_WIDTH, POSEIDON_RATE>::init(
-            chip,
-            layouter.namespace(|| "init poseidon"),
-        )?;
-        let output = hasher.hash(
-            layouter.namespace(|| "hash nullifier"),
-            [note_commit_cell.clone(), nullifier_key_cell],
-        )?;
-
-        layouter.constrain_instance(note_commit_cell.cell(), self.config.public_inputs, 0)?;
-        layouter.constrain_instance(output.cell(), self.config.public_inputs, 1)?;
-        Ok(())
+        self.assign_with_note_commit_cell(layouter, note_commit_cell, nullifier_key)
     }
 }
 
@@ -160,7 +177,8 @@ mod tests {
         ) -> Result<(), Error> {
             let note_commit = self.note_commit.ok_or(Error::Synthesis)?;
             let nullifier_key = self.nullifier_key.ok_or(Error::Synthesis)?;
-            NullifierChip::new(config).assign(layouter, note_commit, nullifier_key)
+            let _output = NullifierChip::new(config).assign(layouter, note_commit, nullifier_key)?;
+            Ok(())
         }
     }
 
