@@ -45,6 +45,7 @@ pub struct LweAmountConfig {
     pub poseidon: Pow5Config<Fp, POSEIDON_WIDTH, POSEIDON_RATE>,
     pub q_pack: Selector,
     pub q_limb: Selector,
+    pub q_lt_modulus: Selector,
     pub q_dot_first: Selector,
     pub q_dot_mul: Selector,
     pub q_dot_acc: Selector,
@@ -57,6 +58,7 @@ pub struct LweAmountConfig {
     pub limb_value: Column<Advice>,
     pub limb_lo: Column<Advice>,
     pub limb_hi: Column<Advice>,
+    pub lt_q_slack: Column<Advice>,
     pub dot_coeff: Column<Fixed>,
     pub dot_value: Column<Advice>,
     pub dot_product: Column<Advice>,
@@ -103,6 +105,7 @@ impl LweAmountChip {
         let rc_b = array::from_fn(|_| meta.fixed_column());
         let q_pack = meta.selector();
         let q_limb = meta.complex_selector();
+        let q_lt_modulus = meta.complex_selector();
         let q_dot_first = meta.selector();
         let q_dot_mul = meta.selector();
         let q_dot_acc = meta.selector();
@@ -115,6 +118,7 @@ impl LweAmountChip {
         let limb_value = meta.advice_column();
         let limb_lo = meta.advice_column();
         let limb_hi = meta.advice_column();
+        let lt_q_slack = meta.advice_column();
         let dot_coeff = meta.fixed_column();
         let dot_value = meta.advice_column();
         let dot_product = meta.advice_column();
@@ -141,6 +145,7 @@ impl LweAmountChip {
             meta.enable_equality(column);
         }
         meta.enable_equality(limb_value);
+        meta.enable_equality(lt_q_slack);
         meta.enable_equality(dot_value);
         meta.enable_equality(dot_accumulator);
         meta.enable_equality(reduce_full);
@@ -179,6 +184,36 @@ impl LweAmountChip {
 
             // Invariant: 0 must always exist in the `u16` lookup table because
             // disabled rows query 0 when `q_limb == 0`.
+            vec![(q * hi, table_u16)]
+        });
+
+        meta.create_gate("canonical element is less than LWE modulus q", |meta| {
+            let q = meta.query_selector(q_lt_modulus);
+            let value = meta.query_advice(limb_value, Rotation::cur());
+            let slack = meta.query_advice(lt_q_slack, Rotation::cur());
+            let lo = meta.query_advice(limb_lo, Rotation::cur());
+            let hi = meta.query_advice(limb_hi, Rotation::cur());
+            let two_pow_16 = Expression::Constant(Fp::from(1u64 << 16));
+            let q_minus_one =
+                Expression::Constant(Fp::from(crate::halo2::LWE_MODULUS_Q_V0 - 1));
+
+            vec![
+                q.clone() * (value + slack.clone() - q_minus_one),
+                q * (slack - (lo + hi * two_pow_16)),
+            ]
+        });
+
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_lt_modulus);
+            let lo = meta.query_advice(limb_lo, Rotation::cur());
+
+            vec![(q.clone() * lo, table_u16)]
+        });
+
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_lt_modulus);
+            let hi = meta.query_advice(limb_hi, Rotation::cur());
+
             vec![(q * hi, table_u16)]
         });
 
@@ -300,6 +335,7 @@ impl LweAmountChip {
             poseidon,
             q_pack,
             q_limb,
+            q_lt_modulus,
             q_dot_first,
             q_dot_mul,
             q_dot_acc,
@@ -312,6 +348,7 @@ impl LweAmountChip {
             limb_value,
             limb_lo,
             limb_hi,
+            lt_q_slack,
             dot_coeff,
             dot_value,
             dot_product,
@@ -445,6 +482,79 @@ impl LweAmountChip {
     ) -> Result<AssignedCell<Fp, Fp>, Error> {
         let cells = self.assign_canonical_limb_cells(layouter, name, &[limb])?;
         cells.into_iter().next().ok_or(Error::Synthesis)
+    }
+
+    fn assign_lt_q_check(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        value_cell: &AssignedCell<Fp, Fp>,
+        value: u32,
+    ) -> Result<(), Error> {
+        let q = self.params.lwe_modulus_q;
+        let value_u64 = value as u64;
+        if value_u64 >= q {
+            return Err(Error::Synthesis);
+        }
+
+        let slack = (q - 1) - value_u64;
+        let lo = slack & 0xFFFF;
+        let hi = slack >> 16;
+
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                self.config.q_lt_modulus.enable(&mut region, 0)?;
+                value_cell.copy_advice(
+                    || format!("{name}_value"),
+                    &mut region,
+                    self.config.limb_value,
+                    0,
+                )?;
+                region.assign_advice(
+                    || format!("{name}_slack"),
+                    self.config.lt_q_slack,
+                    0,
+                    || Value::known(Fp::from(slack)),
+                )?;
+                region.assign_advice(
+                    || format!("{name}_slack_lo"),
+                    self.config.limb_lo,
+                    0,
+                    || Value::known(Fp::from(lo)),
+                )?;
+                region.assign_advice(
+                    || format!("{name}_slack_hi"),
+                    self.config.limb_hi,
+                    0,
+                    || Value::known(Fp::from(hi)),
+                )?;
+                Ok(())
+            },
+        )
+    }
+
+    fn assign_lt_q_checks(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        value_cells: &[AssignedCell<Fp, Fp>],
+        values: &[u32],
+    ) -> Result<(), Error> {
+        if value_cells.len() != values.len() {
+            return Err(Error::Synthesis);
+        }
+
+        for (offset, (cell, value)) in value_cells.iter().zip(values.iter().copied()).enumerate() {
+            self.assign_lt_q_check(
+                layouter.namespace(|| format!("{name}_{offset}")),
+                name,
+                cell,
+                value,
+            )?;
+        }
+
+        Ok(())
     }
 
     fn assign_packed_from_cells<const PACKED: usize>(
@@ -603,6 +713,11 @@ impl LweAmountChip {
         reduced_value: u32,
         quotient: u64,
     ) -> Result<AssignedCell<Fp, Fp>, Error> {
+        // `quotient` must satisfy `full_value = reduced_value + quotient * modulus`.
+        // The current scaffold still uses the pre-alignment `2^32` modulus for
+        // this reduction step; the next pass will switch the gate to
+        // `LWE_MODULUS_Q_V0`, and callers must compute the witness with
+        // `div_euclid(modulus)` instead of `>> 32`.
         if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
             return Err(Error::Synthesis);
         }
@@ -610,6 +725,12 @@ impl LweAmountChip {
         let reduced_cell = self.assign_canonical_single_limb_cell(
             layouter.namespace(|| format!("{name} reduced limb")),
             "dot_reduced",
+            reduced_value,
+        )?;
+        self.assign_lt_q_check(
+            layouter.namespace(|| format!("{name} reduced limb < q")),
+            "dot_reduced_lt_q",
+            &reduced_cell,
             reduced_value,
         )?;
         let reduced_copy = reduced_cell.clone();
@@ -781,6 +902,31 @@ impl LweAmountChip {
             r,
         )?;
 
+        self.assign_lt_q_checks(
+            layouter.namespace(|| "enforce u < q"),
+            "canonical_u_lt_q",
+            &u_cells,
+            u,
+        )?;
+        self.assign_lt_q_check(
+            layouter.namespace(|| "enforce v < q"),
+            "canonical_v_lt_q",
+            &v_cell,
+            v,
+        )?;
+        self.assign_lt_q_checks(
+            layouter.namespace(|| "enforce t < q"),
+            "canonical_t_lt_q",
+            &t_cells,
+            t,
+        )?;
+        self.assign_lt_q_checks(
+            layouter.namespace(|| "enforce r < q"),
+            "canonical_r_lt_q",
+            &r_cells,
+            r,
+        )?;
+
         let mut ct_limb_cells = u_cells.clone();
         ct_limb_cells.push(v_cell.clone());
         let ct_words = self.assign_packed_from_cells(
@@ -873,7 +1019,9 @@ mod tests {
         plonk::{Circuit, ConstraintSystem, Error},
     };
 
-    use crate::halo2::{NoiseClassChip, NoiseClassConfig, params::AmountCipherParams};
+    use crate::halo2::{
+        LWE_MODULUS_Q_V0, NoiseClassChip, NoiseClassConfig, params::AmountCipherParams,
+    };
 
     use super::{LWE_DIMENSION_V0, LweAmountChip, LweAmountConfig};
 
@@ -1218,6 +1366,21 @@ mod tests {
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_chip_rejects_coefficients_outside_lwe_modulus() {
+        let mut u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        u[0] = LWE_MODULUS_Q_V0 as u32;
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let t_commit = LweAmountChip::poseidon_hash_t(&t);
+
+        let circuit = LweAmountCircuit { u, v, t, r };
+        assert!(MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]]).is_err());
     }
 
     #[test]
