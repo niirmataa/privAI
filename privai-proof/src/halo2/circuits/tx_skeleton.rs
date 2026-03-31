@@ -23,6 +23,10 @@ pub struct PrivaiTxSkeletonConfig {
 /// `NoteCommitChip` through `ct_amt_commit`. Remaining duplicated witnesses
 /// (for example consumed-note loading and noise wiring) will be replaced with
 /// shared cells in the next iteration.
+///
+/// Current scope is intentionally `1-in, 1-out`. The target v0 transaction
+/// circuit will duplicate consumed and created sections into `2-in, 2-out`
+/// once wiring and well-formedness constraints are stabilized.
 #[derive(Clone, Debug)]
 pub struct PrivaiTxSkeletonCircuit {
     pub output_u: [u32; 512],
@@ -88,15 +92,6 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
 
         noise_class_chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
 
-        let ct_amt_commit = LweAmountChip::poseidon_hash_ct_amt(&self.output_u, self.output_v);
-        let output_note_commit = NoteCommitChip::poseidon_hash(
-            self.output_spend_policy_commit,
-            ct_amt_commit,
-            self.output_aux_commit,
-            self.output_recipient_box_commit,
-            self.output_blinding,
-        );
-
         let amount_outputs = lwe_amount_chip.assign(
             layouter.namespace(|| "assign lwe amount"),
             &self.output_u,
@@ -104,6 +99,8 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
             &self.output_t,
         )?;
 
+        // TODO(privai-v0): wire `e1` and `e2` directly from `LweAmountChip`
+        // once ciphertext well-formedness is modeled in-circuit.
         noise_class_chip.assign(
             layouter.namespace(|| "assign output noise"),
             &self.output_e1,
@@ -120,6 +117,9 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
             self.output_blinding,
         )?;
 
+        // TODO(privai-v0): consumed notes currently enter the skeleton as
+        // public note commitments for nullifier derivation only. Add consumed
+        // note opening constraints once the full spend relation is wired.
         let consumed_note_commit_cell = layouter.assign_region(
             || "load consumed note commit",
             |mut region| {
@@ -138,7 +138,8 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
             self.consumed_nullifier_key,
         )?;
 
-        let _ = output_note_commit;
+        // TODO(privai-v0): add plaintext conservation once amount witness
+        // cells are shared across consumed and created note gadgets.
         Ok(())
     }
 }
@@ -199,6 +200,12 @@ mod tests {
         let prover = MockProver::run(
             15,
             &circuit,
+            // Instance column layout is defined by the `configure()` call
+            // sequence above:
+            // [0] LweAmountChip::ct_amt_commit
+            // [1] LweAmountChip::t_commit
+            // [2] NoteCommitChip::note_commit
+            // [3] NullifierChip::{consumed_note_commit, nullifier}
             vec![
                 vec![ct_amt_commit],
                 vec![t_commit],
