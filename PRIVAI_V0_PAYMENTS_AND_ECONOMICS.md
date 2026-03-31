@@ -108,6 +108,32 @@ Ekonomia systemu musi byc mierzona jako:
 
 Nie wystarczy patrzec tylko na rozmiar pojedynczego proofu.
 
+### DECISION-P5
+
+`FullPrivacy` jest wymagane dla:
+
+- escrow,
+- payoutow o wyzszej wrazliwosci,
+- settlementow o wyzszej wartosci,
+- transakcji, w ktorych sama kwota jest dana wrazliwa.
+
+### DECISION-P6
+
+Dla drobnicy domyslny model to:
+
+- `deposit -> off-chain service state -> batch settlement`
+
+a nie pelna prywatna nota per zakup.
+
+### DECISION-P7
+
+Jesli mala platnosc trafia on-chain, domyslnym lekkim rail'em jest:
+
+- `RecipientPrivacyLite`
+- czyli `ukryty adres + jawna kwota`
+
+a nie oslabianie warstwy PQ.
+
 ## 5. Trzy rails platnosci
 
 ## 5.1. PrepaidDepositRail
@@ -575,6 +601,62 @@ Wallet i UI powinny rozroznic co najmniej:
   - ukryty adres + jawna kwota
 
 To musi byc jasne dla uzytkownika.
+
+### 8.2. Twardy podzial po klasie transakcji
+
+Najzdrowszy podzial v0:
+
+- `small payments`
+  - depozyt, tab albo `RecipientPrivacyLite`
+- `standard marketplace settlement`
+  - zalezy od wrazliwosci kwoty i modelu uslugi
+- `large value / escrow / dispute-sensitive`
+  - zawsze `FullPrivacy`
+
+To powinno byc jawnie udokumentowane w polityce uslugi, a nie zostawione jako ukryta heurystyka walleta.
+
+### 8.3. Opaque IDs dla drobnicy
+
+To jest bardzo dobry kierunek dla malych zakupow.
+Jesli platnosc nie jest finalizowana jako osobny pelny prywatny tx, to off-chain state powinien operowac na:
+
+- jednorazowych `purchase_id`
+- jednorazowych `tab_entry_id`
+- `settlement_id`
+- `receipt_id`
+
+Te identyfikatory musza byc:
+
+- losowe albo deterministycznie wyprowadzane z tajnego kontekstu,
+- jednorazowe,
+- niepowiazywalne z publicznym `AccountID`,
+- nieuzywane ponownie miedzy sesjami i merchantami.
+
+### 8.4. Czego chain ma nie widziec przy drobnicy
+
+Przy modelu depozyt + off-chain state chain nie powinien widziec:
+
+- kazdego pojedynczego zakupu,
+- kazdego session eventu,
+- kazdego usage increment,
+- stalego publicznego identyfikatora kupujacego.
+
+Chain powinien widziec tylko:
+
+- finansowanie,
+- batch settlement,
+- refund,
+- payout,
+- ewentualnie otwarcie i zamkniecie escrow.
+
+### 8.5. Produktowa zasada ochrony kwoty
+
+Jawnie warto zapisac:
+
+- mala kwota nie zawsze wymaga ukrycia kwoty,
+- duza kwota bardzo czesto wymaga ukrycia kwoty,
+- escrow powinno domyslnie zakladac `FullPrivacy`,
+- `RecipientPrivacyLite` to ekonomiczny rail dla drobnicy, a nie tryb dla sporow lub wysokiej wartosci.
 
 ## 9. Burza mozgow: optymalizacje not
 

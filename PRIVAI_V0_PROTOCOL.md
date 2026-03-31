@@ -25,6 +25,12 @@ W szczegolnosci dokument ekonomiczny rozroznia:
 - `RecipientPrivacyLite` jako opcjonalny tryb dla drobnych platnosci
   (`ukryty adres + jawna kwota`).
 
+Robocza zasada v0:
+
+- drobnica domyslnie idzie przez depozyt / tab / batch settlement,
+- male platnosci on-chain moga uzyc `RecipientPrivacyLite`,
+- escrow i settlement o wyzszej wartosci powinny uzywac `FullPrivacy`.
+
 ## 2. Zasady architektoniczne
 
 Kazdy komponent ma jedna glowna role:
