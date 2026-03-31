@@ -129,6 +129,34 @@ Domyslna zasada:
 - `tab/session` sluzy do wielokrotnego usage tracking,
 - nie wolno mieszac tych dwoch semantyk w jednym identyfikatorze.
 
+### 5.6. SessionGrant / SpendGrant
+
+To jest jawny byt autoryzacyjny v0 po stronie marketplace operatora.
+
+Rola:
+
+- przydziela konkretnej sesji prawo do korzystania z depozytu,
+- ustawia `spend_cap`,
+- ustawia `expiry`,
+- wiąze rail z `merchant_commit`,
+- opcjonalnie wiąze rail z `service_commit`.
+
+To nie jest publiczne konto usera.
+To jest scoped grant wystawiany przez trusted marketplace authority dla konkretnej sesji.
+
+### 5.7. SessionId
+
+`SessionId` nie powinien byc budowany wprost z jawnej semantyki `DepositAnchor`.
+
+Domyslny kierunek:
+
+- `session_nonce`
+- `merchant_commit`
+- `grant_commit`
+- `payer_ephemeral_pub`
+
+Czyli sesja jest zwiazana z grantem i merchantem, ale nie daje merchantowi surowego uchwytu do depozytu.
+
 ## 6. Domyslne decyzje robocze do przyjecia, jesli nie ma lepszej kontrpropozycji
 
 Te decyzje sa domyslne. Jesli proponujesz inna droge, musisz jawnie wykazac, ze jest lepsza.
@@ -184,15 +212,24 @@ Domyslna decyzja:
 - nie wystarczy sam `ticket_nullifier`,
 - model musi jawnie opisac, jak debit jest powiazany z prawem wydania z depozytu.
 
-W tej sekcji oczekujemy rozstrzygniecia jednego z dwoch modeli:
+Domyslny model v0:
 
-- `marketplace-trusted accounting`
-  - chain ufa, ze redeem/claim od marketplace lub merchanta odpowiada prawdziwym prawom z depozytu
-  - to jest jawne zalozenie zaufania v0
+- `marketplace-operator-trusted accounting`
+
+To znaczy:
+
+- nie kazdy merchant samodzielnie interpretuje prawa z depozytu,
+- marketplace operator wystawia `SessionGrant/SpendGrant`,
+- merchant konsumuje grant w ramach sesji,
+- operator publikuje finalny settlement albo jest jednoznaczna authority dla redeem path.
+
+Alternatywa:
+
 - `anchor-bound cryptographic model`
   - debit / settlement daje chainowi kryptograficznie sprawdzalny zwiazek z `DepositAnchor`
+  - to jest mocniejsza sciezka trust-minimized, ale nie default v0.
 
-Jesli wybierany jest model trusted, ma to byc nazwane wprost jako trust assumption, nie ukryte za ogolnikami.
+W odpowiedzi wolno odrzucic model operator-trusted tylko jesli podana zostanie lepsza, spojna i wykonalna architektura v0.
 
 ### D7. `purchase_commit` pozostaje obowiazkowy
 
@@ -232,7 +269,8 @@ Masz odpowiedziec:
 Masz tez jawnie odpowiedziec:
 
 7. jak to wyprowadzenie laczy sie z prawem z depozytu,
-8. czy ten model wymaga trusted marketplace accounting, czy daje chainowi cryptographic anchor binding.
+8. jak `SessionGrant/SpendGrant` wchodzi w model generacji lub autoryzacji,
+9. czy ten model wymaga trusted marketplace accounting, czy daje chainowi cryptographic anchor binding.
 
 ## 8. Wymagany model scope
 
@@ -327,10 +365,12 @@ Masz opisac, jak chain lub settlement layer odroznia:
 
 Musisz wybrac i uzasadnic:
 
-### Model A. Marketplace-trusted accounting
+### Model A. Marketplace-operator-trusted accounting
 
-- merchant lub marketplace prowadzi accounting off-chain,
-- chain ufa claimowi / redeemowi w granicach zdefiniowanego trust assumption,
+- marketplace operator prowadzi accounting off-chain,
+- merchant nie jest samodzielna authority dla praw z depozytu,
+- operator wystawia `SessionGrant/SpendGrant`,
+- chain ufa settlementowi / redeemowi publikowanemu przez operatora lub przez scisle zdefiniowana delegated authority,
 - `ticket_nullifier` zabezpiecza jednorazowosc,
 - depozyt i saldo sa pilnowane w trusted accounting layer.
 
@@ -341,7 +381,11 @@ Musisz wybrac i uzasadnic:
 - jest mocniej trust-minimized,
 - ale moze byc ciezsze i bardziej zlozone dla v0.
 
-Nie wolno pominac tego wyboru.
+Domyslny wybor dla v0:
+
+- `Marketplace-operator-trusted accounting`
+
+Nie wolno pominac tego wyboru ani rozmywac go do hasla "merchant sprawdza depozyt".
 
 Masz opisac konkretny mechanizm:
 
@@ -363,6 +407,13 @@ Masz tez jawnie opisac:
 - dlaczego replay protection nie moze byc jednoczesnie modelem incremental billing,
 - gdzie konczy sie odpowiedzialnosc `ticket`,
 - gdzie zaczyna sie odpowiedzialnosc `tab/session`.
+
+Masz tez odpowiedziec:
+
+- kto publikuje finalny settlement w v0,
+- czy merchant publikuje go sam,
+- czy publikuje go marketplace operator,
+- czy merchant moze publikowac go tylko jako delegated actor w ramach operator grant model.
 
 ## 11. Wymagany model recovery i lifecycle
 
@@ -407,8 +458,10 @@ Nie wolno zostawic tych pytan bez odpowiedzi:
 7. Czy wallet moze generowac ticketi dla wielu merchantow z jednego rail seed?
 8. Jak wyglada recovery, jesli user ma dwa urzadzenia?
 9. Jak dokladnie debit jest powiazany z prawem z depozytu?
-10. Czy v0 wybiera `marketplace-trusted accounting`, czy `anchor-bound cryptographic settlement`?
+10. Czy v0 wybiera `marketplace-operator-trusted accounting`, czy `anchor-bound cryptographic settlement`?
 11. Gdzie konczy sie `ticket`, a gdzie zaczyna `tab/session`?
+12. Jak wyglada `SessionGrant/SpendGrant` i kto jest jego authority?
+13. Kto publikuje finalny settlement w v0?
 
 ## 14. Czego nie wolno proponowac
 
