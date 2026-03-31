@@ -91,6 +91,7 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
         let nullifier_chip = NullifierChip::new(config.nullifier);
 
         noise_class_chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
+        lwe_amount_chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
 
         let noise_outputs = noise_class_chip.assign(
             layouter.namespace(|| "assign output noise"),
@@ -198,7 +199,7 @@ mod tests {
         };
 
         let prover = MockProver::run(
-            15,
+            17,
             &circuit,
             // Instance column layout is defined by the `configure()` call
             // sequence above:

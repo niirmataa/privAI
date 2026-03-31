@@ -7,11 +7,12 @@ use halo2_gadgets::poseidon::{
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
-    plonk::{Advice, Column, ConstraintSystem, Error, Instance},
+    plonk::{Advice, Column, ConstraintSystem, Error, Expression, Instance, Selector, TableColumn},
+    poly::Rotation,
 };
 
 use crate::halo2::{
-    pack_u32_limbs_to_fp, packed_u32_field_len,
+    U32_LIMBS_PER_FIELD, pack_u32_limbs_to_fp, packed_u32_field_len,
     params::AmountCipherParams,
 };
 
@@ -24,7 +25,9 @@ const POSEIDON_RATE: usize = 2;
 
 /// First concrete stage of the future PKE-LWE amount gadget.
 ///
-/// This stage proves only the public Poseidon commitments:
+/// This stage proves:
+/// - canonical `u32 -> Fp` packing for `(u, v)` and `t`
+/// - `u32` range checks via 16-bit decomposition lookups
 /// - `ct_amt_commit = Poseidon(pack(u, v))`
 /// - `t_commit = Poseidon(pack(t))`
 ///
@@ -33,8 +36,14 @@ const POSEIDON_RATE: usize = 2;
 #[derive(Clone, Debug)]
 pub struct LweAmountConfig {
     pub poseidon: Pow5Config<Fp, POSEIDON_WIDTH, POSEIDON_RATE>,
+    pub q_pack: Selector,
+    pub q_limb: Selector,
+    pub limb_value: Column<Advice>,
+    pub limb_lo: Column<Advice>,
+    pub limb_hi: Column<Advice>,
     pub packed_word: Column<Advice>,
     pub noise_value: Column<Advice>,
+    pub table_u16: TableColumn,
     pub ct_amt_commit: Column<Instance>,
     pub t_commit: Column<Instance>,
 }
@@ -57,8 +66,14 @@ impl LweAmountChip {
         let partial_sbox = meta.advice_column();
         let rc_a = array::from_fn(|_| meta.fixed_column());
         let rc_b = array::from_fn(|_| meta.fixed_column());
+        let q_pack = meta.selector();
+        let q_limb = meta.complex_selector();
+        let limb_value = meta.advice_column();
+        let limb_lo = meta.advice_column();
+        let limb_hi = meta.advice_column();
         let packed_word = meta.advice_column();
         let noise_value = meta.advice_column();
+        let table_u16 = meta.lookup_table_column();
         let ct_amt_commit = meta.instance_column();
         let t_commit = meta.instance_column();
 
@@ -66,10 +81,55 @@ impl LweAmountChip {
         for column in state {
             meta.enable_equality(column);
         }
+        meta.enable_equality(limb_value);
         meta.enable_equality(packed_word);
         meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
         meta.enable_equality(t_commit);
+
+        meta.create_gate("u32 limb decomposes into 16-bit halves", |meta| {
+            let q = meta.query_selector(q_limb);
+            let limb = meta.query_advice(limb_value, Rotation::cur());
+            let lo = meta.query_advice(limb_lo, Rotation::cur());
+            let hi = meta.query_advice(limb_hi, Rotation::cur());
+            let two_pow_16 = Expression::Constant(Fp::from(1u64 << 16));
+
+            vec![q * (limb - (lo + hi * two_pow_16))]
+        });
+
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_limb);
+            let lo = meta.query_advice(limb_lo, Rotation::cur());
+
+            // Invariant: 0 must always exist in the `u16` lookup table because
+            // disabled rows query 0 when `q_limb == 0`.
+            vec![(q * lo, table_u16)]
+        });
+
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_limb);
+            let hi = meta.query_advice(limb_hi, Rotation::cur());
+
+            // Invariant: 0 must always exist in the `u16` lookup table because
+            // disabled rows query 0 when `q_limb == 0`.
+            vec![(q * hi, table_u16)]
+        });
+
+        meta.create_gate("pack seven u32 limbs into one field element", |meta| {
+            let q = meta.query_selector(q_pack);
+            let packed = meta.query_advice(packed_word, Rotation::cur());
+            let radix = Expression::Constant(Fp::from(1u64 << 32));
+            let mut coeff = Expression::Constant(Fp::from(1u64));
+            let mut acc = Expression::Constant(Fp::from(0u64));
+
+            for rotation in 0..U32_LIMBS_PER_FIELD {
+                let limb = meta.query_advice(limb_value, Rotation(rotation as i32));
+                acc = acc + limb * coeff.clone();
+                coeff = coeff * radix.clone();
+            }
+
+            vec![q * (packed - acc)]
+        });
 
         let poseidon = Pow5Chip::configure::<P128Pow5T3>(
             meta,
@@ -81,8 +141,14 @@ impl LweAmountChip {
 
         LweAmountConfig {
             poseidon,
+            q_pack,
+            q_limb,
+            limb_value,
+            limb_lo,
+            limb_hi,
             packed_word,
             noise_value,
+            table_u16,
             ct_amt_commit,
             t_commit,
         }
@@ -133,24 +199,72 @@ impl LweAmountChip {
         .hash(packed)
     }
 
-    fn assign_packed_words<const L: usize>(
+    pub fn load_u16_table(&self, mut layouter: impl Layouter<Fp>) -> Result<(), Error> {
+        layouter.assign_table(
+            || "u16 range table",
+            |mut table| {
+                for value in 0..=u16::MAX {
+                    table.assign_cell(
+                        || format!("u16_{value}"),
+                        self.config.table_u16,
+                        value as usize,
+                        || Value::known(Fp::from(value as u64)),
+                    )?;
+                }
+                Ok(())
+            },
+        )
+    }
+
+    fn assign_packed_limbs<const PACKED: usize>(
         &self,
         mut layouter: impl Layouter<Fp>,
         name: &'static str,
-        packed: [Fp; L],
-    ) -> Result<[AssignedCell<Fp, Fp>; L], Error> {
+        limbs: &[u32],
+        packed: [Fp; PACKED],
+    ) -> Result<[AssignedCell<Fp, Fp>; PACKED], Error> {
         layouter.assign_region(
             || name,
             |mut region| {
-                let mut assigned = Vec::with_capacity(L);
-                for (offset, value) in packed.into_iter().enumerate() {
+                let mut assigned = Vec::with_capacity(PACKED);
+                for (chunk_idx, value) in packed.into_iter().enumerate() {
+                    let base = chunk_idx * U32_LIMBS_PER_FIELD;
+                    self.config.q_pack.enable(&mut region, base)?;
+
                     let cell = region.assign_advice(
-                        || format!("{name}_{offset}"),
+                        || format!("{name}_packed_{chunk_idx}"),
                         self.config.packed_word,
-                        offset,
+                        base,
                         || Value::known(value),
                     )?;
                     assigned.push(cell);
+
+                    for limb_offset in 0..U32_LIMBS_PER_FIELD {
+                        let offset = base + limb_offset;
+                        let limb = limbs.get(offset).copied().unwrap_or(0);
+                        let lo = limb & 0xFFFF;
+                        let hi = limb >> 16;
+
+                        self.config.q_limb.enable(&mut region, offset)?;
+                        region.assign_advice(
+                            || format!("{name}_limb_{offset}"),
+                            self.config.limb_value,
+                            offset,
+                            || Value::known(Fp::from(limb as u64)),
+                        )?;
+                        region.assign_advice(
+                            || format!("{name}_limb_lo_{offset}"),
+                            self.config.limb_lo,
+                            offset,
+                            || Value::known(Fp::from(lo as u64)),
+                        )?;
+                        region.assign_advice(
+                            || format!("{name}_limb_hi_{offset}"),
+                            self.config.limb_hi,
+                            offset,
+                            || Value::known(Fp::from(hi as u64)),
+                        )?;
+                    }
                 }
                 assigned.try_into().map_err(|_| Error::Synthesis)
             },
@@ -208,18 +322,16 @@ impl LweAmountChip {
             .try_into()
             .map_err(|_| Error::Synthesis)?;
 
-        // TODO(privai-v0): this stage only binds pre-packed field elements to
-        // Poseidon commitments. When we add full PKE-LWE well-formedness, we
-        // must also constrain the packing relation from raw u32 limbs to these
-        // packed Fp words inside the circuit.
-        let ct_words = self.assign_packed_words(
+        let ct_words = self.assign_packed_limbs(
             layouter.namespace(|| "assign packed ct_amt"),
             "packed_ct_amt",
+            &ct_limbs,
             packed_ct,
         )?;
-        let t_words = self.assign_packed_words(
+        let t_words = self.assign_packed_limbs(
             layouter.namespace(|| "assign packed t"),
             "packed_t",
+            t,
             packed_t,
         )?;
 
@@ -331,9 +443,11 @@ mod tests {
         fn synthesize(
             &self,
             config: Self::Config,
-            layouter: impl Layouter<Fp>,
+            mut layouter: impl Layouter<Fp>,
         ) -> Result<(), Error> {
-            let _outputs = LweAmountChip::new(config, AmountCipherParams::default()).assign(
+            let chip = LweAmountChip::new(config, AmountCipherParams::default());
+            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
+            let _outputs = chip.assign(
                 layouter,
                 &self.u,
                 self.v,
@@ -354,7 +468,7 @@ mod tests {
 
         let circuit = LweAmountCircuit { u, v, t };
         let prover =
-            MockProver::run(14, &circuit, vec![vec![ct_commit], vec![t_commit]]).expect("mock prover");
+            MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]]).expect("mock prover");
         prover.assert_satisfied();
     }
 
@@ -369,9 +483,28 @@ mod tests {
 
         let circuit = LweAmountCircuit { u, v, t };
         let prover = MockProver::run(
-            14,
+            17,
             &circuit,
             vec![vec![wrong_ct_commit], vec![t_commit]],
+        )
+        .expect("mock prover");
+        assert!(prover.verify().is_err());
+    }
+
+    #[test]
+    fn lwe_amount_chip_rejects_wrong_t_commitment() {
+        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
+        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let v = 0xA5A5_5A5A;
+
+        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
+        let wrong_t_commit = Fp::from(654321);
+
+        let circuit = LweAmountCircuit { u, v, t };
+        let prover = MockProver::run(
+            17,
+            &circuit,
+            vec![vec![ct_commit], vec![wrong_t_commit]],
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());
