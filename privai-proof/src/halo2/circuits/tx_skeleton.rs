@@ -5,8 +5,8 @@ use halo2_proofs::{
 };
 
 use crate::halo2::{
-    AmountCipherParams, LweAmountChip, LweAmountConfig, NoiseClassChip, NoiseClassConfig,
-    NoteCommitChip, NoteCommitConfig, NullifierChip, NullifierConfig,
+    AmountCipherParams, LWE_DIMENSION_V0, LweAmountChip, LweAmountConfig, NoiseClassChip,
+    NoiseClassConfig, NoteCommitChip, NoteCommitConfig, NullifierChip, NullifierConfig,
 };
 
 #[derive(Clone, Debug)]
@@ -29,11 +29,11 @@ pub struct PrivaiTxSkeletonConfig {
 /// once wiring and well-formedness constraints are stabilized.
 #[derive(Clone, Debug)]
 pub struct PrivaiTxSkeletonCircuit {
-    pub output_u: [u32; 512],
+    pub output_u: [u32; LWE_DIMENSION_V0],
     pub output_v: u32,
-    pub output_t: [u32; 512],
-    pub output_r: [u32; 512],
-    pub output_e1: [i16; 512],
+    pub output_t: [u32; LWE_DIMENSION_V0],
+    pub output_r: [u32; LWE_DIMENSION_V0],
+    pub output_e1: [i16; LWE_DIMENSION_V0],
     pub output_e2: i16,
     pub output_noise_class: u8,
     pub output_spend_policy_commit: Fp,
@@ -47,11 +47,11 @@ pub struct PrivaiTxSkeletonCircuit {
 impl Default for PrivaiTxSkeletonCircuit {
     fn default() -> Self {
         Self {
-            output_u: [0; 512],
+            output_u: [0; LWE_DIMENSION_V0],
             output_v: 0,
-            output_t: [0; 512],
-            output_r: [0; 512],
-            output_e1: [0; 512],
+            output_t: [0; LWE_DIMENSION_V0],
+            output_r: [0; LWE_DIMENSION_V0],
+            output_e1: [0; LWE_DIMENSION_V0],
             output_e2: 0,
             output_noise_class: 0,
             output_spend_policy_commit: Fp::from(0u64),

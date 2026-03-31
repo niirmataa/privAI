@@ -4,6 +4,8 @@ pub const DEFAULT_CHAIN_ID: u32 = 0x5052_4149; // "PRAI"
 pub const LWE_MODULUS_Q: u32 = 4_294_967_291;
 pub const PLAINTEXT_SPACE_P: u16 = 16_384;
 pub const LWE_DIMENSION: usize = 1024;
+/// Δ = floor(q / p) = floor(4_294_967_291 / 16_384) = 262_143.
+/// It differs from 2^18 = 262_144 because q = 2^32 - 5 is not divisible by p.
 pub const DELTA: u32 = 262_143;
 pub const B_MAX: u32 = 131_071;
 

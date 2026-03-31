@@ -16,19 +16,18 @@ use halo2_proofs::{
 
 use crate::halo2::{
     U32_LIMBS_PER_FIELD, pack_u32_limbs_to_fp, packed_u32_field_len,
-    params::AmountCipherParams,
+    params::{AmountCipherParams, LWE_DIMENSION_V0},
 };
 
-pub const LWE_DIMENSION_V0: usize = 512;
 pub const LWE_CIPHERTEXT_LIMBS_V0: usize = LWE_DIMENSION_V0 + 1;
 pub const PACKED_LWE_CIPHERTEXT_LEN_V0: usize = packed_u32_field_len(LWE_CIPHERTEXT_LIMBS_V0);
 pub const PACKED_LWE_PUBLIC_KEY_LEN_V0: usize = packed_u32_field_len(LWE_DIMENSION_V0);
 const POSEIDON_WIDTH: usize = 3;
 const POSEIDON_RATE: usize = 2;
-// For n = 512 and 32-bit limbs:
-//   max dot product < 512 * (2^32 - 1)^2 < 2^73
-// After reduction mod 2^32, the quotient therefore fits below 2^41.
-// We keep one extra bit of slack and constrain the witness quotient to 42 bits.
+// For n = 1024 and q = 2^32 - 5:
+//   max dot product < 1024 * (q - 1)^2 < 2^74
+// After reduction mod q, the quotient therefore fits below 2^42.
+// We keep the witness quotient constrained to 42 bits.
 const DOT_REDUCTION_QUOTIENT_BITS: usize = 42;
 
 /// First concrete stage of the future PKE-LWE amount gadget.

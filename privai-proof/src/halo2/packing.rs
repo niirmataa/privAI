@@ -43,6 +43,8 @@ mod tests {
         assert_eq!(packed_u32_field_len(7), 1);
         assert_eq!(packed_u32_field_len(8), 2);
         assert_eq!(packed_u32_field_len(512), 74);
+        assert_eq!(packed_u32_field_len(1024), 147);
+        assert_eq!(packed_u32_field_len(1025), 147);
     }
 
     #[test]

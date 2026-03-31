@@ -5,7 +5,8 @@ use halo2_proofs::{
     poly::Rotation,
 };
 
-pub const LWE_DIMENSION_V0: usize = 512;
+use crate::halo2::params::LWE_DIMENSION_V0;
+
 pub const ACCEPTED_NOISE_CLASSES_V0: [u8; 3] = [0, 1, 2];
 pub const NOISE_CLASS_BOUNDS_V0: [u16; 3] = [16, 32, 64];
 
