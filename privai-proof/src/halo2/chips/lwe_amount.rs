@@ -16,7 +16,7 @@ use halo2_proofs::{
 
 use crate::halo2::{
     U32_LIMBS_PER_FIELD, pack_u32_limbs_to_fp, packed_u32_field_len,
-    params::{AmountCipherParams, LWE_DIMENSION_V0},
+    params::{AmountCipherParams, LWE_DIMENSION_V0, LWE_MODULUS_Q_V0},
 };
 
 pub const LWE_CIPHERTEXT_LIMBS_V0: usize = LWE_DIMENSION_V0 + 1;
@@ -259,14 +259,14 @@ impl LweAmountChip {
             vec![q * (acc - prev_acc - product)]
         });
 
-        meta.create_gate("dot-product mod 2^32 equality", |meta| {
+        meta.create_gate("dot-product mod q equality", |meta| {
             let q = meta.query_selector(q_reduce_eq);
             let full = meta.query_advice(reduce_full, Rotation::cur());
             let reduced = meta.query_advice(reduce_reduced, Rotation::cur());
             let quotient = meta.query_advice(reduce_quotient, Rotation::cur());
-            let two_pow_32 = Expression::Constant(Fp::from(1u64 << 32));
+            let q_modulus = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0));
 
-            vec![q * (full - reduced - quotient * two_pow_32)]
+            vec![q * (full - reduced - quotient * q_modulus)]
         });
 
         meta.create_gate("dot-product quotient bit is boolean", |meta| {
@@ -303,7 +303,7 @@ impl LweAmountChip {
             vec![q * (quotient - acc)]
         });
 
-        meta.create_gate("noise-adjusted u32 relation", |meta| {
+        meta.create_gate("noise-adjusted mod q relation", |meta| {
             let q = meta.query_selector(q_noise_relation);
             let reduced = meta.query_advice(noise_reduced, Rotation::cur());
             let noise = meta.query_advice(noise_centered, Rotation::cur());
@@ -311,11 +311,11 @@ impl LweAmountChip {
             let wrap_positive = meta.query_advice(noise_wrap_positive, Rotation::cur());
             let wrap_negative = meta.query_advice(noise_wrap_negative, Rotation::cur());
             let one = Expression::Constant(Fp::from(1u64));
-            let two_pow_32 = Expression::Constant(Fp::from(1u64 << 32));
+            let q_modulus = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0));
 
             vec![
                 q.clone()
-                    * (output - reduced - noise - two_pow_32 * (wrap_positive.clone() - wrap_negative.clone())),
+                    * (output - reduced - noise - q_modulus * (wrap_positive.clone() - wrap_negative.clone())),
                 q.clone() * wrap_positive.clone() * (wrap_positive - one.clone()),
                 q.clone() * wrap_negative.clone() * (wrap_negative - one.clone()),
                 q * meta.query_advice(noise_wrap_positive, Rotation::cur())
@@ -705,7 +705,7 @@ impl LweAmountChip {
         )
     }
 
-    pub fn assign_dot_product_mod_u32_reduction(
+    pub fn assign_dot_product_mod_q_reduction(
         &self,
         mut layouter: impl Layouter<Fp>,
         name: &'static str,
@@ -713,11 +713,10 @@ impl LweAmountChip {
         reduced_value: u32,
         quotient: u64,
     ) -> Result<AssignedCell<Fp, Fp>, Error> {
-        // `quotient` must satisfy `full_value = reduced_value + quotient * modulus`.
-        // The current scaffold still uses the pre-alignment `2^32` modulus for
-        // this reduction step; the next pass will switch the gate to
-        // `LWE_MODULUS_Q_V0`, and callers must compute the witness with
-        // `div_euclid(modulus)` instead of `>> 32`.
+        // `quotient` must satisfy:
+        //   full_value = reduced_value + quotient * LWE_MODULUS_Q_V0
+        // Callers must compute the witness with `div_euclid(LWE_MODULUS_Q_V0)`,
+        // not with a bit shift.
         if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
             return Err(Error::Synthesis);
         }
@@ -808,7 +807,7 @@ impl LweAmountChip {
         Ok(reduced_cell)
     }
 
-    pub fn assign_noise_adjusted_u32_relation(
+    pub fn assign_noise_adjusted_mod_q_relation(
         &self,
         mut layouter: impl Layouter<Fp>,
         name: &'static str,
@@ -996,7 +995,7 @@ impl LweAmountChip {
         // Canonical inter-chip representation for fresh encryption noise is
         // centered signed field elements, exactly as enforced by
         // `NoiseClassChip`. Future well-formedness constraints will lift these
-        // same cells into the `mod 2^32` arithmetic of `u` and `v` with
+        // same cells into the `mod q` arithmetic of `u` and `v` with
         // explicit carry / wrap constraints instead of re-encoding them as
         // standalone `u32` witnesses.
         self.copy_noise_cells(
@@ -1207,14 +1206,14 @@ mod tests {
                 &self.coeffs,
                 &outputs.r_cells,
             )?;
-            let reduced_cell = chip.assign_dot_product_mod_u32_reduction(
+            let reduced_cell = chip.assign_dot_product_mod_q_reduction(
                 layouter.namespace(|| "column_0 reduction"),
                 "column_0_reduction",
                 dot_output.clone(),
                 self.reduced_u0,
                 self.quotient,
             )?;
-            chip.assign_noise_adjusted_u32_relation(
+            chip.assign_noise_adjusted_mod_q_relation(
                 layouter.namespace(|| "column_0 noise relation"),
                 "column_0_noise_relation",
                 reduced_cell,
@@ -1263,7 +1262,7 @@ mod tests {
                 &self.coeffs,
                 &outputs.r_cells,
             )?;
-            let reduced_cell = chip.assign_dot_product_mod_u32_reduction(
+            let reduced_cell = chip.assign_dot_product_mod_q_reduction(
                 layouter.namespace(|| "column_0 reduction"),
                 "column_0_reduction",
                 dot_output,
@@ -1447,17 +1446,15 @@ mod tests {
     fn lwe_amount_single_column_reduction_accepts_expected_u0() {
         let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
         let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
+        let q = LWE_MODULUS_Q_V0 as u128;
         let dot = coeffs
             .iter()
             .zip(r.iter())
             .fold(0u128, |acc, (&coeff, &value)| {
                 acc + (coeff as u128) * (value as u128)
             });
-        let expected_u0 = coeffs
-            .iter()
-            .zip(r.iter())
-            .fold(0u32, |acc, (&coeff, &value)| acc.wrapping_add(coeff.wrapping_mul(value)));
-        let quotient = (dot >> 32) as u64;
+        let expected_u0 = (dot % q) as u32;
+        let quotient = (dot / q) as u64;
 
         let mut u = [0u32; LWE_DIMENSION_V0];
         u[0] = expected_u0;
@@ -1489,17 +1486,15 @@ mod tests {
     fn lwe_amount_single_column_reduction_rejects_wrong_quotient() {
         let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
         let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
+        let q = LWE_MODULUS_Q_V0 as u128;
         let dot = coeffs
             .iter()
             .zip(r.iter())
             .fold(0u128, |acc, (&coeff, &value)| {
                 acc + (coeff as u128) * (value as u128)
             });
-        let expected_u0 = coeffs
-            .iter()
-            .zip(r.iter())
-            .fold(0u32, |acc, (&coeff, &value)| acc.wrapping_add(coeff.wrapping_mul(value)));
-        let quotient = (dot >> 32) as u64;
+        let expected_u0 = (dot % q) as u32;
+        let quotient = (dot / q) as u64;
 
         let mut u = [0u32; LWE_DIMENSION_V0];
         u[0] = expected_u0;
@@ -1542,7 +1537,8 @@ mod tests {
         let mut e1 = [0i16; LWE_DIMENSION_V0];
         e1[0] = -12;
         let reduced_dot = 5u32;
-        let expected_u0 = reduced_dot.wrapping_add(e1[0] as u32);
+        let expected_u0 =
+            ((reduced_dot as i64) + (e1[0] as i64)).rem_euclid(LWE_MODULUS_Q_V0 as i64) as u32;
         let quotient = 0u64;
 
         let mut u = [0u32; LWE_DIMENSION_V0];
@@ -1591,7 +1587,8 @@ mod tests {
         let mut e1 = [0i16; LWE_DIMENSION_V0];
         e1[0] = -12;
         let reduced_dot = 5u32;
-        let expected_u0 = reduced_dot.wrapping_add(e1[0] as u32);
+        let expected_u0 =
+            ((reduced_dot as i64) + (e1[0] as i64)).rem_euclid(LWE_MODULUS_Q_V0 as i64) as u32;
         let quotient = 0u64;
 
         let mut u = [0u32; LWE_DIMENSION_V0];
