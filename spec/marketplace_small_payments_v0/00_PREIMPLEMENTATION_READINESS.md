@@ -270,7 +270,7 @@ Przed wejsciem w ciezsza implementacje chcemy miec:
 2. `service_payment_policy.md`
 3. `ticket_id_and_nullifier.md`
 4. `receipt_and_settlement_root.md`
-5. `privacy_tiers.md`
+5. `05_PRIVACY_TIERS.md`
 
 ## 8. Werdykt readiness
 

@@ -20,5 +20,4 @@ Pliki w tym katalogu:
 - `02_SERVICE_PAYMENT_POLICY.md`
 - `03_TICKET_ID_AND_NULLIFIER.md`
 - `04_RECEIPT_AND_SETTLEMENT_ROOT.md`
-- kolejne dokumenty specyfikacyjne, ktore beda dopinac:
-  - privacy tiers
+- `05_PRIVACY_TIERS.md`
