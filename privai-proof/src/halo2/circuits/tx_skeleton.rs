@@ -32,6 +32,7 @@ pub struct PrivaiTxSkeletonCircuit {
     pub output_u: [u32; 512],
     pub output_v: u32,
     pub output_t: [u32; 512],
+    pub output_r: [u32; 512],
     pub output_e1: [i16; 512],
     pub output_e2: i16,
     pub output_noise_class: u8,
@@ -49,6 +50,7 @@ impl Default for PrivaiTxSkeletonCircuit {
             output_u: [0; 512],
             output_v: 0,
             output_t: [0; 512],
+            output_r: [0; 512],
             output_e1: [0; 512],
             output_e2: 0,
             output_noise_class: 0,
@@ -105,6 +107,7 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
             &self.output_u,
             self.output_v,
             &self.output_t,
+            &self.output_r,
             &noise_outputs.e1_cells,
             &noise_outputs.e2_cell,
         )?;
@@ -157,6 +160,7 @@ mod tests {
     fn tx_skeleton_circuit_composes_existing_halo2_chips() {
         let output_u = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(5));
         let output_t = array::from_fn(|i| (i as u32).wrapping_mul(13).wrapping_add(9));
+        let output_r = array::from_fn(|i| (i as u32).wrapping_mul(19).wrapping_add(11));
         let output_e1 = array::from_fn(|i| match i % 4 {
             0 => 0,
             1 => 4,
@@ -187,6 +191,7 @@ mod tests {
             output_u,
             output_v,
             output_t,
+            output_r,
             output_e1,
             output_e2: -12,
             output_noise_class,

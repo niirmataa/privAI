@@ -58,6 +58,10 @@ pub struct LweAmountChip {
 pub struct LweAmountOutputs {
     pub ct_amt_commit: AssignedCell<Fp, Fp>,
     pub t_commit: AssignedCell<Fp, Fp>,
+    pub u_cells: Vec<AssignedCell<Fp, Fp>>,
+    pub v_cell: AssignedCell<Fp, Fp>,
+    pub t_cells: Vec<AssignedCell<Fp, Fp>>,
+    pub r_cells: Vec<AssignedCell<Fp, Fp>>,
 }
 
 impl LweAmountChip {
@@ -216,11 +220,51 @@ impl LweAmountChip {
         )
     }
 
-    fn assign_packed_limbs<const PACKED: usize>(
+    fn assign_canonical_limb_cells(
         &self,
         mut layouter: impl Layouter<Fp>,
         name: &'static str,
         limbs: &[u32],
+    ) -> Result<Vec<AssignedCell<Fp, Fp>>, Error> {
+        layouter.assign_region(
+            || name,
+            |mut region| {
+                let mut assigned = Vec::with_capacity(limbs.len());
+                for (offset, limb) in limbs.iter().copied().enumerate() {
+                    let lo = limb & 0xFFFF;
+                    let hi = limb >> 16;
+
+                    self.config.q_limb.enable(&mut region, offset)?;
+                    let cell = region.assign_advice(
+                        || format!("{name}_limb_{offset}"),
+                        self.config.limb_value,
+                        offset,
+                        || Value::known(Fp::from(limb as u64)),
+                    )?;
+                    region.assign_advice(
+                        || format!("{name}_limb_lo_{offset}"),
+                        self.config.limb_lo,
+                        offset,
+                        || Value::known(Fp::from(lo as u64)),
+                    )?;
+                    region.assign_advice(
+                        || format!("{name}_limb_hi_{offset}"),
+                        self.config.limb_hi,
+                        offset,
+                        || Value::known(Fp::from(hi as u64)),
+                    )?;
+                    assigned.push(cell);
+                }
+                Ok(assigned)
+            },
+        )
+    }
+
+    fn assign_packed_from_cells<const PACKED: usize>(
+        &self,
+        mut layouter: impl Layouter<Fp>,
+        name: &'static str,
+        limb_cells: &[AssignedCell<Fp, Fp>],
         packed: [Fp; PACKED],
     ) -> Result<[AssignedCell<Fp, Fp>; PACKED], Error> {
         layouter.assign_region(
@@ -241,29 +285,21 @@ impl LweAmountChip {
 
                     for limb_offset in 0..U32_LIMBS_PER_FIELD {
                         let offset = base + limb_offset;
-                        let limb = limbs.get(offset).copied().unwrap_or(0);
-                        let lo = limb & 0xFFFF;
-                        let hi = limb >> 16;
-
-                        self.config.q_limb.enable(&mut region, offset)?;
-                        region.assign_advice(
-                            || format!("{name}_limb_{offset}"),
-                            self.config.limb_value,
-                            offset,
-                            || Value::known(Fp::from(limb as u64)),
-                        )?;
-                        region.assign_advice(
-                            || format!("{name}_limb_lo_{offset}"),
-                            self.config.limb_lo,
-                            offset,
-                            || Value::known(Fp::from(lo as u64)),
-                        )?;
-                        region.assign_advice(
-                            || format!("{name}_limb_hi_{offset}"),
-                            self.config.limb_hi,
-                            offset,
-                            || Value::known(Fp::from(hi as u64)),
-                        )?;
+                        if let Some(cell) = limb_cells.get(offset) {
+                            cell.copy_advice(
+                                || format!("{name}_limb_{offset}"),
+                                &mut region,
+                                self.config.limb_value,
+                                offset,
+                            )?;
+                        } else {
+                            region.assign_advice(
+                                || format!("{name}_limb_pad_{offset}"),
+                                self.config.limb_value,
+                                offset,
+                                || Value::known(Fp::from(0u64)),
+                            )?;
+                        }
                     }
                 }
                 assigned.try_into().map_err(|_| Error::Synthesis)
@@ -306,6 +342,7 @@ impl LweAmountChip {
         u: &[u32; LWE_DIMENSION_V0],
         v: u32,
         t: &[u32; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
     ) -> Result<LweAmountOutputs, Error> {
         if self.params.lwe_dimension != LWE_DIMENSION_V0 {
             return Err(Error::Synthesis);
@@ -322,16 +359,40 @@ impl LweAmountChip {
             .try_into()
             .map_err(|_| Error::Synthesis)?;
 
-        let ct_words = self.assign_packed_limbs(
+        let u_cells = self.assign_canonical_limb_cells(
+            layouter.namespace(|| "assign canonical u"),
+            "canonical_u",
+            u,
+        )?;
+        let v_cells = self.assign_canonical_limb_cells(
+            layouter.namespace(|| "assign canonical v"),
+            "canonical_v",
+            &[v],
+        )?;
+        let v_cell = v_cells.into_iter().next().ok_or(Error::Synthesis)?;
+        let t_cells = self.assign_canonical_limb_cells(
+            layouter.namespace(|| "assign canonical t"),
+            "canonical_t",
+            t,
+        )?;
+        let r_cells = self.assign_canonical_limb_cells(
+            layouter.namespace(|| "assign canonical r"),
+            "canonical_r",
+            r,
+        )?;
+
+        let mut ct_limb_cells = u_cells.clone();
+        ct_limb_cells.push(v_cell.clone());
+        let ct_words = self.assign_packed_from_cells(
             layouter.namespace(|| "assign packed ct_amt"),
             "packed_ct_amt",
-            &ct_limbs,
+            &ct_limb_cells,
             packed_ct,
         )?;
-        let t_words = self.assign_packed_limbs(
+        let t_words = self.assign_packed_from_cells(
             layouter.namespace(|| "assign packed t"),
             "packed_t",
-            t,
+            &t_cells,
             packed_t,
         )?;
 
@@ -369,6 +430,10 @@ impl LweAmountChip {
         Ok(LweAmountOutputs {
             ct_amt_commit: ct_output,
             t_commit: t_output,
+            u_cells,
+            v_cell,
+            t_cells,
+            r_cells,
         })
     }
 
@@ -378,6 +443,7 @@ impl LweAmountChip {
         u: &[u32; LWE_DIMENSION_V0],
         v: u32,
         t: &[u32; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
         e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
         e2_cell: &AssignedCell<Fp, Fp>,
     ) -> Result<LweAmountOutputs, Error> {
@@ -392,7 +458,7 @@ impl LweAmountChip {
             e1_cells,
             e2_cell,
         )?;
-        self.assign(layouter, u, v, t)
+        self.assign(layouter, u, v, t, r)
     }
 }
 
@@ -416,6 +482,7 @@ mod tests {
         u: [u32; LWE_DIMENSION_V0],
         v: u32,
         t: [u32; LWE_DIMENSION_V0],
+        r: [u32; LWE_DIMENSION_V0],
     }
 
     impl Default for LweAmountCircuit {
@@ -424,6 +491,7 @@ mod tests {
                 u: [0; LWE_DIMENSION_V0],
                 v: 0,
                 t: [0; LWE_DIMENSION_V0],
+                r: [0; LWE_DIMENSION_V0],
             }
         }
     }
@@ -452,6 +520,7 @@ mod tests {
                 &self.u,
                 self.v,
                 &self.t,
+                &self.r,
             )?;
             Ok(())
         }
@@ -461,12 +530,13 @@ mod tests {
     fn lwe_amount_chip_accepts_expected_public_commitments() {
         let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
         let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
         let v = 0xA5A5_5A5A;
 
         let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
         let t_commit = LweAmountChip::poseidon_hash_t(&t);
 
-        let circuit = LweAmountCircuit { u, v, t };
+        let circuit = LweAmountCircuit { u, v, t, r };
         let prover =
             MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]]).expect("mock prover");
         prover.assert_satisfied();
@@ -476,12 +546,13 @@ mod tests {
     fn lwe_amount_chip_rejects_wrong_ct_commitment() {
         let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
         let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
         let v = 0xA5A5_5A5A;
 
         let wrong_ct_commit = Fp::from(123456);
         let t_commit = LweAmountChip::poseidon_hash_t(&t);
 
-        let circuit = LweAmountCircuit { u, v, t };
+        let circuit = LweAmountCircuit { u, v, t, r };
         let prover = MockProver::run(
             17,
             &circuit,
@@ -495,12 +566,13 @@ mod tests {
     fn lwe_amount_chip_rejects_wrong_t_commitment() {
         let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
         let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
+        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
         let v = 0xA5A5_5A5A;
 
         let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
         let wrong_t_commit = Fp::from(654321);
 
-        let circuit = LweAmountCircuit { u, v, t };
+        let circuit = LweAmountCircuit { u, v, t, r };
         let prover = MockProver::run(
             17,
             &circuit,
