@@ -51,6 +51,7 @@ Musimy umiec odpowiedziec, jak chain ma zaakceptowac lekki debit tak, zeby:
 - nie widzial stalego rail ID,
 - nie zaakceptowal replay,
 - nie zaakceptowal double-spend,
+- nie zaakceptowal losowego nullifiera bez prawa wydania z depozytu,
 - merchant nie mogl latwo reuzyc obcego ticketu,
 - dwa zakupy tego samego usera nie byly latwo linkowalne.
 
@@ -64,6 +65,9 @@ Ticket nie jest publicznym kontem.
 Ticket nie jest globalnym identity tokenem.
 Ticket nie jest dlugowiecznym session ID.
 
+Ticket jest scisle `one-time`.
+Nie wolno interpretowac go jako stalego kontenera do inkrementowanego usage billingu.
+
 ### 5.2. TicketSeed
 
 `TicketSeed` to lokalny sekret raila, wyprowadzony po stronie walleta z:
@@ -73,6 +77,9 @@ Ticket nie jest dlugowiecznym session ID.
 - opcjonalnie dodatkowego rail salt.
 
 `TicketSeed` nie trafia on-chain.
+
+`TicketSeed` sam w sobie nie rozwiazuje jeszcze problemu konsensusowego.
+W modelu finalnym musi byc jasno pokazane, skad bierze sie prawo do generowania ticketow i jak settlement odroznia prawdziwy debit od losowego nullifiera.
 
 ### 5.3. TicketId
 
@@ -101,6 +108,26 @@ Rola:
 Domyslna zasada:
 
 - chain pilnuje globalnej unikalnosci `TicketNullifier`.
+
+Sama unikalnosc nie wystarcza.
+Model musi jeszcze odpowiedziec, skad bierze sie `deposit rights binding`.
+
+### 5.5. TabSession / UsageContext
+
+To jest osobny byt od ticketu.
+
+Rola:
+
+- wielokrotne eventy usage-metered,
+- merchant tab,
+- sesje wielu malych wywolan,
+- lokalna lub marketplace'owa agregacja stanu.
+
+Domyslna zasada:
+
+- `ticket` sluzy do jednorazowego debitu,
+- `tab/session` sluzy do wielokrotnego usage tracking,
+- nie wolno mieszac tych dwoch semantyk w jednym identyfikatorze.
 
 ## 6. Domyslne decyzje robocze do przyjecia, jesli nie ma lepszej kontrpropozycji
 
@@ -150,6 +177,37 @@ Domyslna decyzja:
 - ticketi musza byc odtwarzalne z lokalnego seeda albo z backupu walleta,
 - nie wolno opierac recovery tylko na pamieci procesu.
 
+### D6. Deposit binding musi byc jawny
+
+Domyslna decyzja:
+
+- nie wystarczy sam `ticket_nullifier`,
+- model musi jawnie opisac, jak debit jest powiazany z prawem wydania z depozytu.
+
+W tej sekcji oczekujemy rozstrzygniecia jednego z dwoch modeli:
+
+- `marketplace-trusted accounting`
+  - chain ufa, ze redeem/claim od marketplace lub merchanta odpowiada prawdziwym prawom z depozytu
+  - to jest jawne zalozenie zaufania v0
+- `anchor-bound cryptographic model`
+  - debit / settlement daje chainowi kryptograficznie sprawdzalny zwiazek z `DepositAnchor`
+
+Jesli wybierany jest model trusted, ma to byc nazwane wprost jako trust assumption, nie ukryte za ogolnikami.
+
+### D7. `purchase_commit` pozostaje obowiazkowy
+
+Domyslna decyzja:
+
+- `purchase_commit` zostaje,
+- nie wolno go wyrzucac tylko dlatego, ze mamy jednorazowy ticket.
+
+Powod:
+
+- porzadkuje refund path,
+- porzadkuje dispute path,
+- porzadkuje receipt linkage,
+- rozdziela sam debit od biznesowego sensu zakupu.
+
 ## 7. Wymagany model generacji
 
 Masz pracowac z nastepujacym szkicem:
@@ -170,6 +228,11 @@ Masz odpowiedziec:
 4. ktore z nich maja byc podpisywane,
 5. jak uniknac linkowalnosci miedzy merchantami,
 6. jak uniknac linkowalnosci miedzy sesjami.
+
+Masz tez jawnie odpowiedziec:
+
+7. jak to wyprowadzenie laczy sie z prawem z depozytu,
+8. czy ten model wymaga trusted marketplace accounting, czy daje chainowi cryptographic anchor binding.
 
 ## 8. Wymagany model scope
 
@@ -224,6 +287,13 @@ Domyslna propozycja, od ktorej masz startowac:
 - `service-scoped` jako opcja dla wrazliwych uslug,
 - `marketplace-wide` tylko jesli istnieje bardzo mocny argument ekonomiczny i prywatnosciowy.
 
+Masz tez rozdzielic:
+
+- scope ticketu
+- scope tab/session context
+
+To nie musza byc identyczne zakresy.
+
 ## 9. Wymagany model publicznych danych
 
 Masz odpowiedziec, co konkretnie trafia on-chain przy lekkim debicie.
@@ -242,7 +312,36 @@ Masz ocenic:
 - czy powinien byc tylko lokalny
 - czy powinien byc widoczny merchantowi, ale nie chainowi
 
+`purchase_commit` traktuj jako obowiazkowy element analizy, nie opcjonalny detal.
+
 ## 10. Wymagany model replay protection
+
+## 10.1. Wymagany model deposit binding
+
+To jest sekcja krytyczna.
+
+Masz opisac, jak chain lub settlement layer odroznia:
+
+- prawdziwy debit wynikajacy z depozytu
+- od losowego, samowolnie wymyslonego `ticket_nullifier`.
+
+Musisz wybrac i uzasadnic:
+
+### Model A. Marketplace-trusted accounting
+
+- merchant lub marketplace prowadzi accounting off-chain,
+- chain ufa claimowi / redeemowi w granicach zdefiniowanego trust assumption,
+- `ticket_nullifier` zabezpiecza jednorazowosc,
+- depozyt i saldo sa pilnowane w trusted accounting layer.
+
+### Model B. Anchor-bound cryptographic settlement
+
+- settlement daje chainowi kryptograficzny zwiazek z `DepositAnchor`,
+- chain nie ufa tylko accounting layer,
+- jest mocniej trust-minimized,
+- ale moze byc ciezsze i bardziej zlozone dla v0.
+
+Nie wolno pominac tego wyboru.
 
 Masz opisac konkretny mechanizm:
 
@@ -259,6 +358,12 @@ Przyjmij jako baseline:
 - merchant dba o zgodnosc `purchase_commit` i receipt context,
 - wallet nie powinien reuzywac ticketow po sukcesie ani po niejednoznacznym timeout.
 
+Masz tez jawnie opisac:
+
+- dlaczego replay protection nie moze byc jednoczesnie modelem incremental billing,
+- gdzie konczy sie odpowiedzialnosc `ticket`,
+- gdzie zaczyna sie odpowiedzialnosc `tab/session`.
+
 ## 11. Wymagany model recovery i lifecycle
 
 Masz opisac:
@@ -270,6 +375,12 @@ Masz opisac:
 - co robi wallet po timeout,
 - jak odzyskac stan po utracie urzadzenia,
 - jak uniknac lokalnych kolizji przy wielu urzadzeniach.
+
+Masz tez jawnie odpowiedziec:
+
+- czy wiele urzadzen moze legalnie korzystac z jednego `DepositAnchor`,
+- czy potrzebny jest osobny device branch / sub-seed,
+- jak uniknac kolizji licznikow.
 
 ## 12. Wymagany model auth
 
@@ -295,6 +406,9 @@ Nie wolno zostawic tych pytan bez odpowiedzi:
 6. Czy ticketi niewykorzystane po expiry wracaja do puli, czy sa spalane logicznie?
 7. Czy wallet moze generowac ticketi dla wielu merchantow z jednego rail seed?
 8. Jak wyglada recovery, jesli user ma dwa urzadzenia?
+9. Jak dokladnie debit jest powiazany z prawem z depozytu?
+10. Czy v0 wybiera `marketplace-trusted accounting`, czy `anchor-bound cryptographic settlement`?
+11. Gdzie konczy sie `ticket`, a gdzie zaczyna `tab/session`?
 
 ## 14. Czego nie wolno proponowac
 
@@ -306,6 +420,8 @@ Nie proponuj:
 - prostego numerowanego session ID, ktory da sie linkowac przez miesiac
 - replay protection opartego tylko na merchant-side cache
 - modelu, w ktorym chain nie ma zadnego twardego jednorazowego markera
+- modelu, w ktorym ten sam ticket reprezentuje rosnacy rachunek usage-metered
+- modelu, w ktorym `purchase_commit` znika i zostaje tylko `amount + nullifier`
 
 ## 15. Wymagany format odpowiedzi
 
@@ -315,12 +431,14 @@ Odpowiedz ma miec dokladnie te sekcje:
 2. `Alternative design`
 3. `Data model`
 4. `Public vs private fields`
-5. `Replay protection model`
-6. `Scope decision`
-7. `Recovery and lifecycle`
-8. `Threat analysis`
-9. `Frozen decisions`
-10. `Open questions`
+5. `Deposit binding model`
+6. `Replay protection model`
+7. `Scope decision`
+8. `Ticket vs tab separation`
+9. `Recovery and lifecycle`
+10. `Threat analysis`
+11. `Frozen decisions`
+12. `Open questions`
 
 ## 16. Oczekiwany wynik
 
@@ -329,8 +447,10 @@ Po przeczytaniu tego dokumentu i wykonaniu zadania mamy dostac:
 - gotowa odpowiedz, czym jest `ticket`,
 - gotowa odpowiedz, czym jest `ticket_nullifier`,
 - gotowa decyzje o scope ticketu,
+- gotowa odpowiedz, jak `ticket_nullifier` jest zwiazany z prawem z depozytu,
 - gotowa odpowiedz, co trafia on-chain,
 - gotowa odpowiedz, jak dziala replay protection,
+- gotowa odpowiedz, jak odroznic `ticket` od `tab/session`,
 - minimalna lista otwartych pytan, jesli cos naprawde musi zostac otwarte.
 
 Nie chcemy po tej iteracji dostac kolejnego brainstormingu.
