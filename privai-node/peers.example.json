@@ -1,0 +1,25 @@
+{
+  "peers": [
+    {
+      "id": "validator-0",
+      "host": "abcd1234efgh5678.onion",
+      "port": 19000,
+      "kem_pk_b64": "BASE64_FRODOKEM_PK_V0",
+      "sig_pk_b64": "BASE64_FALCON_PK_V0"
+    },
+    {
+      "id": "validator-1",
+      "host": "ijkl9012mnop3456.onion",
+      "port": 19000,
+      "kem_pk_b64": "BASE64_FRODOKEM_PK_V1",
+      "sig_pk_b64": "BASE64_FALCON_PK_V1"
+    },
+    {
+      "id": "validator-2",
+      "host": "qrst7890uvwx1234.onion",
+      "port": 19000,
+      "kem_pk_b64": "BASE64_FRODOKEM_PK_V2",
+      "sig_pk_b64": "BASE64_FALCON_PK_V2"
+    }
+  ]
+}

@@ -6,11 +6,13 @@
 //! - Tor broadcast (wysyła odpowiedzi)
 //! - Timeout checker (ViewChange)
 
+use std::collections::HashMap;
+
 use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 use nxms_transport::peers::PeerBook;
-use privai_chain::{ConsensusMsg, VoteType};
+use privai_chain::{Block, ConsensusMsg, Hash32, VoteType};
 
 use crate::net::{self, NetConfig, NetError};
 use crate::node::{NodeError, PrivaiNode};
@@ -28,6 +30,9 @@ where
     pub node: PrivaiNode<S, V, A, P>,
     pub net_config: NetConfig,
     pub peer_book: PeerBook,
+    /// Cache bloków po hashu — potrzebny do finalizacji po otrzymaniu QC.
+    /// Klucz: block_hash, wartość: Block.
+    block_cache: HashMap<Hash32, Block>,
 }
 
 impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>
@@ -105,6 +110,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     eprintln!("[consensus] REJECTED proposal: roots mismatch");
                     return;
                 }
+
+                // Cache bloku — potrzebny później do finalizacji po QC
+                let block_hash = block.hash();
+                self.block_cache.insert(block_hash, block.clone());
 
                 // Import bloku do ledgera
                 if let Err(e) = self.node.import_block(&block) {
@@ -186,11 +195,26 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
                 // Finalizacja tylko dla Precommit QC
                 if qc.vote_type == VoteType::Precommit {
-                    // Szukamy blok w ledgerze po hashu (TODO: cache bloków)
-                    // Na razie logujemy — finalizacja wymaga bloku jako parametru
-                    eprintln!(
-                        "[consensus] PRECOMMIT QC received, block finalization pending (need block data)"
-                    );
+                    if let Some(block) = self.block_cache.remove(&qc.block_hash) {
+                        match self.node.finalize_block_with_qc(&block, &qc) {
+                            Ok(()) => {
+                                eprintln!(
+                                    "[consensus] FINALIZED block {:?} at height={} round={}",
+                                    &qc.block_hash[..8],
+                                    qc.height,
+                                    qc.round
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("[consensus] finalization failed: {}", e);
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "[consensus] QC for unknown block {:?} — not in cache",
+                            &qc.block_hash[..8]
+                        );
+                    }
                 }
             }
 
