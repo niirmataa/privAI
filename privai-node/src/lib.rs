@@ -1,5 +1,6 @@
 pub mod config;
 pub mod consensus_loop;
+pub mod gossip;
 pub mod identity_provider;
 pub mod mempool;
 pub mod net;
@@ -9,6 +10,7 @@ pub mod state_sync;
 
 pub use config::{NodeConfig, ValidatorConfig, DEFAULT_CONSENSUS_TIMEOUT_MS};
 pub use consensus_loop::{ConsensusLoop, ConsensusLoopError};
+pub use gossip::{GossipTxMsg, GOSSIP_FANOUT, MAX_GOSSIP_HOPS};
 pub use mempool::{Mempool, MempoolEntry, MAX_MEMPOOL_SIZE, MAX_TX_AGE_MS};
 pub use net::{NetConfig, NetError};
 pub use node::{NodeError, PrivaiNode};
