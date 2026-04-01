@@ -24,10 +24,12 @@ pub const MAX_SYNC_BATCH: u64 = 10;
 pub async fn request_blocks(
     peer_book: &PeerBook,
     my_id: &str,
-    tor_socks_url: &str,
+    connection_pool: &net::ConnectionPool,
     from_height: u64,
     to_height: u64,
     my_pk_hash: Hash32,
+    node_kem_pk: &[u8],
+    node_sig_pk: &[u8],
 ) -> Result<Option<(Vec<Block>, Vec<QuorumCertificate>)>, SyncError> {
     // Wybieramy pierwszego dostępnego peera (oprócz siebie)
     let peer = peer_book
@@ -42,8 +44,8 @@ pub async fn request_blocks(
         requester_pk_hash: my_pk_hash,
     };
 
-    // Wysyłamy request
-    net::send_to_peer(peer, tor_socks_url, &msg)
+    // Wysyłamy request przez pulę połączeń
+    connection_pool.send_message(peer, &msg, node_kem_pk, node_sig_pk, my_id)
         .await
         .map_err(SyncError::Net)?;
 
@@ -60,8 +62,12 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
     from_height: u64,
     to_height: u64,
     requester_pk_hash: Hash32,
-    net_config: &NetConfig,
+    _net_config: &NetConfig,
     peer_book: &PeerBook,
+    connection_pool: &net::ConnectionPool,
+    node_kem_pk: &[u8],
+    node_sig_pk: &[u8],
+    node_peer_id: &str,
 ) {
     let current_height = node.ledger().snapshot().height;
     let from = from_height.min(current_height);
@@ -103,15 +109,18 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
 
         // Znajdź requestera w peer_book i wyślij TYLKO do niego
         // (nie broadcast — SyncResponse może być duży ~10MB)
-        if let Some(peer) = peer_book.peers.iter().find(|p| {
+        if let Some(peer) = peer_book.peers.iter().find(|_p| {
             // TODO: w v1 peer_book powinien mapować pk_hash → peer
             // Na razie wysyłamy do pierwszego dostępnego peera
             true
         }) {
             let peer = peer.clone();
-            let tor_url = net_config.tor_socks_url.clone();
+            let pool = connection_pool.clone();
+            let kem_pk = node_kem_pk.to_vec();
+            let sig_pk = node_sig_pk.to_vec();
+            let peer_id = node_peer_id.to_string();
             tokio::spawn(async move {
-                if let Err(e) = net::send_to_peer(&peer, &tor_url, &response).await {
+                if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &sig_pk, &peer_id).await {
                     eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
                 }
             });

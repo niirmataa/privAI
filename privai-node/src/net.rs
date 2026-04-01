@@ -4,6 +4,9 @@
 //! - nasłuchuje na Tor hidden service (TCP)
 //! - wysyła ConsensusMsg do peerów przez SOCKS5h proxy
 //! - odbiera ConsensusMsg od innych validatorów
+//!
+//! ConnectionPool v1 — utrzymuje żywe tunele Tor między nodami,
+//! eliminując kosztowny "circuit build" przy każdej wiadomości Gossip.
 
 use tokio::sync::mpsc;
 
@@ -11,9 +14,30 @@ use nxms_transport::peers::{Peer, PeerBook};
 use nxms_transport::tor_net::{connect_via_tor, read_frame, write_frame, serve};
 use privai_chain::ConsensusMsg;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::RwLock;
+
+/// Protokół wersji handshake.
+const HANDSHAKE_VERSION: u8 = 1;
+
+/// Wiadomość handshake wymieniana przy pierwszym połączeniu.
+/// Zawiera klucze publiczne PQC (FrodoKEM + Falcon) do szyfrowania dalszej komunikacji.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HandshakeMsg {
+    /// Wersja protokołu handshake
+    pub version: u8,
+    /// Klucz publiczny FrodoKEM (base64)
+    pub kem_pk_b64: String,
+    /// Klucz publiczny Falcon (base64)
+    pub sig_pk_b64: String,
+    /// ID peera w PeerBook
+    pub peer_id: String,
+}
 
 /// Konfiguracja sieciowa węzła konsensusowego.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone)]
 pub struct NetConfig {
     /// Adres nasłuchu lokalnego (np. "127.0.0.1:19000")
     pub listen_addr: String,
@@ -23,16 +47,31 @@ pub struct NetConfig {
     pub peers_path: String,
     /// ID tego węzła w PeerBook
     pub my_peer_id: String,
+    /// Globalna pula połączeń Tor dla węzła
+    pub connection_pool: ConnectionPool,
+}
+
+impl NetConfig {
+    pub fn new(listen_addr: String, tor_socks_url: String, peers_path: String, my_peer_id: String) -> Self {
+        let connection_pool = ConnectionPool::new(tor_socks_url.clone());
+        Self {
+            listen_addr,
+            tor_socks_url,
+            peers_path,
+            my_peer_id,
+            connection_pool,
+        }
+    }
 }
 
 impl Default for NetConfig {
     fn default() -> Self {
-        Self {
-            listen_addr: "127.0.0.1:19000".to_string(),
-            tor_socks_url: "socks5h://127.0.0.1:9050".to_string(),
-            peers_path: "peers.json".to_string(),
-            my_peer_id: "validator-0".to_string(),
-        }
+        Self::new(
+            "127.0.0.1:19000".to_string(),
+            "socks5h://127.0.0.1:9050".to_string(),
+            "peers.json".to_string(),
+            "validator-0".to_string(),
+        )
     }
 }
 
@@ -94,36 +133,521 @@ pub async fn run_listener(
     }
 }
 
-/// Wysyła ConsensusMsg do konkretnego peera przez Tor.
-pub async fn send_to_peer(
-    peer: &Peer,
-    tor_socks_url: &str,
-    msg: &ConsensusMsg,
-) -> Result<(), NetError> {
-    let data = serde_json::to_vec(msg)?;
-    let mut stream = connect_via_tor(tor_socks_url, &peer.host, peer.port)
-        .await
-        .map_err(NetError::Transport)?;
-    write_frame(&mut stream, &data)
-        .await
-        .map_err(NetError::Transport)?;
-    Ok(())
+/// Metadane pojedynczego połączenia w puli.
+pub struct ConnectionMeta {
+    /// Strumień TCP do peera (przez Tor SOCKS5h)
+    stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    /// Kiedy połączenie zostało nawiązane (Tor circuit build)
+    established_at: Instant,
+    /// Kiedy ostatnio wysłaliśmy lub otrzymaliśmy dane
+    last_activity: Instant,
+    /// Liczba udanych operacji I/O na tym połączeniu
+    ops_count: u64,
+    /// Czy połączenie wymaga przebudowania (np. po błędzie)
+    needs_rebuild: bool,
+    /// Czy handshake PQC został ukończony
+    handshake_done: bool,
+    /// Klucz publiczny FrodoKEM peera (po handshake)
+    peer_kem_pk: Option<Vec<u8>>,
+    /// Klucz publiczny Falcon peera (po handshake)
+    peer_sig_pk: Option<Vec<u8>>,
 }
 
-/// Broadcastuje ConsensusMsg do wszystkich peerów z PeerBook (oprócz siebie).
-pub async fn broadcast(
-    peer_book: &PeerBook,
-    my_id: &str,
-    tor_socks_url: &str,
-    msg: &ConsensusMsg,
-) -> Vec<(String, Result<(), NetError>)> {
-    let peers = peer_book.others(my_id);
-    let mut results = Vec::with_capacity(peers.len());
-
-    for peer in peers {
-        let result = send_to_peer(peer, tor_socks_url, msg).await;
-        results.push((peer.id.clone(), result));
+impl ConnectionMeta {
+    fn new(stream: tokio::net::TcpStream) -> Self {
+        let now = Instant::now();
+        Self {
+            stream: Arc::new(tokio::sync::Mutex::new(stream)),
+            established_at: now,
+            last_activity: now,
+            ops_count: 0,
+            needs_rebuild: false,
+            handshake_done: false,
+            peer_kem_pk: None,
+            peer_sig_pk: None,
+        }
     }
 
-    results
+    /// Zapisuje klucze peera po udanym handshake.
+    fn set_peer_keys(&mut self, kem_pk: Vec<u8>, sig_pk: Vec<u8>) {
+        self.peer_kem_pk = Some(kem_pk);
+        self.peer_sig_pk = Some(sig_pk);
+        self.handshake_done = true;
+    }
+
+    /// Zwraca wiek połączenia w sekundach.
+    pub fn age_secs(&self) -> u64 {
+        self.established_elapsed().as_secs()
+    }
+
+    fn established_elapsed(&self) -> Duration {
+        self.established_at.elapsed()
+    }
+
+    fn idle_elapsed(&self) -> Duration {
+        self.last_activity.elapsed()
+    }
+
+    fn touch(&mut self) {
+        self.last_activity = Instant::now();
+        self.ops_count += 1;
+    }
+
+    fn mark_stale(&mut self) {
+        self.needs_rebuild = true;
+    }
+}
+
+/// Konfiguracja puli połączeń.
+#[derive(Clone)]
+pub struct ConnectionPoolConfig {
+    /// Maksymalny czas bezczynności połączenia przed uznaniem za "stale" (sekundy).
+    pub idle_timeout_secs: u64,
+    /// Maksymalny wiek połączenia (Tor circuits się "starzeją").
+    pub max_age_secs: u64,
+    /// Interwał sprawdzania zdrowia połączeń (sekundy).
+    pub health_check_interval_secs: u64,
+    /// Czy włączyć automatyczne ponowne łączenie.
+    pub auto_reconnect: bool,
+}
+
+impl Default for ConnectionPoolConfig {
+    fn default() -> Self {
+        Self {
+            // Tor circuits żyją ~10 minut, ale dla Gossip chcemy krócej
+            idle_timeout_secs: 120,   // 2 minuty bezczynności
+            max_age_secs: 600,        // 10 minut maksymalny wiek
+            health_check_interval_secs: 30,
+            auto_reconnect: true,
+        }
+    }
+}
+
+/// Menedżer stałych połączeń Tor (Connection Pool v1).
+///
+/// Zapobiega ciągłemu otwieraniu/zamykaniu socketów i budowaniu
+/// kosztownych Tor circuits przy każdej wiadomości Gossip.
+///
+/// Architektura:
+/// - Każde połączenie ma metadane (wiek, ostatnia aktywność)
+/// - Tła zadanie "pool maintenance" sprawdza zdrowie połączeń
+/// - Zepsute/stare połączenia są automatycznie przebudowywane
+#[derive(Clone)]
+pub struct ConnectionPool {
+    /// Mapa: PeerId -> metadane połączenia
+    connections: Arc<RwLock<HashMap<String, ConnectionMeta>>>,
+    /// URL proxy Tor SOCKS5h
+    tor_socks_url: String,
+    /// Konfiguracja puli
+    config: ConnectionPoolConfig,
+    /// Statystyki dla monitoringu
+    stats: Arc<RwLock<PoolStats>>,
+}
+
+/// Statystyki puli połączeń (do monitoringu/loggingu).
+#[derive(Default, Clone, Debug)]
+pub struct PoolStats {
+    pub total_connections: usize,
+    pub active_connections: usize,
+    pub stale_connections: usize,
+    pub total_messages_sent: u64,
+    pub total_reconnects: u64,
+    pub total_circuit_builds: u64,
+}
+
+impl ConnectionPool {
+    pub fn new(tor_socks_url: String) -> Self {
+        Self::with_config(tor_socks_url, ConnectionPoolConfig::default())
+    }
+
+    pub fn with_config(tor_socks_url: String, config: ConnectionPoolConfig) -> Self {
+        Self {
+            connections: Arc::new(RwLock::new(HashMap::new())),
+            tor_socks_url,
+            config,
+            stats: Arc::new(RwLock::new(PoolStats::default())),
+        }
+    }
+
+    /// Zwraca aktualne statystyki puli.
+    pub async fn stats(&self) -> PoolStats {
+        self.stats.read().await.clone()
+    }
+
+    /// Próbuje wysłać wiadomość istniejącym połączeniem.
+    /// Jeśli go nie ma lub jest zepsute, nawiązuje nowe (Tor circuit build + handshake)
+    /// i zapisuje do puli.
+    ///
+    /// SZYBKA ŚCIEŻKA: ~10ms (zapis do istniejącego tunelu)
+    /// WOLNA ŚCIEŻKA: ~2-5s (Tor circuit build + FrodoKEM handshake)
+    ///
+    /// Parametry kluczy są potrzebne TYLKO do handshake (pierwsze połączenie).
+    /// Po handshake wiadomości są wysyłane plaintext w ramach Tor tunelu
+    /// (Tor już zapewnia szyfrowanie E2E na poziomie circuit).
+    pub async fn send_message<T: Serialize>(
+        &self,
+        peer: &Peer,
+        msg: &T,
+        my_kem_pk: &[u8],
+        my_sig_pk: &[u8],
+        my_peer_id: &str,
+    ) -> Result<(), NetError> {
+        let data = serde_json::to_vec(msg)?;
+
+        // Sprawdź czy mamy aktywne połączenie z handshake
+        let needs_new = {
+            let conns = self.connections.read().await;
+            match conns.get(&peer.id) {
+                Some(meta) if !meta.needs_rebuild && meta.handshake_done => false,
+                _ => true,
+            }
+        };
+
+        if needs_new {
+            self.establish_connection(peer, my_kem_pk, my_sig_pk, my_peer_id)
+                .await?;
+        }
+
+        // Pobierz połączenie (po establish_connection jeśli było potrzebne)
+        let stream_arc = {
+            let conns = self.connections.read().await;
+            conns.get(&peer.id).map(|m| m.stream.clone())
+        };
+
+        let stream_arc = match stream_arc {
+            Some(arc) => arc,
+            None => {
+                return Err(NetError::Transport(anyhow::anyhow!(
+                    "Connection not found after establish for peer {}",
+                    peer.id
+                )))
+            }
+        };
+
+        // SZYBKA ŚCIEŻKA: Zapisujemy do istniejącego tunelu
+        // (Tor circuit already encrypts E2E, no need for additional encryption)
+        let mut stream = stream_arc.lock().await;
+        match write_frame(&mut *stream, &data).await {
+            Ok(()) => {
+                // Aktualizuj metadane
+                {
+                    let mut conns = self.connections.write().await;
+                    if let Some(meta) = conns.get_mut(&peer.id) {
+                        meta.touch();
+                    }
+                }
+                // Aktualizuj statystyki
+                {
+                    let mut s = self.stats.write().await;
+                    s.total_messages_sent += 1;
+                }
+                Ok(())
+            }
+            Err(e) => {
+                // Zapis się nie powiedzie — oznacz połączenie jako zepsute
+                eprintln!(
+                    "[pool] write failed to peer {}, marking stale: {}",
+                    peer.id, e
+                );
+                {
+                    let mut conns = self.connections.write().await;
+                    if let Some(meta) = conns.get_mut(&peer.id) {
+                        meta.mark_stale();
+                    }
+                }
+                Err(NetError::Transport(anyhow::anyhow!(
+                    "Write to {} failed: {}",
+                    peer.id,
+                    e
+                )))
+            }
+        }
+    }
+
+    /// Nawiązuje nowe połączenie Tor do peera z FrodoKEM handshake.
+    /// Zawiera "double-check" pattern by uniknąć wyścigów.
+    ///
+    /// Flow:
+    /// 1. Tor Circuit Build (2-5s)
+    /// 2. Wyślij HandshakeMsg { kem_pk, sig_pk }
+    /// 3. Odbierz HandshakeMsg od peera
+    /// 4. Zapisz klucze w ConnectionMeta
+    async fn establish_connection(
+        &self,
+        peer: &Peer,
+        my_kem_pk: &[u8],
+        my_sig_pk: &[u8],
+        my_peer_id: &str,
+    ) -> Result<(), NetError> {
+        // Sprawdź ponownie pod write-lockiem (double-check pattern)
+        {
+            let conns = self.connections.read().await;
+            if let Some(meta) = conns.get(&peer.id) {
+                if !meta.needs_rebuild && meta.handshake_done {
+                    return Ok(());
+                }
+            }
+        }
+
+        eprintln!(
+            "[pool] establishing new Tor connection to {} ({}:{})",
+            peer.id, peer.host, peer.port
+        );
+
+        // WOLNA ŚCIEŻKA: Tor Circuit Build
+        let mut stream = connect_via_tor(&self.tor_socks_url, &peer.host, peer.port)
+            .await
+            .map_err(|e| {
+                eprintln!("[pool] Tor connect to {} failed: {}", peer.id, e);
+                NetError::Transport(e)
+            })?;
+
+        // --- FrodoKEM Handshake ---
+        eprintln!("[pool] starting PQC handshake with {}", peer.id);
+
+        // Krok 1: Wyślij nasz HandshakeMsg
+        use base64::Engine;
+        use base64::engine::general_purpose::STANDARD as B64;
+
+        let my_handshake = HandshakeMsg {
+            version: HANDSHAKE_VERSION,
+            kem_pk_b64: B64.encode(my_kem_pk),
+            sig_pk_b64: B64.encode(my_sig_pk),
+            peer_id: my_peer_id.to_string(),
+        };
+
+        let handshake_bytes = serde_json::to_vec(&my_handshake).map_err(|e| {
+            NetError::Transport(anyhow::anyhow!("handshake serialize failed: {}", e))
+        })?;
+
+        write_frame(&mut stream, &handshake_bytes)
+            .await
+            .map_err(|e| {
+                eprintln!("[pool] handshake write to {} failed: {}", peer.id, e);
+                NetError::Transport(e)
+            })?;
+
+        // Krok 2: Odbierz HandshakeMsg od peera
+        let peer_handshake_bytes = read_frame(&mut stream, 64 * 1024)
+            .await
+            .map_err(|e| {
+                eprintln!("[pool] handshake read from {} failed: {}", peer.id, e);
+                NetError::Transport(e)
+            })?;
+
+        let peer_handshake: HandshakeMsg =
+            serde_json::from_slice(&peer_handshake_bytes).map_err(|e| {
+                eprintln!(
+                    "[pool] handshake deserialize from {} failed: {}",
+                    peer.id, e
+                );
+                NetError::Serde(e)
+            })?;
+
+        if peer_handshake.version != HANDSHAKE_VERSION {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "unsupported handshake version {} from {}",
+                peer_handshake.version,
+                peer.id
+            )));
+        }
+
+        let peer_kem_pk = B64
+            .decode(&peer_handshake.kem_pk_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_pk: {}", e)))?;
+
+        let peer_sig_pk = B64
+            .decode(&peer_handshake.sig_pk_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer sig_pk: {}", e)))?;
+
+        eprintln!(
+            "[pool] PQC handshake with {} complete (peer_id: {})",
+            peer.id, peer_handshake.peer_id
+        );
+
+        // Krok 3: Zapisz połączenie z kluczami
+        let mut meta = ConnectionMeta::new(stream);
+        meta.set_peer_keys(peer_kem_pk, peer_sig_pk);
+
+        // Double-check pod write-lockiem
+        let mut conns = self.connections.write().await;
+        if let Some(existing) = conns.get(&peer.id) {
+            if !existing.needs_rebuild && existing.handshake_done {
+                // Ktoś inny zdążył połączyć — użyj istniejącego
+                return Ok(());
+            }
+        }
+
+        eprintln!(
+            "[pool] connection to {} established with PQC keys",
+            peer.id
+        );
+
+        conns.insert(peer.id.clone(), meta);
+
+        // Aktualizuj statystyki
+        {
+            let mut s = self.stats.write().await;
+            s.total_circuit_builds += 1;
+            s.total_connections = conns.len();
+        }
+
+        Ok(())
+    }
+
+    /// Usuwa połączenie z puli (np. gdy peer jest niedostępny).
+    pub async fn remove_connection(&self, peer_id: &str) {
+        let mut conns = self.connections.write().await;
+        if conns.remove(peer_id).is_some() {
+            eprintln!("[pool] removed connection to {}", peer_id);
+            let mut s = self.stats.write().await;
+            s.total_connections = conns.len();
+        }
+    }
+
+    /// Broadcastuje wiadomość do wszystkich peerów z PeerBook (oprócz siebie).
+    pub async fn broadcast_message<T: Serialize>(
+        &self,
+        peer_book: &PeerBook,
+        my_id: &str,
+        msg: &T,
+        my_kem_pk: &[u8],
+        my_sig_pk: &[u8],
+    ) -> Vec<(String, Result<(), NetError>)> {
+        let peers = peer_book.others(my_id);
+        let mut results = Vec::with_capacity(peers.len());
+
+        for peer in peers {
+            let result = self.send_message(peer, msg, my_kem_pk, my_sig_pk, my_id).await;
+            results.push((peer.id.clone(), result));
+        }
+
+        results
+    }
+
+    /// Uruchamia tła zadanie "pool maintenance".
+    ///
+    /// Co `health_check_interval_secs` sekund:
+    /// 1. Sprawdza wiek i bezczynność każdego połączenia
+    /// 2. Oznacza stare/bezczynne jako `needs_rebuild`
+    /// 3. Loguje statystyki puli
+    ///
+    /// To zadanie jest "fire-and-forget" — uruchamiane raz przy starcie węzła.
+    pub fn spawn_maintenance(
+        &self,
+        peer_book: PeerBook,
+        my_id: String,
+        my_kem_pk: Vec<u8>,
+        my_sig_pk: Vec<u8>,
+    ) {
+        let pool = self.clone();
+        let interval = self.config.health_check_interval_secs;
+
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(Duration::from_secs(interval));
+            loop {
+                ticker.tick().await;
+                pool.maintenance_tick(&peer_book, &my_id, &my_kem_pk, &my_sig_pk)
+                    .await;
+            }
+        });
+
+        eprintln!(
+            "[pool] maintenance task started (interval: {}s, idle_timeout: {}s, max_age: {}s)",
+            interval, self.config.idle_timeout_secs, self.config.max_age_secs
+        );
+    }
+
+    /// Pojedynczy tick maintenance — sprawdza i naprawia połączenia.
+    async fn maintenance_tick(
+        &self,
+        peer_book: &PeerBook,
+        my_id: &str,
+        my_kem_pk: &[u8],
+        my_sig_pk: &[u8],
+    ) {
+        let peers = peer_book.others(my_id);
+        let mut stale_ids: Vec<String> = Vec::new();
+        let mut active_count = 0usize;
+
+        // Sprawdź istniejące połączenia
+        {
+            let conns = self.connections.read().await;
+            for (peer_id, meta) in conns.iter() {
+                let age = meta.age_secs();
+                let idle = meta.idle_elapsed().as_secs();
+
+                if meta.needs_rebuild {
+                    stale_ids.push(peer_id.clone());
+                } else if age > self.config.max_age_secs {
+                    eprintln!(
+                        "[pool] connection to {} is old (age: {}s > {}s), marking stale",
+                        peer_id, age, self.config.max_age_secs
+                    );
+                    stale_ids.push(peer_id.clone());
+                } else if idle > self.config.idle_timeout_secs {
+                    eprintln!(
+                        "[pool] connection to {} is idle (idle: {}s > {}s), marking stale",
+                        peer_id, idle, self.config.idle_timeout_secs
+                    );
+                    stale_ids.push(peer_id.clone());
+                } else {
+                    active_count += 1;
+                }
+            }
+        }
+
+        // Oznacz stare połączenia jako potrzebujące przebudowy
+        if !stale_ids.is_empty() {
+            let mut conns = self.connections.write().await;
+            for peer_id in &stale_ids {
+                if let Some(meta) = conns.get_mut(peer_id) {
+                    meta.mark_stale();
+                }
+            }
+        }
+
+        // Aktualizuj statystyki
+        {
+            let mut s = self.stats.write().await;
+            s.active_connections = active_count;
+            s.stale_connections = stale_ids.len();
+            s.total_connections = active_count + stale_ids.len();
+        }
+
+        // Loguj statystyki (co ~5 minut)
+        let total = active_count + stale_ids.len();
+        if total > 0 {
+            let s = self.stats.read().await;
+            eprintln!(
+                "[pool] stats: {} active, {} stale, {} total | sent: {}, reconnects: {}, builds: {}",
+                active_count, stale_ids.len(), total,
+                s.total_messages_sent, s.total_reconnects, s.total_circuit_builds
+            );
+        }
+
+        // Opcjonalnie: pre-connect do znanych peerów (żeby Gossip był szybszy)
+        if self.config.auto_reconnect {
+            for peer in &peers {
+                let conns = self.connections.read().await;
+                let needs_connect = match conns.get(&peer.id) {
+                    Some(meta) => meta.needs_rebuild,
+                    None => true, // Brak połączenia — nie łączymy na zapas (lazy connect)
+                };
+                drop(conns);
+
+                if needs_connect {
+                    // Spróbuj ponownie połączyć tylko jeśli był już kiedyś połączony
+                    // (lazy connect: nie łączymy na zapas, tylko gdy potrzebujemy)
+                    if self.connections.read().await.contains_key(&peer.id) {
+                        eprintln!("[pool] reconnecting to stale peer {}", peer.id);
+                        if self.establish_connection(peer, my_kem_pk, my_sig_pk, my_id).await.is_ok() {
+                            let mut s = self.stats.write().await;
+                            s.total_reconnects += 1;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }

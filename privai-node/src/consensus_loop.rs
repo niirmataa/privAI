@@ -30,6 +30,7 @@ where
     pub node: PrivaiNode<S, V, A, P>,
     pub net_config: NetConfig,
     pub peer_book: PeerBook,
+    pub connection_pool: net::ConnectionPool,
     /// Cache bloków po hashu — potrzebny do finalizacji po otrzymaniu QC.
     /// Klucz: block_hash, wartość: Block.
     block_cache: HashMap<Hash32, Block>,
@@ -38,6 +39,21 @@ where
 impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>
     ConsensusLoop<S, V, A, P>
 {
+    pub fn new(
+        node: PrivaiNode<S, V, A, P>,
+        net_config: NetConfig,
+        peer_book: PeerBook,
+    ) -> Self {
+        let connection_pool = net::ConnectionPool::new(net_config.tor_socks_url.clone());
+        Self {
+            node,
+            net_config,
+            peer_book,
+            connection_pool,
+            block_cache: HashMap::new(),
+        }
+    }
+
     /// Uruchamia główną pętlę konsensusu.
     ///
     /// 1. Startuje Tor listener
@@ -252,6 +268,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     requester_pk_hash,
                     &self.net_config,
                     &self.peer_book,
+                    &self.connection_pool,
+                    &self.node.config().node_kem_pk,
+                    &self.node.config().node_sig_pk,
+                    &self.net_config.my_peer_id,
                 );
             }
 
@@ -283,10 +303,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     fn broadcast_msg(&self, msg: ConsensusMsg) {
         let peer_book = self.peer_book.clone();
         let my_id = self.net_config.my_peer_id.clone();
-        let tor_url = self.net_config.tor_socks_url.clone();
+        let pool = self.connection_pool.clone();
+        let kem_pk = self.node.config().node_kem_pk.clone();
+        let sig_pk = self.node.config().node_sig_pk.clone();
 
         tokio::spawn(async move {
-            let results = net::broadcast(&peer_book, &my_id, &tor_url, &msg).await;
+            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &sig_pk).await;
             for (peer_id, result) in results {
                 if let Err(e) = result {
                     eprintln!("[consensus] broadcast to {} failed: {}", peer_id, e);

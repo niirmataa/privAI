@@ -49,6 +49,9 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     peer_book: &PeerBook,
     net_config: &NetConfig,
     current_time_ms: u64,
+    node_kem_pk: &[u8],
+    node_sig_pk: &[u8],
+    node_peer_id: &str,
 ) {
     eprintln!(
         "[gossip] received tx {:?} from {:?} (hops={})",
@@ -94,11 +97,18 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
             msg.tx_hash,
             msg.sender_pk_hash,
             msg.hops + 1,
+            node_kem_pk,
+            node_sig_pk,
+            node_peer_id,
         );
     }
 }
 
 /// Propaguje transakcję do losowego subsetu peerów (gossip fanout).
+///
+/// Każdy spawn wysyła przez ConnectionPool, który:
+/// 1. Przy pierwszym połączeniu: Tor circuit build + FrodoKEM handshake
+/// 2. Przy kolejnych: szybki zapis do istniejącego tunelu
 fn propagate_tx(
     peer_book: &PeerBook,
     net_config: &NetConfig,
@@ -106,6 +116,9 @@ fn propagate_tx(
     tx_hash: Hash32,
     sender_pk_hash: Hash32,
     hops: u8,
+    node_kem_pk: &[u8],
+    node_sig_pk: &[u8],
+    node_peer_id: &str,
 ) {
     let my_id = &net_config.my_peer_id;
     let peers = peer_book.others(my_id);
@@ -126,18 +139,31 @@ fn propagate_tx(
         hops,
     };
 
-    // Wysyłamy do każdego wybranego peera (fire-and-forget)
+    // Wysyłamy do każdego wybranego peera przez pulę połączeń (fire-and-forget)
     for peer in selected {
         let peer = peer.clone();
         let msg = gossip_msg.clone();
+        let pool = net_config.connection_pool.clone();
+        let kem_pk = node_kem_pk.to_vec();
+        let sig_pk = node_sig_pk.to_vec();
+        let my_id = node_peer_id.to_string();
 
         tokio::spawn(async move {
-            eprintln!(
-                "[gossip] propagating tx {:?} to {} (hop {})",
-                &msg.tx_hash[..8],
-                peer.host,
-                msg.hops
-            );
+            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &my_id).await {
+                eprintln!(
+                    "[gossip] failed to propagate tx {:?} to {}: {}",
+                    &msg.tx_hash[..8],
+                    peer.host,
+                    e
+                );
+            } else {
+                eprintln!(
+                    "[gossip] propagated tx {:?} to {} (hop {})",
+                    &msg.tx_hash[..8],
+                    peer.host,
+                    msg.hops
+                );
+            }
         });
     }
 }
@@ -150,6 +176,9 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     peer_book: &PeerBook,
     net_config: &NetConfig,
     current_time_ms: u64,
+    node_kem_pk: &[u8],
+    node_sig_pk: &[u8],
+    node_peer_id: &str,
 ) -> bool {
     let tx_hash = tx.tx_id();
 
@@ -182,6 +211,9 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
         tx_hash,
         sender_pk_hash,
         0, // hops = 0 (pierwsza propagacja)
+        node_kem_pk,
+        node_sig_pk,
+        node_peer_id,
     );
 
     true

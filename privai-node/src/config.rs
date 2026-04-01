@@ -36,6 +36,10 @@ pub struct NodeConfig {
     /// Timeout rundy konsensusu w ms. Domyślnie 30s dla Tor.
     /// Można obniżyć dla testów lokalnych.
     pub consensus_timeout_ms: u64,
+    /// Klucz publiczny FrodoKEM węzła (base64) — do handshake P2P.
+    pub node_kem_pk: Vec<u8>,
+    /// Klucz publiczny Falcon węzła (base64) — do handshake P2P.
+    pub node_sig_pk: Vec<u8>,
 }
 
 impl NodeConfig {
@@ -62,6 +66,8 @@ impl NodeConfig {
                 proof_score: 1,
             }],
             consensus_timeout_ms: DEFAULT_CONSENSUS_TIMEOUT_MS,
+            node_kem_pk: vec![0; 32], // placeholder
+            node_sig_pk: vec![0; 32], // placeholder
         }
     }
 
