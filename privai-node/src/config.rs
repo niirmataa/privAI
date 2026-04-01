@@ -20,6 +20,11 @@ impl ValidatorConfig {
     }
 }
 
+/// Domyślny timeout rundy konsensusu dla Tor (30s).
+/// Tor ma ~200-500ms latency na hop, 3+ hops → round-trip ~1-3s.
+/// Dodajemy bufor na processing + sieć.
+pub const DEFAULT_CONSENSUS_TIMEOUT_MS: u64 = 30_000;
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub chain_id: u32,
@@ -28,6 +33,9 @@ pub struct NodeConfig {
     pub epoch_params: EpochParams,
     pub max_block_txs: usize,
     pub validators: Vec<ValidatorConfig>,
+    /// Timeout rundy konsensusu w ms. Domyślnie 30s dla Tor.
+    /// Można obniżyć dla testów lokalnych.
+    pub consensus_timeout_ms: u64,
 }
 
 impl NodeConfig {
@@ -53,6 +61,7 @@ impl NodeConfig {
                 availability: 1,
                 proof_score: 1,
             }],
+            consensus_timeout_ms: DEFAULT_CONSENSUS_TIMEOUT_MS,
         }
     }
 

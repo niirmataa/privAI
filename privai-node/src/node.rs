@@ -339,6 +339,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         self.import_block(block)
     }
 
+    /// PHASE 7 LIVENESS: Sprawdza timeout używając domyślnej wartości z configu (30s dla Tor).
+    /// Wygodniejsza wersja do użycia w głównym loopie.
+    pub fn check_timeout_default(&mut self, current_time_ms: u64) -> Option<ViewChange> {
+        self.check_timeout(current_time_ms, self.config.consensus_timeout_ms)
+    }
+
     /// PHASE 7 LIVENESS: Wywolywana przez wbudowany timer/scheduler. 
     /// Gdy przekroczy dozwolony limit - węzeł wysyła swoj glos ViewChange w obieg.
     pub fn check_timeout(&mut self, current_time_ms: u64, timeout_limit_ms: u64) -> Option<ViewChange> {
