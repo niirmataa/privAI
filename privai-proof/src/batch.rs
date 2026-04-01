@@ -34,6 +34,9 @@ pub fn public_inputs_hash_for_transaction(tx: &Transaction) -> Result<Hash32, Ba
         Transaction::MarketplaceBatch(MarketplaceBatchTx { core, .. }) => Err(BatchBuildError::UnsupportedTransactionType {
             tx_type: core.tx_type,
         }),
+        Transaction::LiteTransfer(lite_tx) => Err(BatchBuildError::UnsupportedTransactionType {
+            tx_type: lite_tx.core.tx_type,
+        }),
     }
 }
 
@@ -56,7 +59,7 @@ pub fn build_execution_bundle_from_transactions(
 
     for (i, tx) in txs.iter().enumerate() {
         // Filter out transactions that do NOT require a ZK proof in the Execution Bundle
-        if matches!(tx, Transaction::TransferNote(_)) {
+        if matches!(tx, Transaction::TransferNote(_) | Transaction::LiteTransfer(_)) {
             statement_commits.push(tx.statement_commit());
             covered_tx_indexes.push(i as u32);
             public_inputs_hashes.push(public_inputs_hash_for_transaction(tx)?);

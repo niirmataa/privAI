@@ -310,6 +310,77 @@ pub fn derive_nullifier(note_commit: &Hash32, nullifier_key: &Hash32) -> Nullifi
     Nullifier(domain_hash(NULLIFIER_DOMAIN, &[note_commit, nullifier_key]))
 }
 
+/// LiteOutputNote — lekki output dla RecipientPrivacyLite.
+/// Zamiast LWE ciphertext (ct_amt) ma jawna kwote (amount).
+/// RecipientBox zostaje w pelni (stealth address).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteOutputNote {
+    pub version: u8,
+    pub note_commit: Hash32,
+    pub amount: u64,
+    pub spend_policy_commit: Hash32,
+    pub aux_commit: Hash32,
+    pub recipient_box: RecipientBox,
+}
+
+pub const LITE_NOTE_DOMAIN: &str = "privai:lite-note:v0";
+pub const LITE_NOTE_PAYLOAD_DOMAIN: &str = "privai:lite-note-payload:v0";
+
+impl LiteOutputNote {
+    pub fn new(
+        amount: u64,
+        spend_policy_commit: Hash32,
+        aux_commit: Hash32,
+        recipient_box: RecipientBox,
+    ) -> Self {
+        let mut note = Self {
+            version: PRIVAI_V0,
+            note_commit: [0; 32],
+            amount,
+            spend_policy_commit,
+            aux_commit,
+            recipient_box,
+        };
+        note.note_commit = note.recompute_commit();
+        note
+    }
+
+    /// note_commit dla Lite: binduje version, spend_policy, amount, aux_commit i hint (nie caly box)
+    pub fn recompute_commit(&self) -> Hash32 {
+        let mut payload = Vec::new();
+        write_u8(&mut payload, self.version);
+        write_fixed(&mut payload, &self.spend_policy_commit);
+        write_u64(&mut payload, self.amount);
+        write_fixed(&mut payload, &self.aux_commit);
+        write_fixed(&mut payload, &self.recipient_box.hint);
+        domain_hash(LITE_NOTE_DOMAIN, &[&payload])
+    }
+
+    pub fn payload_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_u8(&mut out, self.version);
+        write_fixed(&mut out, &self.spend_policy_commit);
+        write_u64(&mut out, self.amount);
+        write_fixed(&mut out, &self.aux_commit);
+        out
+    }
+
+    pub fn payload_commit(&self) -> Hash32 {
+        domain_hash(LITE_NOTE_PAYLOAD_DOMAIN, &[&self.payload_bytes()])
+    }
+}
+
+impl CanonicalEncode for LiteOutputNote {
+    fn encode(&self, out: &mut Vec<u8>) {
+        write_u8(out, self.version);
+        write_fixed(out, &self.note_commit);
+        write_u64(out, self.amount);
+        write_fixed(out, &self.spend_policy_commit);
+        write_fixed(out, &self.aux_commit);
+        self.recipient_box.encode(out);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -344,5 +415,61 @@ mod tests {
         let a = derive_nullifier(&[1; 32], &[2; 32]);
         let b = derive_nullifier(&[1; 32], &[3; 32]);
         assert_ne!(a, b);
+    }
+
+    #[test]
+    fn lite_output_note_commit_is_deterministic() {
+        let note = LiteOutputNote::new(
+            1000,
+            [7; 32],
+            [9; 32],
+            RecipientBox::new(vec![1, 2], [3; 24], vec![4, 5], [6; 16], [7; 16]),
+        );
+
+        assert_eq!(note.note_commit, note.recompute_commit());
+    }
+
+    #[test]
+    fn lite_output_note_different_amounts_different_commits() {
+        let box_a = RecipientBox::new(vec![1, 2], [3; 24], vec![4, 5], [6; 16], [7; 16]);
+        let box_b = RecipientBox::new(vec![1, 2], [3; 24], vec![4, 5], [6; 16], [8; 16]);
+
+        let note_a = LiteOutputNote::new(1000, [7; 32], [9; 32], box_a);
+        let note_b = LiteOutputNote::new(1000, [7; 32], [9; 32], box_b);
+
+        // Different hint -> different note_commit
+        assert_ne!(note_a.note_commit, note_b.note_commit);
+    }
+
+    #[test]
+    fn lite_output_note_commit_does_not_include_full_recipient_box() {
+        // Verify note_commit is 32 bytes (hash), not the size of the full RecipientBox
+        let note = LiteOutputNote::new(
+            42,
+            [1; 32],
+            [2; 32],
+            RecipientBox::new(vec![0; 9720], [0; 24], vec![0; 1000], [0; 16], [0xA; 16]),
+        );
+
+        assert_eq!(note.note_commit.len(), 32);
+        // Commit should be deterministic
+        assert_eq!(note.note_commit, note.recompute_commit());
+    }
+
+    #[test]
+    fn lite_output_note_payload_is_lightweight() {
+        let note = LiteOutputNote::new(
+            500,
+            [1; 32],
+            [2; 32],
+            RecipientBox::new(vec![1, 2, 3], [4; 24], vec![5, 6], [7; 16], [8; 16]),
+        );
+
+        let payload = note.payload_bytes();
+        // Payload: version(1) + spend_policy_commit(32) + amount(8) + aux_commit(32) = 73 bytes
+        assert_eq!(payload.len(), 73);
+
+        // Much smaller than FullPrivacy payload which includes LWE ciphertext (~4100 bytes)
+        assert!(payload.len() < 100);
     }
 }

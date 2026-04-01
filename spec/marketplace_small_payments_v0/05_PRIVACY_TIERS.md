@@ -89,7 +89,115 @@ Po tej iteracji ma byc jasne:
 - jaka jest macierz wyboru,
 - jaka jest logika eskalacji.
 
-## 6. Definicje robocze
+## 6. RecipientPrivacyLite — Concrete Data Model (v0.1)
+
+### 6.0. Cel tej sekcji
+
+Ta sekcja zamraża konkretny format `RecipientPrivacyLite` jako lekkiego raila on-chain z maksymalną prywatnością stealth address.
+
+### 6.0.1. Zasada nadrzędna
+
+`RecipientPrivacyLite` jest zaprojektowany tak, żeby:
+- **stealth address** (RecipientBox) pozostał w pełni prywatny,
+- **kwota** była jawna (świadomy kompromis na rzecz lekkości),
+- **on-chain payload** był minimalny (~43% mniejszy niż FullPrivacy),
+- **proof** był uproszczony (brak LWE range proof).
+
+### 6.0.2. LiteOutputNote
+
+Nowy typ outputu dla RecipientPrivacyLite:
+
+```rust
+struct LiteOutputNote {
+    version: u8,                    // 0x00
+    note_commit: Hash32,            // Commitment do całej noty
+    amount: u64,                    // JAWNA kwota (zamiast LWE ciphertext)
+    spend_policy_commit: Hash32,    // Commitment do SpendPolicy
+    aux_commit: Hash32,             // Commitment do AuxWitness
+    recipient_box: RecipientBox,    // UKRYTY odbiorca (stealth address)
+}
+```
+
+**Co znika wobec FullPrivacy OutputNote:**
+- `ct_amt: LweCiphertext` (~4100 B) → `amount: u64` (8 B)
+- **Oszczędność: ~4092 B na output**
+
+**Co zostaje (prywatność):**
+- `RecipientBox` — ukryty odbiorca, stealth address, pełna prywatność relacji
+- `spend_policy_commit` — warunki wydania
+- `aux_commit` — witness material
+- `note_commit` — commitment do całej struktury
+
+### 6.0.3. Budowa `note_commit` dla Lite
+
+```text
+note_commit = H_note(
+    version            ||   // 1 bajt
+    spend_policy_commit ||   // 32 bajty
+    amount             ||   // 8 bajtów (jawna kwota)
+    aux_commit         ||   // 32 bajty
+    recipient_box_hint      // 16 bajtów hint z RecipientBox (nie cały box!)
+)
+```
+
+**Ważne:** `note_commit` NIE zawiera całego `RecipientBox` (6000+ B), tylko `hint` (16 B). Pełny box jest przechowywany off-chain/encrypted. Chain widzi hint do szybkiego skanowania, ale nie może odtworzyć stealth address bez klucza odbiorcy.
+
+### 6.0.4. LiteTransferTx
+
+Nowy typ transakcji:
+
+```rust
+struct LiteTransferTx {
+    core: TxCore,                  // Standardowy TxCore
+}
+```
+
+`tx_type = 0x08` dla `LiteTransferTx`.
+
+### 6.0.5. Conservation check (jawny)
+
+W odróżnieniu od FullPrivacy (gdzie conservation jest dowodzona w ZK na ukrytych kwotach), tutaj:
+
+```text
+sum(input_amounts) == sum(output_amounts) + fee
+```
+
+To jest jawna arytmetyka — prosta, tania, nie wymaga LWE range proof.
+
+### 6.0.6. Proof dla RecipientPrivacyLite
+
+Uproszczony proof obejmuje:
+1. **Conservation**: jawna arytmetyka
+2. **Nullifier correctness**: `nullifier = H_nullifier(note_commit || nullifier_key)`
+3. **Policy binding**: output spend_policy_commit jest poprawnie związany
+4. **RecipientBox binding**: box jest poprawnie zaszyfrowany
+5. **Input authorization**: sygnatury Falcon pasują do SpendPolicy
+
+**Brak w odróżnieniu od FullPrivacy:**
+- LWE range proof na ukrytą kwotę
+- Noise class check
+- Well-formedness proof na ciphertext
+
+### 6.0.7. Rozmiar porównawczy
+
+| Komponent | FullPrivacy | RecipientPrivacyLite | Oszczędność |
+|-----------|-------------|---------------------|-------------|
+| Output | ~10600 B | ~6500 B | ~4100 B (39%) |
+| Proof per tx (2in/2out) | ~5000 B | ~2000 B | ~3000 B (60%) |
+| **Razem tx** | **~26200 B** | **~15000 B** | **~11200 B (43%)** |
+
+### 6.0.8. Zamrożone decyzje
+
+1. `RecipientPrivacyLite` jest osobnym typem tx (`tx_type = 0x08`)
+2. `amount` jest jawny na chainie
+3. `RecipientBox` zostaje w pełni (stealth address)
+4. `note_commit` używa hint zamiast całego RecipientBox
+5. Proof jest uproszczony (brak LWE)
+6. Conservation jest jawna arytmetyka
+
+---
+
+## 7. Definicje robocze
 
 ### 6.1. ServicePrivacy
 
@@ -122,11 +230,13 @@ To jest domyslny tier dla flow wrazliwych i wysokiego ryzyka.
 
 `RecipientPrivacyLite` to lekki rail z:
 
-- ukrytym odbiorca albo ukryta relacja platnicza,
-- jawna kwota,
-- prostszym i tanszym modelem on-chain.
+- ukrytym odbiorca albo ukryta relacja platnicza (RecipientBox / stealth address — pełna prywatność relacji),
+- jawna kwota (świadomy kompromis),
+- prostszym i tanszym modelem on-chain (brak LWE ciphertext, uproszczony proof).
 
 To nie jest `FullPrivacy`.
+
+Konkretny format jest opisany w sekcji 6.0 powyżej.
 
 ### 6.6. SmallPaymentsRail
 

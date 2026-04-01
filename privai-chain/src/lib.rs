@@ -16,8 +16,9 @@ pub use consensus::{
 };
 pub use hash::{derive_epoch_seed, merkle_root};
 pub use note::{
-    AuxWitness, HiddenOutput, OutputNote, ReceiveBundle, RecipientBox, RecipientBoxPlaintext,
-    SpendPolicy, SpendPolicyTag, derive_aux_commit, derive_nullifier,
+    AuxWitness, HiddenOutput, LiteOutputNote, OutputNote, ReceiveBundle, RecipientBox,
+    RecipientBoxPlaintext, SpendPolicy, SpendPolicyTag, LITE_NOTE_DOMAIN,
+    LITE_NOTE_PAYLOAD_DOMAIN, derive_aux_commit, derive_nullifier,
 };
 pub use params::{
     AEAD_ALG_XCHACHA20_POLY1305, B_MAX, BUNDLE_FLAG_REVOKED, BUNDLE_FLAG_UPLOADED,
@@ -29,7 +30,8 @@ pub use primitives::{
     LweCiphertextError, Nullifier,
 };
 pub use tx::{
-    InputAuth, InputRef, ModelAction, ModelTx, SettlementPhase, SettlementTx, StakeAction,
-    StakeTx, Transaction, TransferNoteTx, TxCore, TX_TYPE_MODEL, TX_TYPE_SETTLEMENT,
+    InputAuth, InputRef, LiteTransferTx, MarketplaceBatchTx, ModelAction, ModelTx,
+    SettlementPhase, SettlementTx, StakeAction, StakeTx, Transaction, TransferNoteTx, TxCore,
+    TX_TYPE_LITE_TRANSFER, TX_TYPE_MARKETPLACE_BATCH, TX_TYPE_MODEL, TX_TYPE_SETTLEMENT,
     TX_TYPE_STAKE, TX_TYPE_TRANSFER_NOTE, TxShapeError,
 };

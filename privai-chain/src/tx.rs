@@ -13,6 +13,7 @@ pub const TX_TYPE_SETTLEMENT: u8 = 0x02;
 pub const TX_TYPE_MODEL: u8 = 0x03;
 pub const TX_TYPE_STAKE: u8 = 0x04;
 pub const TX_TYPE_MARKETPLACE_BATCH: u8 = 0x05;
+pub const TX_TYPE_LITE_TRANSFER: u8 = 0x08;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TxShapeError {
@@ -216,12 +217,34 @@ impl CanonicalEncode for MarketplaceBatchTx {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteTransferTx {
+    pub core: TxCore,
+}
+
+impl LiteTransferTx {
+    pub fn validate_shape(&self) -> Result<(), TxShapeError> {
+        self.core.validate_shape()?;
+        if self.core.outputs.is_empty() {
+            return Err(TxShapeError::TransferRequiresOutputs);
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalEncode for LiteTransferTx {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.core.encode(out);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transaction {
     TransferNote(TransferNoteTx),
     Settlement(SettlementTx),
     Model(ModelTx),
     Stake(StakeTx),
     MarketplaceBatch(MarketplaceBatchTx),
+    LiteTransfer(LiteTransferTx),
 }
 
 impl Transaction {
@@ -232,6 +255,7 @@ impl Transaction {
             Self::Model(tx) => &tx.core,
             Self::Stake(tx) => &tx.core,
             Self::MarketplaceBatch(tx) => &tx.core,
+            Self::LiteTransfer(tx) => &tx.core,
         }
     }
 
@@ -273,6 +297,7 @@ impl Transaction {
             Self::Model(tx) => tx.core.validate_shape(),
             Self::Stake(tx) => tx.core.validate_shape(),
             Self::MarketplaceBatch(tx) => tx.core.validate_shape(),
+            Self::LiteTransfer(tx) => tx.validate_shape(),
         }
     }
 }
@@ -285,6 +310,7 @@ impl CanonicalEncode for Transaction {
             Self::Model(tx) => tx.encode(out),
             Self::Stake(tx) => tx.encode(out),
             Self::MarketplaceBatch(tx) => tx.encode(out),
+            Self::LiteTransfer(tx) => tx.encode(out),
         }
     }
 }
