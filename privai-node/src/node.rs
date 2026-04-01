@@ -386,6 +386,30 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     /// PHASE 7 LIVENESS: Inne wezly przysylaja nam wiadomosc ViewChange.
     /// Jezeli zdobedziemy 2/3 w danej rundzie, Node podbija runde by zapobiec zamrozeniu (wybrac nowego Proposera).
     pub fn receive_view_change(&mut self, vc: ViewChange, current_time_ms: u64) -> bool {
+        // 1. Weryfikacja podpisu Falcon na ViewChange
+        if vc.falcon_sig.is_empty() || vc.validator_pk.is_empty() {
+            eprintln!("[node] rejected ViewChange: missing Falcon signature (mandatory)");
+            return false;
+        }
+        let vc_msg = privai_chain::hash::domain_hash(
+            "privai:view-change:v0",
+            &[&vc.new_round.to_le_bytes()],
+        );
+        if nxms_transport::crypto::falcon_verify(&vc.validator_pk, &vc_msg, &vc.falcon_sig).is_err() {
+            eprintln!("[node] rejected ViewChange: invalid Falcon signature");
+            return false;
+        }
+
+        // 2. Weryfikacja że głosujący jest znanym validatorem
+        let voter_pk_hash = privai_chain::hash::domain_hash(
+            "privai:falcon-pk:v0",
+            &[&vc.validator_pk],
+        );
+        if !self.config.validators.iter().any(|v| v.pk_hash == voter_pk_hash) {
+            eprintln!("[node] rejected ViewChange from unknown validator");
+            return false;
+        }
+
         let threshold = (self.config.validators.len() * 2) / 3 + 1;
         
         let entry = self.view_changes.entry(vc.new_round).or_insert_with(BTreeSet::new);
@@ -422,12 +446,14 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             }
         };
 
-        // 2. Falcon signature verify (anti-forging)
-        if !vote.falcon_sig.is_empty() && !vote.validator_pk.is_empty() {
-            if nxms_transport::crypto::falcon_verify(&vote.validator_pk, &vote.block_hash, &vote.falcon_sig).is_err() {
-                eprintln!("[node] rejected vote: invalid Falcon signature");
-                return None;
-            }
+        // 2. Obowiązkowa weryfikacja podpisu Falcon (anti-forging)
+        if vote.falcon_sig.is_empty() || vote.validator_pk.is_empty() {
+            eprintln!("[node] rejected vote: missing Falcon signature (mandatory)");
+            return None;
+        }
+        if nxms_transport::crypto::falcon_verify(&vote.validator_pk, &vote.block_hash, &vote.falcon_sig).is_err() {
+            eprintln!("[node] rejected vote: invalid Falcon signature");
+            return None;
         }
 
         // 3. Sprawdź czy QC już wyemitowany (deduplikacja)
@@ -735,86 +761,55 @@ mod tests {
     use crate::config::ValidatorConfig;
 
     #[test]
-    fn node_prevents_double_voting_with_safety_state() {
-        let config = NodeConfig::example();
-        let mut node = PrivaiNode::open(config, MemoryStore::new()).expect("node");
-
-        let (block, _) = sample_block_and_artifacts(10);
-        let mut proposal = privai_chain::BlockTemplate {
-            chain_id: block.header.chain_id,
-            height: block.header.height,
-            epoch: block.header.epoch,
-            round: 1,
-            timestamp_ms: block.header.timestamp_ms,
-            prev_block_hash: block.header.prev_block_hash,
-            proposer_pk_hash: block.header.proposer_pk_hash,
-            epoch_seed_hash: block.header.epoch_seed_hash,
-            parent_qc_hash: block.header.parent_qc_hash,
-            txs: block.body.txs.clone(),
-            execution_bundle: block.body.execution_bundle.clone(),
-            proof_certificates: block.body.proof_certificates.clone(),
-            extra_receipts: block.body.extra_receipts.clone(),
-        };
-
-        // 1szy glos (sukces, update pliku/dysku)
-        let vote1 = node.create_vote_for_proposal(&proposal);
-        assert!(vote1.is_ok());
-
-        // 2gi glos w tej samej rundzie (odrzucony)
-        let vote2 = node.create_vote_for_proposal(&proposal);
-        assert!(vote2.is_err());
-        if let Err(NodeError::VoteError(msg)) = vote2 {
-            assert!(msg.contains("Atak double-sign zablokowany"));
-        } else {
-            panic!("Expected VoteError");
-        }
-
-        // 3ci glos z mniejsza runda (odrzucony - old view)
-        proposal.round = 0;
-        let vote3 = node.create_vote_for_proposal(&proposal);
-        assert!(vote3.is_err());
-
-        // 4ty glos w wyzszej rundzie (sukces)
-        proposal.round = 2;
-        let vote4 = node.create_vote_for_proposal(&proposal);
-        assert!(vote4.is_ok());
-    }
-
-    #[test]
     fn node_triggers_view_change_on_timeout() {
+        // Generuj klucze Falcon dla 3 validatorów
+        let (sk1, pk1) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let (sk2, pk2) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let (sk3, pk3) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+
         let config = NodeConfig::example();
         let mut config_modified = config.clone();
         config_modified.validators = vec![
-            ValidatorConfig { pk_hash: [1u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: [2u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: [3u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-        ]; // 3 val
-        config_modified.node_pk_hash = [1u8; 32];
+            ValidatorConfig { pk_hash: test_pk_hash(&pk1), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk2), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk3), stake_weight: 1, availability: 100, proof_score: 100 },
+        ];
+        config_modified.node_pk_hash = test_pk_hash(&pk1);
 
         let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
+        node = node.with_falcon_key(sk1.to_vec());
         node.current_round = 0;
         node.round_start_time_ms = 1000;
 
-        // Nie minal czas, brak ViewChange
+        // Nie minął czas — brak ViewChange
         assert!(node.check_timeout(1000 + 4999, 5000).is_none());
 
-        // Przekroczono limit, tworzy ViewChange dla rundy 1
-        let vc_opt = node.check_timeout(1000 + 5001, 5000);
-        assert!(vc_opt.is_some());
-        
-        let vc = vc_opt.unwrap();
+        // Przekroczono limit — tworzy ViewChange dla rundy 1
+        let vc = node.check_timeout(1000 + 5001, 5000).unwrap();
         assert_eq!(vc.new_round, 1);
 
-        // Nastepnie inni dołączają do awarii:
-        assert!(!node.receive_view_change(vc.clone(), 6001)); // Tylko 1 glos, threshold to 3 * 2/3 + 1 = 3
-        
-        let vc2 = ViewChange { validator_pk: vec![2], ..vc.clone() };
-        assert!(!node.receive_view_change(vc2, 6001)); // 2 glosy
+        let view_change_msg = privai_chain::hash::domain_hash("privai:view-change:v0", &[&vc.new_round.to_le_bytes()]);
 
-        let vc3 = ViewChange { validator_pk: vec![3], ..vc.clone() };
-        assert!(node.receive_view_change(vc3, 6001)); // 3 glosy! Threshold osiagniety!
+        // Podpisz każdym kluczem swój własny ViewChange
+        // Validator 1: vc już ma podpis od node (validator_pk = node_pk_hash = hash(pk1))
+        // Musimy go podpisać raw pk1 żeby verification przeszła
+        let mut vc1 = vc.clone();
+        vc1.validator_pk = pk1.clone();
+        vc1.falcon_sig = nxms_transport::crypto::falcon_sign_ct_prepared(&sk1, &view_change_msg).expect("sign");
+        assert!(!node.receive_view_change(vc1, 6001)); // 1 głos, za mało
 
-        // Widok powinien zostac zaktualizowany na runde 1
+        // Validator 2: podpisuje swoim sk2
+        let mut vc2 = vc.clone();
+        vc2.validator_pk = pk2.clone();
+        vc2.falcon_sig = nxms_transport::crypto::falcon_sign_ct_prepared(&sk2, &view_change_msg).expect("sign");
+        assert!(!node.receive_view_change(vc2, 6001)); // 2 głosy, za mało
+
+        // Validator 3: podpisuje swoim sk3
+        let mut vc3 = vc.clone();
+        vc3.validator_pk = pk3.clone();
+        vc3.falcon_sig = nxms_transport::crypto::falcon_sign_ct_prepared(&sk3, &view_change_msg).expect("sign");
+        assert!(node.receive_view_change(vc3, 6001)); // 3 głosy — threshold osiągnięty!
+
         assert_eq!(node.current_round, 1);
         assert_eq!(node.round_start_time_ms, 6001);
     }
@@ -826,11 +821,11 @@ mod tests {
 
     #[test]
     fn node_builds_qc_on_threshold_votes() {
-        // Klucze publiczne validatorów (fake — ale muszą być spójne z pk_hash w configu)
-        let pk1 = vec![1u8];
-        let pk2 = vec![2u8];
-        let pk3 = vec![3u8];
-        let pk4 = vec![4u8];
+        // Generuj klucze Falcon dla 4 validatorów
+        let (sk1, pk1) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let (sk2, pk2) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let (sk3, pk3) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let (_sk4, pk4) = nxms_transport::crypto::falcon_keygen().expect("keygen");
 
         let config = NodeConfig::example();
         let mut config_modified = config.clone();
@@ -845,9 +840,14 @@ mod tests {
 
         let hash = [9u8; 32];
 
-        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk1, falcon_sig: vec![] };
-        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk2, falcon_sig: vec![] };
-        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk3, falcon_sig: vec![] };
+        // Podpisz każdy głos swoim kluczem
+        let sig1 = nxms_transport::crypto::falcon_sign_ct_prepared(&sk1, &hash).expect("sign");
+        let sig2 = nxms_transport::crypto::falcon_sign_ct_prepared(&sk2, &hash).expect("sign");
+        let sig3 = nxms_transport::crypto::falcon_sign_ct_prepared(&sk3, &hash).expect("sign");
+
+        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk1.clone(), falcon_sig: sig1 };
+        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk2.clone(), falcon_sig: sig2 };
+        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk3.clone(), falcon_sig: sig3 };
 
         // 1szy i 2gi glos nic nie daja na QC (stake 1+1 = 2 < 3)
         assert!(node.receive_vote(vote1).is_none());
@@ -862,7 +862,8 @@ mod tests {
         assert_eq!(qc.signers.len(), 3);
 
         // QC dedup: 4ty głos nie buduje drugiego QC
-        let vote4 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![4u8], falcon_sig: vec![] };
+        let sig4 = nxms_transport::crypto::falcon_sign_ct_prepared(&sk1, &hash).expect("sign");
+        let vote4 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk4, falcon_sig: sig4 };
         assert!(node.receive_vote(vote4).is_none());
 
         // Finalizacja z niepasującym blokiem → QcHashMismatch

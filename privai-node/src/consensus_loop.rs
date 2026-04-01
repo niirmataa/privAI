@@ -138,7 +138,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         );
 
         match msg {
-            ConsensusMsg::Proposal { block, proposer_sig: _ } => {
+            ConsensusMsg::Proposal { block, proposer_sig } => {
                 eprintln!(
                     "[consensus] received proposal height={} round={} hash={:?}",
                     block.header.height,
@@ -146,7 +146,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     &block.hash()[..8]
                 );
 
-                // Weryfikacja proposera — czy jest uprawniony dla (epoch_seed, round)
+                // 1. Weryfikacja proposera — czy jest uprawniony dla (epoch_seed, round)
                 let expected_proposer = self.node.next_proposer(
                     &block.header.epoch_seed_hash,
                     block.header.round,
@@ -160,7 +160,61 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     return;
                 }
 
-                // Walidacja: roots muszą się zgadzać
+                // 2. Weryfikacja podpisu Proposera (obowiązkowy)
+                if proposer_sig.is_empty() {
+                    eprintln!("[consensus] REJECTED proposal: missing proposer signature (mandatory)");
+                    return;
+                }
+                if nxms_transport::crypto::falcon_verify(
+                    &block.header.proposer_pk_hash,
+                    &block.hash(),
+                    &proposer_sig,
+                )
+                .is_err()
+                {
+                    eprintln!("[consensus] REJECTED proposal: invalid proposer signature");
+                    return;
+                }
+
+                // 3. Walidacja timestamp (nie w przyszłości, nie za stary)
+                let now = current_time_ms();
+                if block.header.timestamp_ms > now + 30_000 {
+                    eprintln!(
+                        "[consensus] REJECTED proposal: timestamp too far in future ({} > {})",
+                        block.header.timestamp_ms,
+                        now + 30_000
+                    );
+                    return;
+                }
+                if block.header.timestamp_ms < now.saturating_sub(self.node.config().consensus_timeout_ms * 2) {
+                    eprintln!(
+                        "[consensus] REJECTED proposal: timestamp too old ({} < {})",
+                        block.header.timestamp_ms,
+                        now.saturating_sub(self.node.config().consensus_timeout_ms * 2)
+                    );
+                    return;
+                }
+
+                // 4. Walidacja height (sekwencyjna)
+                let current_height = self.node.ledger().snapshot().height;
+                if block.header.height != current_height + 1 {
+                    eprintln!(
+                        "[consensus] REJECTED proposal: wrong height {} (expected {})",
+                        block.header.height,
+                        current_height + 1
+                    );
+                    return;
+                }
+
+                // 5. Walidacja prev_block_hash (musi pasować do current tip)
+                if block.header.prev_block_hash != self.node.ledger().snapshot().tip_hash {
+                    eprintln!(
+                        "[consensus] REJECTED proposal: prev_block_hash mismatch"
+                    );
+                    return;
+                }
+
+                // 6. Walidacja: roots muszą się zgadzać
                 if !block.roots_match() {
                     eprintln!("[consensus] REJECTED proposal: roots mismatch");
                     return;
