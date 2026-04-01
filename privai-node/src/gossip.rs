@@ -52,6 +52,7 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     current_time_ms: u64,
     node_kem_pk: &[u8],
     node_sig_pk: &[u8],
+    node_sig_sk: &[u8],
     node_peer_id: &str,
 ) {
     eprintln!(
@@ -100,6 +101,7 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
             msg.hops + 1,
             node_kem_pk,
             node_sig_pk,
+            node_sig_sk,
             node_peer_id,
         );
     }
@@ -119,6 +121,7 @@ fn propagate_tx(
     hops: u8,
     node_kem_pk: &[u8],
     node_sig_pk: &[u8],
+    node_sig_sk: &[u8],
     node_peer_id: &str,
 ) {
     let my_id = &net_config.my_peer_id;
@@ -152,10 +155,11 @@ fn propagate_tx(
         let pool = net_config.connection_pool.clone();
         let kem_pk = node_kem_pk.to_vec();
         let sig_pk = node_sig_pk.to_vec();
+        let sig_sk = node_sig_sk.to_vec();
         let my_id = node_peer_id.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &my_id).await {
+            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &sig_sk, &my_id).await {
                 eprintln!(
                     "[gossip] failed to propagate tx {:?} to {}: {}",
                     &msg.tx_hash[..8],
@@ -184,6 +188,7 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     current_time_ms: u64,
     node_kem_pk: &[u8],
     node_sig_pk: &[u8],
+    node_sig_sk: &[u8],
     node_peer_id: &str,
 ) -> bool {
     let tx_hash = tx.tx_id();
@@ -218,6 +223,7 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
         0, // hops = 0 (pierwsza propagacja)
         node_kem_pk,
         node_sig_pk,
+        node_sig_sk,
         node_peer_id,
     );
 

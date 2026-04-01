@@ -40,6 +40,8 @@ pub struct NodeConfig {
     pub node_kem_pk: Vec<u8>,
     /// Klucz publiczny Falcon węzła (base64) — do handshake P2P.
     pub node_sig_pk: Vec<u8>,
+    /// Klucz prywatny Falcon węzła — do podpisywania handshake P2P.
+    pub node_sig_sk: Vec<u8>,
 }
 
 impl NodeConfig {
@@ -68,6 +70,7 @@ impl NodeConfig {
             consensus_timeout_ms: DEFAULT_CONSENSUS_TIMEOUT_MS,
             node_kem_pk: vec![0; 32], // placeholder
             node_sig_pk: vec![0; 32], // placeholder
+            node_sig_sk: vec![0; 32], // placeholder
         }
     }
 

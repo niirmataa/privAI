@@ -96,6 +96,15 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             }
         });
 
+        // Uruchamia pool maintenance — sprawdza health connections co 30s
+        self.connection_pool.spawn_maintenance(
+            self.peer_book.clone(),
+            self.net_config.my_peer_id.clone(),
+            self.node.config().node_kem_pk.clone(),
+            self.node.config().node_sig_pk.clone(),
+            self.node.config().node_sig_sk.clone(),
+        );
+
         // Timeout checker — co 1 sekundę sprawdzamy czy nie przekroczyliśmy limitu
         let mut timeout_ticker = interval(Duration::from_secs(1));
 
@@ -375,6 +384,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     &self.connection_pool,
                     &self.node.config().node_kem_pk,
                     &self.node.config().node_sig_pk,
+                    &self.node.config().node_sig_sk,
                     &self.net_config.my_peer_id,
                 );
             }
@@ -410,9 +420,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let pool = self.connection_pool.clone();
         let kem_pk = self.node.config().node_kem_pk.clone();
         let sig_pk = self.node.config().node_sig_pk.clone();
+        let sig_sk = self.node.config().node_sig_sk.clone();
 
         tokio::spawn(async move {
-            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &sig_pk).await;
+            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &sig_pk, &sig_sk).await;
             for (peer_id, result) in results {
                 if let Err(e) = result {
                     eprintln!("[consensus] broadcast to {} failed: {}", peer_id, e);
