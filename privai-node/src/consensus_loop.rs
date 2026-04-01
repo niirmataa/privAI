@@ -93,13 +93,54 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
         match msg {
             ConsensusMsg::Proposal { block, proposer_sig: _ } => {
-                // TODO: walidacja bloku, import, generacja Prevote
                 eprintln!(
                     "[consensus] received proposal height={} round={} hash={:?}",
                     block.header.height,
                     block.header.round,
                     &block.hash()[..8]
                 );
+
+                // Walidacja: roots muszą się zgadzać
+                if !block.roots_match() {
+                    eprintln!("[consensus] REJECTED proposal: roots mismatch");
+                    return;
+                }
+
+                // Import bloku do ledgera
+                if let Err(e) = self.node.import_block(&block) {
+                    eprintln!("[consensus] REJECTED proposal: import failed: {}", e);
+                    return;
+                }
+
+                // Generacja i broadcast Prevote
+                let template = privai_chain::BlockTemplate {
+                    chain_id: block.header.chain_id,
+                    height: block.header.height,
+                    epoch: block.header.epoch,
+                    round: block.header.round,
+                    timestamp_ms: block.header.timestamp_ms,
+                    prev_block_hash: block.header.prev_block_hash,
+                    proposer_pk_hash: block.header.proposer_pk_hash,
+                    epoch_seed_hash: block.header.epoch_seed_hash,
+                    parent_qc_hash: block.header.parent_qc_hash,
+                    txs: block.body.txs.clone(),
+                    execution_bundle: block.body.execution_bundle.clone(),
+                    proof_certificates: block.body.proof_certificates.clone(),
+                    extra_receipts: block.body.extra_receipts.clone(),
+                };
+
+                match self.node.create_vote_for_proposal(&template) {
+                    Ok(vote) => {
+                        eprintln!(
+                            "[consensus] sending PREVOTE for block {:?}",
+                            &vote.block_hash[..8]
+                        );
+                        self.broadcast_msg(ConsensusMsg::Prevote(vote)).await;
+                    }
+                    Err(e) => {
+                        eprintln!("[consensus] failed to create prevote: {}", e);
+                    }
+                }
             }
 
             ConsensusMsg::Prevote(vote) => {
@@ -142,7 +183,15 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     qc.round,
                     qc.vote_type
                 );
-                // TODO: finalize block z tym QC
+
+                // Finalizacja tylko dla Precommit QC
+                if qc.vote_type == VoteType::Precommit {
+                    // Szukamy blok w ledgerze po hashu (TODO: cache bloków)
+                    // Na razie logujemy — finalizacja wymaga bloku jako parametru
+                    eprintln!(
+                        "[consensus] PRECOMMIT QC received, block finalization pending (need block data)"
+                    );
+                }
             }
 
             ConsensusMsg::ViewChange(vc) => {
