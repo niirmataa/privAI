@@ -58,7 +58,7 @@ impl NodeConfig {
     }
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
-        let contents = fs::read_to_string(path)?;
-        Ok(toml::from_str(&contents).expect("valid node config TOML"))
+        let contents = std::fs::read_to_string(path)?;
+        toml::from_str(&contents).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }

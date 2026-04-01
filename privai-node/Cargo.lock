@@ -513,6 +513,7 @@ dependencies = [
 name = "privai-ledger"
 version = "0.1.0"
 dependencies = [
+ "nxms-transport",
  "privai-chain",
  "privai-proof",
  "serde",
@@ -525,6 +526,7 @@ name = "privai-node"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "nxms-transport",
  "privai-chain",
  "privai-ledger",
  "privai-proof",

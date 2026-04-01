@@ -4,7 +4,8 @@ use std::collections::{HashMap, BTreeSet};
 
 use privai_chain::{
     Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32, ProofCertificate, Transaction,
-    Vote, VoteType, QuorumCertificate
+    Vote, VoteType, QuorumCertificate, ViewChange,
+    tx::MarketplaceBatchTx
 };
 use privai_ledger::{Ledger, LedgerError, LedgerStore};
 use privai_proof::{
@@ -33,6 +34,12 @@ pub enum NodeError {
     NoValidators,
     #[error("current node is not proposer for round {round}")]
     NotProposer { round: u32 },
+    #[error("vote error: {0}")]
+    VoteError(String),
+    #[error("identity error: {0}")]
+    IdentityError(String),
+    #[error("QC hash mismatch: expected {expected:?}, got {actual:?}")]
+    QcHashMismatch { expected: Hash32, actual: Hash32 },
 }
 
 pub struct PrivaiNode<
@@ -49,6 +56,15 @@ pub struct PrivaiNode<
     // Proste liczniki glosow z pamiecia 1 epoki w PC-BFT do budowy QC
     prevotes: HashMap<Hash32, BTreeSet<Vec<u8>>>,
     precommits: HashMap<Hash32, BTreeSet<Vec<u8>>>,
+    
+    // PC-BFT Liveness & View Change
+    pub current_round: u32,
+    pub round_start_time_ms: u64,
+    // Przechowuje pule żądań ViewChange (głosy za przejściem do konkretnej rundy)
+    view_changes: HashMap<u32, BTreeSet<Vec<u8>>>,
+
+    // Do generowania odpornych sygnatur (Non-Custodial / Anti-Forging)
+    falcon_sk: Option<Vec<u8>>,
 }
 
 impl<S: LedgerStore> PrivaiNode<S, StructuralProofVerifier, MemoryProofArtifactStore, SidecarProofVerifier> {
@@ -104,6 +120,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore>
     }
 }
 
+use crate::identity_provider::PQCIdentity;
+
 impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>
     PrivaiNode<S, V, A, P>
 {
@@ -122,7 +140,53 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             artifact_verifier,
             prevotes: HashMap::new(),
             precommits: HashMap::new(),
+            current_round: 0,
+            round_start_time_ms: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis() as u64,
+            view_changes: HashMap::new(),
+            falcon_sk: None,
         })
+    }
+
+    pub fn with_falcon_key(mut self, secret_key: Vec<u8>) -> Self {
+        self.falcon_sk = Some(secret_key);
+        self
+    }
+
+    /// Inicjalizacja wezla z uzyciem tozsamosci zewnetrznej C `nexum-cli`
+    /// Podpina ona glowny klucz PQC do generowania Consensus Vote.
+    pub fn load_identity(&mut self, vault_path: &std::path::Path) -> Result<(), NodeError> {
+        let identity = PQCIdentity::load_from_vault(vault_path)?;
+
+        if !identity.falcon_sk.is_empty() {
+            self.falcon_sk = Some(identity.falcon_sk);
+        }
+        
+        if !identity.falcon_pk.is_empty() {
+            // Gdy mamy zdefiniowane falcon_pk hash klucza w configu zastepujemy wlasnym.
+            self.config.node_pk_hash = privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[&identity.falcon_pk]);
+        }
+
+        Ok(())
+    }
+
+    /// Implementacja Operator-Consensus Binding
+    /// Jako węzeł obsługujący rynek (MarketplaceOperator) ostatecznie podpisujemy 
+    /// wygenerowany przez portfel batch kluczem Falcon przed puszczeniem go do Mempoola.
+    pub fn sign_marketplace_batch(&self, mut batch: MarketplaceBatchTx) -> Result<MarketplaceBatchTx, NodeError> {
+        if let Some(sk) = &self.falcon_sk {
+            // Uzywamy settlement_root jako kanonicznego obiektu reprezentujacego caly ten zbior drobnicy!
+            let msg = batch.summary.settlement_root();
+            let sig = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &msg)
+                .map_err(|e| NodeError::VoteError(e.to_string()))?;
+            
+            batch.operator_sig = sig; 
+            Ok(batch)
+        } else {
+            Err(NodeError::VoteError("Brak klucza Operatora PQC (Falcon) w wezle!".into()))
+        }
     }
 
     pub fn config(&self) -> &NodeConfig {
@@ -159,6 +223,41 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         received_at_ms: u64,
     ) -> Result<Hash32, NodeError> {
         Ok(self.ledger.submit_transaction(tx, received_at_ms)?)
+    }
+
+    pub fn create_vote_for_proposal(&mut self, proposal: &BlockTemplate) -> Result<Vote, NodeError> {
+        let mut safety = self.ledger_mut().snapshot().consensus_safety.clone();
+        
+        if proposal.round < safety.current_view || proposal.round < safety.last_voted_view {
+            return Err(NodeError::VoteError("Stary widok".into()));
+        }
+
+        if proposal.round == safety.last_voted_view && proposal.round != 0 {
+            return Err(NodeError::VoteError("Już głosowaliśmy w tej rundzie! Atak double-sign zablokowany.".into()));
+        }
+
+        // KLUCZOWY MOMENT: Najpierw zapis na dysk, potem wysylka do sieci
+        safety.last_voted_view = proposal.round;
+        // Zapis stanu na dysk atomowo. Ledger flush() od razu rzuci IO Err jesli padnie (zapobiega crash-vulnerability)
+        self.ledger_mut().update_consensus_safety(safety)?;
+
+        let block = Block::from_template(proposal.clone());
+        
+        let mut falcon_sig = vec![];
+        if let Some(sk) = &self.falcon_sk {
+            if let Ok(sig) = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &block.hash()) {
+                falcon_sig = sig;
+            }
+        }
+        
+        Ok(Vote {
+            height: block.header.height,
+            round: block.header.round,
+            block_hash: block.hash(),
+            vote_type: VoteType::Prevote, // Zaczynamy od Prevote w PC-BFT
+            validator_pk: self.config.node_pk_hash.to_vec(), // W docelowej appce prawdziwy PK (tu hashuje sie config.node_pk_hash wiec symulacja)
+            falcon_sig,
+        })
     }
 
     pub fn propose_block(
@@ -240,8 +339,56 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         self.import_block(block)
     }
 
+    /// PHASE 7 LIVENESS: Wywolywana przez wbudowany timer/scheduler. 
+    /// Gdy przekroczy dozwolony limit - węzeł wysyła swoj glos ViewChange w obieg.
+    pub fn check_timeout(&mut self, current_time_ms: u64, timeout_limit_ms: u64) -> Option<ViewChange> {
+        if current_time_ms.saturating_sub(self.round_start_time_ms) > timeout_limit_ms {
+            let next_round = self.current_round + 1;
+            
+            // Wysylamy zawiadomienie ViewChange - my nie otrzymalismy bloku w czasie.
+            let vc = ViewChange {
+                height: self.ledger.snapshot().height + 1,
+                new_round: next_round,
+                validator_pk: self.config.node_pk_hash.to_vec(), // Using node_pk_hash as a mock for the pk
+                falcon_sig: vec![],
+            };
+            return Some(vc);
+        }
+        None
+    }
+
+    /// PHASE 7 LIVENESS: Inne wezly przysylaja nam wiadomosc ViewChange.
+    /// Jezeli zdobedziemy 2/3 w danej rundzie, Node podbija runde by zapobiec zamrozeniu (wybrac nowego Proposera).
+    pub fn receive_view_change(&mut self, vc: ViewChange, current_time_ms: u64) -> bool {
+        let threshold = (self.config.validators.len() * 2) / 3 + 1;
+        
+        let entry = self.view_changes.entry(vc.new_round).or_insert_with(BTreeSet::new);
+        entry.insert(vc.validator_pk.clone());
+
+        if entry.len() >= threshold && self.current_round < vc.new_round {
+            // Osiagnelismy Quorum na wejscie w nowa runde! Lider "zostal obalony".
+            self.current_round = vc.new_round;
+            self.round_start_time_ms = current_time_ms; // Reset timera
+            
+            // Wyczysc stare stany, gotowi do nowej rundy.
+            self.prevotes.clear();
+            self.precommits.clear();
+            return true;
+        }
+
+        false
+    }
+
     pub fn receive_vote(&mut self, vote: Vote) -> Option<QuorumCertificate> {
-        let threshold = (self.config.validators.len() * 2) / 3 + 1; // Proste zalozenie > 2/3 wag lub validatorow
+        let threshold = (self.config.validators.len() * 2) / 3 + 1; // TODO: Weighted voting w Quorum
+
+        // Falcon Quantum-Resistant Verify logic (anti-forging)
+        if !vote.falcon_sig.is_empty() && !vote.validator_pk.is_empty() {
+            if nxms_transport::crypto::falcon_verify(&vote.validator_pk, &vote.block_hash, &vote.falcon_sig).is_err() {
+                return None; // Zignoruj falszywy podpis
+            }
+        }
+        // TODO: enforce mandatory signatures on v1. Muted empty checking for scaffold v0.
 
         match vote.vote_type {
             VoteType::Prevote => {
@@ -286,7 +433,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         qc: &QuorumCertificate,
     ) -> Result<(), NodeError> {
         if qc.block_hash != block.hash() {
-            return Err(NodeError::NotProposer { round: qc.round }); // Reuse error temporary for hash mismatch logic
+            return Err(NodeError::QcHashMismatch {
+                expected: block.hash(),
+                actual: qc.block_hash,
+            });
         }
         if qc.vote_type != VoteType::Precommit {
             return Err(NodeError::NoValidators); // Tylko QC precommit daje finality
@@ -524,14 +674,99 @@ mod tests {
     use crate::config::ValidatorConfig;
 
     #[test]
+    fn node_prevents_double_voting_with_safety_state() {
+        let config = NodeConfig::example();
+        let mut node = PrivaiNode::open(config, MemoryStore::new()).expect("node");
+
+        let (block, _) = sample_block_and_artifacts(10);
+        let mut proposal = privai_chain::BlockTemplate {
+            chain_id: block.header.chain_id,
+            height: block.header.height,
+            epoch: block.header.epoch,
+            round: 1,
+            timestamp_ms: block.header.timestamp_ms,
+            prev_block_hash: block.header.prev_block_hash,
+            proposer_pk_hash: block.header.proposer_pk_hash,
+            epoch_seed_hash: block.header.epoch_seed_hash,
+            parent_qc_hash: block.header.parent_qc_hash,
+            txs: block.body.txs.clone(),
+            execution_bundle: block.body.execution_bundle.clone(),
+            proof_certificates: block.body.proof_certificates.clone(),
+            extra_receipts: block.body.extra_receipts.clone(),
+        };
+
+        // 1szy glos (sukces, update pliku/dysku)
+        let vote1 = node.create_vote_for_proposal(&proposal);
+        assert!(vote1.is_ok());
+
+        // 2gi glos w tej samej rundzie (odrzucony)
+        let vote2 = node.create_vote_for_proposal(&proposal);
+        assert!(vote2.is_err());
+        if let Err(NodeError::VoteError(msg)) = vote2 {
+            assert!(msg.contains("Atak double-sign zablokowany"));
+        } else {
+            panic!("Expected VoteError");
+        }
+
+        // 3ci glos z mniejsza runda (odrzucony - old view)
+        proposal.round = 0;
+        let vote3 = node.create_vote_for_proposal(&proposal);
+        assert!(vote3.is_err());
+
+        // 4ty glos w wyzszej rundzie (sukces)
+        proposal.round = 2;
+        let vote4 = node.create_vote_for_proposal(&proposal);
+        assert!(vote4.is_ok());
+    }
+
+    #[test]
+    fn node_triggers_view_change_on_timeout() {
+        let config = NodeConfig::example();
+        let mut config_modified = config.clone();
+        config_modified.validators = vec![
+            ValidatorConfig { pk_hash: [1u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: [2u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: [3u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+        ]; // 3 val
+        config_modified.node_pk_hash = [1u8; 32];
+
+        let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
+        node.current_round = 0;
+        node.round_start_time_ms = 1000;
+
+        // Nie minal czas, brak ViewChange
+        assert!(node.check_timeout(1000 + 4999, 5000).is_none());
+
+        // Przekroczono limit, tworzy ViewChange dla rundy 1
+        let vc_opt = node.check_timeout(1000 + 5001, 5000);
+        assert!(vc_opt.is_some());
+        
+        let vc = vc_opt.unwrap();
+        assert_eq!(vc.new_round, 1);
+
+        // Nastepnie inni dołączają do awarii:
+        assert!(!node.receive_view_change(vc.clone(), 6001)); // Tylko 1 glos, threshold to 3 * 2/3 + 1 = 3
+        
+        let vc2 = ViewChange { validator_pk: vec![2], ..vc.clone() };
+        assert!(!node.receive_view_change(vc2, 6001)); // 2 glosy
+
+        let vc3 = ViewChange { validator_pk: vec![3], ..vc.clone() };
+        assert!(node.receive_view_change(vc3, 6001)); // 3 glosy! Threshold osiagniety!
+
+        // Widok powinien zostac zaktualizowany na runde 1
+        assert_eq!(node.current_round, 1);
+        assert_eq!(node.round_start_time_ms, 6001);
+    }
+
+    #[test]
     fn node_builds_qc_on_threshold_votes() {
         let config = NodeConfig::example(); // Domyslnie example validator.len() wynosi np. 1. Dopiszemy ich tu wiecej
         let mut config_modified = config.clone();
         config_modified.validators = vec![
-            ValidatorConfig { pk_hash: [1u8; 32], weight: 1 },
-            ValidatorConfig { pk_hash: [2u8; 32], weight: 1 },
-            ValidatorConfig { pk_hash: [3u8; 32], weight: 1 },
-            ValidatorConfig { pk_hash: [4u8; 32], weight: 1 },
+            ValidatorConfig { pk_hash: [1u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: [2u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: [3u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: [4u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
         ]; // 4 val
 
         let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
@@ -559,9 +794,10 @@ mod tests {
         let mut final_block = block.clone();
         final_block.header.height = 1;
         
-        // To powinnosie wypalic ale z bledem NotProposer/Hash, bo hash() sztucznego QC sie nie zgadza z naszym dummy sample_block. 
-        // Oznacz to po prostu wyjsciem None-err.
+        // Finalizacja rzuca blad poniewaz 'qc.block_hash' == [9u8; 32] 
+        // (zainicjowany w fake test setup), ale sample_block wyliczyl sie na unikalny Hash
+        // To dowodzi, ze zwalidowano QuorumCertificate pod kątem powiazania z wlasciwym blokiem w ledgery!
         let result = node.finalize_block_with_qc(&final_block, &qc);
-        assert!(result.is_err());
+        assert!(matches!(result, Err(NodeError::QcHashMismatch { .. })));
     }
 }

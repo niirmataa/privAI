@@ -17,6 +17,10 @@ pub fn select_proposer(
     }
 
     let mut selector = u128::from(u64::from_le_bytes(epoch_seed_hash[..8].try_into().ok()?));
+    
+    // INFO/TODO: Modulo z użyciem wag może nieść lekki bias dla specyficznie różniących się wariantów wag.
+    // Dla v0 (scaffold/MVP) dystrybucja wag jest odpowiednio akceptowalna. W następnych iteracjach 
+    // należy zaimplementować dokładniejszą pseudo-losowość (np. rejection sampling / Hash do Curve).
     selector = (selector + round as u128) % total_weight;
 
     let mut cumulative = 0_u128;
