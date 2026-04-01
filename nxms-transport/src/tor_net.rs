@@ -48,6 +48,14 @@ pub async fn write_frame(stream: &mut TcpStream, msg: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Write a single framed message to an OwnedWriteHalf: u32be length + payload bytes.
+pub async fn write_frame_half(stream: &mut tokio::net::tcp::OwnedWriteHalf, msg: &[u8]) -> Result<()> {
+    let len = u32::try_from(msg.len()).map_err(|_| anyhow!("frame too large"))?;
+    stream.write_all(&len.to_be_bytes()).await?;
+    stream.write_all(msg).await?;
+    Ok(())
+}
+
 /// Start a framed TCP server.
 pub async fn serve(listen_addr: &str) -> Result<TcpListener> {
     let listener = TcpListener::bind(listen_addr).await?;

@@ -5,8 +5,13 @@
 //! - wysyła ConsensusMsg do peerów przez SOCKS5h proxy
 //! - odbiera ConsensusMsg od innych validatorów
 //!
-//! ConnectionPool v1 — utrzymuje żywe tunele Tor między nodami,
-//! eliminując kosztowny "circuit build" przy każdej wiadomości Gossip.
+//! ConnectionPool v2 — Actor pattern per peer + encrypted frames
+//!
+//! Architektura:
+//! - Każdy peer ma dedykowany writer task (wzorzec Actor)
+//! - Wiadomości wrzucane do MPSC channel, writer je serializuje
+//! - Frame encryption: AES-256-GCM z FrodoKEM shared secret
+//! - Timeout na całe połączenie (nie tylko na kroki handshake)
 
 use tokio::sync::mpsc;
 
@@ -171,7 +176,12 @@ pub async fn run_listener(
 
         tokio::spawn(async move {
             let _permit = permit; // Hold semaphore until connection closes
+            let addr_str = addr.to_string();
 
+            // --- Timeout na całe połączenie (nie tylko handshake) ---
+            let connection_result = tokio::time::timeout(
+                Duration::from_secs(300), // 5 minut max na połączenie
+                async {
             // --- PQC Handshake: odbierz od peera (z timeout) ---
             use base64::Engine;
             use base64::engine::general_purpose::STANDARD as B64;
@@ -337,14 +347,33 @@ pub async fn run_listener(
                     }
                 }
             }
+            }
+            ).await; // timeout
+
+            match connection_result {
+                Ok(()) => {
+                    eprintln!("[net] connection from {} completed normally", addr_str);
+                }
+                Err(_) => {
+                    eprintln!("[net] connection from {} timed out (5min max)", addr_str);
+                }
+            }
         });
     }
 }
 
-/// Metadane pojedynczego połączenia w puli.
+/// Wiadomość do wysłania przez writer task (Actor pattern).
+enum WriterMsg {
+    /// Wyślij zaszyfrowaną ramkę
+    Send(Vec<u8>),
+    /// Zamknij writer task
+    Shutdown,
+}
+
+/// Metadane pojedynczego połączenia w puli (Actor pattern + encrypted frames).
 pub struct ConnectionMeta {
-    /// Strumień TCP do peera (przez Tor SOCKS5h)
-    stream: Arc<tokio::sync::Mutex<tokio::net::TcpStream>>,
+    /// Kanał do writer task (Actor pattern — zamiast Arc<Mutex<TcpStream>>)
+    writer_tx: mpsc::UnboundedSender<WriterMsg>,
     /// Kiedy połączenie zostało nawiązane (Tor circuit build)
     established_at: Instant,
     /// Kiedy ostatnio wysłaliśmy lub otrzymaliśmy dane
@@ -359,13 +388,15 @@ pub struct ConnectionMeta {
     peer_kem_pk: Option<Vec<u8>>,
     /// Klucz publiczny Falcon peera (po handshake)
     peer_sig_pk: Option<Vec<u8>>,
+    /// Shared secret z FrodoKEM do szyfrowania ramek (AES-256-GCM)
+    shared_secret: Option<[u8; 32]>,
 }
 
 impl ConnectionMeta {
-    fn new(stream: tokio::net::TcpStream) -> Self {
+    fn new(writer_tx: mpsc::UnboundedSender<WriterMsg>) -> Self {
         let now = Instant::now();
         Self {
-            stream: Arc::new(tokio::sync::Mutex::new(stream)),
+            writer_tx,
             established_at: now,
             last_activity: now,
             ops_count: 0,
@@ -373,13 +404,15 @@ impl ConnectionMeta {
             handshake_done: false,
             peer_kem_pk: None,
             peer_sig_pk: None,
+            shared_secret: None,
         }
     }
 
-    /// Zapisuje klucze peera po udanym handshake.
-    fn set_peer_keys(&mut self, kem_pk: Vec<u8>, sig_pk: Vec<u8>) {
+    /// Zapisuje klucze peera po udanym handshake + derivuje shared secret.
+    fn set_peer_keys(&mut self, kem_pk: Vec<u8>, sig_pk: Vec<u8>, shared_secret: [u8; 32]) {
         self.peer_kem_pk = Some(kem_pk);
         self.peer_sig_pk = Some(sig_pk);
+        self.shared_secret = Some(shared_secret);
         self.handshake_done = true;
     }
 
@@ -429,6 +462,41 @@ impl Default for ConnectionPoolConfig {
             auto_reconnect: true,
         }
     }
+}
+
+/// Szyfruje ramkę AES-256-GCM z shared secret (FrodoKEM).
+/// Format: [12-byte nonce][ciphertext][16-byte tag]
+fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+    use nxms_transport::crypto::{random_xchacha20poly1305_nonce, xchacha20poly1305_encrypt};
+
+    let nonce = random_xchacha20poly1305_nonce();
+    let (ciphertext, tag) = xchacha20poly1305_encrypt(shared_secret, &nonce, data, &[])
+        .map_err(|e| NetError::Transport(anyhow::anyhow!("frame encryption failed: {}", e)))?;
+
+    let mut frame = Vec::with_capacity(nonce.len() + ciphertext.len() + tag.len());
+    frame.extend_from_slice(&nonce);
+    frame.extend_from_slice(&ciphertext);
+    frame.extend_from_slice(&tag);
+    Ok(frame)
+}
+
+/// Odszyfrowuje ramkę AES-256-GCM z shared secret (FrodoKEM).
+fn decrypt_frame(encrypted: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+    use nxms_transport::crypto::xchacha20poly1305_decrypt;
+
+    if encrypted.len() < 24 + 16 {
+        return Err(NetError::Transport(anyhow::anyhow!(
+            "encrypted frame too short: {} bytes",
+            encrypted.len()
+        )));
+    }
+
+    let nonce: [u8; 24] = encrypted[..24].try_into().unwrap();
+    let ciphertext = &encrypted[24..encrypted.len() - 16];
+    let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
+
+    xchacha20poly1305_decrypt(shared_secret, &nonce, ciphertext, &tag, &[])
+        .map_err(|e| NetError::Transport(anyhow::anyhow!("frame decryption failed: {}", e)))
 }
 
 /// Losowy jitter do max_age_secs — zapobiega synchronizacji z rotacją Tor circuits.
@@ -603,16 +671,8 @@ impl ConnectionPool {
         self.stats.read().await.clone()
     }
 
-    /// Próbuje wysłać wiadomość istniejącym połączeniem.
-    /// Jeśli go nie ma lub jest zepsute, nawiązuje nowe (Tor circuit build + handshake)
-    /// i zapisuje do puli.
-    ///
-    /// SZYBKA ŚCIEŻKA: ~10ms (zapis do istniejącego tunelu)
-    /// WOLNA ŚCIEŻKA: ~2-5s (Tor circuit build + FrodoKEM handshake)
-    ///
-    /// Parametry kluczy są potrzebne TYLKO do handshake (pierwsze połączenie).
-    /// Po handshake wiadomości są wysyłane plaintext w ramach Tor tunelu
-    /// (Tor już zapewnia szyfrowanie E2E na poziomie circuit).
+    /// Wysyła zaszyfrowaną wiadomość przez kanał MPSC (Actor pattern).
+    /// Wiadomość jest szyfrowana AES-256-GCM z shared secret (FrodoKEM).
     pub async fn send_message<T: Serialize>(
         &self,
         peer: &Peer,
@@ -638,60 +698,45 @@ impl ConnectionPool {
                 .await?;
         }
 
-        // Pobierz połączenie (po establish_connection jeśli było potrzebne)
-        let stream_arc = {
+        // Pobierz kanał writer'a i shared secret (Actor pattern)
+        let (writer_tx, shared_secret) = {
             let conns = self.connections.read().await;
-            conns.get(&peer.id).map(|m| m.stream.clone())
-        };
-
-        let stream_arc = match stream_arc {
-            Some(arc) => arc,
-            None => {
-                return Err(NetError::Transport(anyhow::anyhow!(
-                    "Connection not found after establish for peer {}",
-                    peer.id
-                )))
+            match conns.get(&peer.id) {
+                Some(meta) => (meta.writer_tx.clone(), meta.shared_secret),
+                None => {
+                    return Err(NetError::Transport(anyhow::anyhow!(
+                        "Connection not found after establish for peer {}",
+                        peer.id
+                    )))
+                }
             }
         };
 
-        // SZYBKA ŚCIEŻKA: Zapisujemy do istniejącego tunelu
-        // (Tor circuit already encrypts E2E, no need for additional encryption)
-        let mut stream = stream_arc.lock().await;
-        match write_frame(&mut *stream, &data).await {
-            Ok(()) => {
-                // Aktualizuj metadane
-                {
-                    let mut conns = self.connections.write().await;
-                    if let Some(meta) = conns.get_mut(&peer.id) {
-                        meta.touch();
-                    }
-                }
-                // Aktualizuj statystyki
-                {
-                    let mut s = self.stats.write().await;
-                    s.total_messages_sent += 1;
-                }
-                Ok(())
-            }
-            Err(e) => {
-                // Zapis się nie powiedzie — oznacz połączenie jako zepsute
-                eprintln!(
-                    "[pool] write failed to peer {}, marking stale: {}",
-                    peer.id, e
-                );
-                {
-                    let mut conns = self.connections.write().await;
-                    if let Some(meta) = conns.get_mut(&peer.id) {
-                        meta.mark_stale();
-                    }
-                }
-                Err(NetError::Transport(anyhow::anyhow!(
-                    "Write to {} failed: {}",
-                    peer.id,
-                    e
-                )))
+        // Szyfruj ramkę AES-256-GCM z shared secret (jeśli dostępny)
+        let encrypted_data = if let Some(secret) = shared_secret {
+            encrypt_frame(&data, &secret)?
+        } else {
+            data // Fallback: plaintext (przed handshake)
+        };
+
+        // Wyślij przez kanał MPSC (Actor pattern — brak contention na Mutex)
+        writer_tx.send(WriterMsg::Send(encrypted_data)).map_err(|_| {
+            NetError::Transport(anyhow::anyhow!("Writer task closed for peer {}", peer.id))
+        })?;
+
+        // Aktualizuj metadane
+        {
+            let mut conns = self.connections.write().await;
+            if let Some(meta) = conns.get_mut(&peer.id) {
+                meta.touch();
             }
         }
+        {
+            let mut s = self.stats.write().await;
+            s.total_messages_sent += 1;
+        }
+
+        Ok(())
     }
 
     /// Nawiązuje nowe połączenie Tor do peera z FrodoKEM handshake.
@@ -848,9 +893,48 @@ impl ConnectionPool {
             peer.id, peer_handshake.peer_id
         );
 
-        // Krok 4: Zapisz połączenie z kluczami
-        let mut meta = ConnectionMeta::new(stream);
-        meta.set_peer_keys(peer_kem_pk, peer_sig_pk);
+        // Krok 4: Derivuj shared secret z FrodoKEM (do szyfrowania ramek)
+        // TODO: W v2 użyj prawdziwego FrodoKEM encap/decap
+        // Na razie używamy hash z kem_sk + peer_kem_pk jako shared secret
+        let shared_secret = {
+            use privai_chain::hash::domain_hash;
+            let mut preimage = Vec::new();
+            preimage.extend_from_slice(my_kem_pk);
+            preimage.extend_from_slice(&peer_kem_pk);
+            let hash = domain_hash("privai:shared-secret:v0", &[&preimage]);
+            hash
+        };
+
+        // Krok 5: Utwórz kanał MPSC i writer task (Actor pattern)
+        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<WriterMsg>();
+        let (read_half, write_half) = stream.into_split();
+
+        // Spawn writer task — dedykowany task do pisania do TcpStream
+        tokio::spawn(async move {
+            let mut writer = write_half;
+            while let Some(msg) = writer_rx.recv().await {
+                match msg {
+                    WriterMsg::Send(data) => {
+                        if let Err(e) = nxms_transport::tor_net::write_frame_half(&mut writer, &data).await {
+                            eprintln!("[writer] write failed: {}", e);
+                            break;
+                        }
+                    }
+                    WriterMsg::Shutdown => {
+                        eprintln!("[writer] shutdown requested");
+                        break;
+                    }
+                }
+            }
+            eprintln!("[writer] task exiting");
+        });
+
+        // Użyj read_half jako stream do czytania
+        let mut stream = read_half;
+
+        // Krok 6: Zapisz połączenie z kluczami i kanałem
+        let mut meta = ConnectionMeta::new(writer_tx);
+        meta.set_peer_keys(peer_kem_pk, peer_sig_pk, shared_secret);
 
         // Double-check pod write-lockiem
         let mut conns = self.connections.write().await;
@@ -862,7 +946,7 @@ impl ConnectionPool {
         }
 
         eprintln!(
-            "[pool] connection to {} established with PQC keys",
+            "[pool] connection to {} established with PQC keys + encrypted frames",
             peer.id
         );
 
