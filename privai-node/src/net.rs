@@ -129,6 +129,7 @@ pub async fn run_listener(
     msg_tx: mpsc::UnboundedSender<(String, ConsensusMsg)>,
     node_kem_pk: Vec<u8>,
     node_sig_pk: Vec<u8>,
+    node_sig_sk: Vec<u8>,
     node_peer_id: String,
     peer_book: PeerBook,
     ban_list: BanList,
@@ -170,9 +171,13 @@ pub async fn run_listener(
         let tx = msg_tx.clone();
         let kem_pk = node_kem_pk.clone();
         let sig_pk = node_sig_pk.clone();
+        let _sig_sk = node_sig_sk.clone();
         let my_peer_id = node_peer_id.clone();
         let peers = peer_book.peers.clone();
         let ban_list = ban_list.clone();
+
+        // Clone node_sig_sk before moving into tokio::spawn
+        let node_sig_sk_clone = node_sig_sk.clone();
 
         tokio::spawn(async move {
             let _permit = permit; // Hold semaphore until connection closes
@@ -287,7 +292,7 @@ pub async fn run_listener(
             );
 
             // --- PQC Handshake: wyślij nasz (podpisany) ---
-            let my_handshake = HandshakeMsg {
+            let mut my_handshake = HandshakeMsg {
                 version: HANDSHAKE_VERSION,
                 kem_pk_b64: B64.encode(&kem_pk),
                 sig_pk_b64: B64.encode(&sig_pk),
@@ -295,10 +300,27 @@ pub async fn run_listener(
                 falcon_sig_b64: String::new(), // placeholder
             };
 
-            // Uwaga: run_listener nie ma dostępu do sig_sk
-            // W v1: przekazujemy sig_sk jako parametr
-            // Na razie wysyłamy bez podpisu (listener nie podpisuje)
-            // TODO: dodać sig_sk do parametrów run_listener
+            // Podpisz canonical form (bez pola falcon_sig_b64)
+            let sig_payload = match serde_json::to_vec(&HandshakeMsg {
+                falcon_sig_b64: String::new(),
+                ..my_handshake.clone()
+            }) {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("[net] sig payload serialize failed: {}", e);
+                    return;
+                }
+            };
+
+            let falcon_sig = match nxms_transport::crypto::falcon_sign_ct_prepared(&node_sig_sk_clone, &sig_payload) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[net] falcon sign handshake failed: {}", e);
+                    return;
+                }
+            };
+
+            my_handshake.falcon_sig_b64 = B64.encode(&falcon_sig);
 
             let handshake_bytes = match serde_json::to_vec(&my_handshake) {
                 Ok(b) => b,

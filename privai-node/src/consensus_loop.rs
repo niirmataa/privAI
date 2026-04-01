@@ -75,6 +75,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let net_config = self.net_config.clone();
         let kem_pk = self.node.config().node_kem_pk.clone();
         let sig_pk = self.node.config().node_sig_pk.clone();
+        let sig_sk = self.node.config().node_sig_sk.clone();
         let peer_id = self.net_config.my_peer_id.clone();
         let peer_book = self.peer_book.clone();
         let ban_list = self.ban_list.clone();
@@ -85,6 +86,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 msg_tx,
                 kem_pk,
                 sig_pk,
+                sig_sk,
                 peer_id,
                 peer_book,
                 ban_list,
