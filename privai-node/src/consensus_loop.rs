@@ -62,12 +62,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             tokio::select! {
                 // Incoming message z Tor listenera
                 Some((peer_hint, msg)) = msg_rx.recv() => {
-                    self.handle_message(peer_hint, msg).await;
+                    self.handle_message(peer_hint, msg);
                 }
 
                 // Timeout check
                 _ = timeout_ticker.tick() => {
-                    self.check_and_handle_timeout().await;
+                    self.check_and_handle_timeout();
                 }
 
                 else => {
@@ -82,7 +82,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     /// Przetwarza przychodzącą wiadomość konsensusową.
-    async fn handle_message(&mut self, peer_hint: String, msg: ConsensusMsg) {
+    fn handle_message(&mut self, peer_hint: String, msg: ConsensusMsg) {
         eprintln!(
             "[consensus] received {} from {} (height={}, round={})",
             msg.msg_type(),
@@ -135,7 +135,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                             "[consensus] sending PREVOTE for block {:?}",
                             &vote.block_hash[..8]
                         );
-                        self.broadcast_msg(ConsensusMsg::Prevote(vote)).await;
+                        self.broadcast_msg(ConsensusMsg::Prevote(vote));
                     }
                     Err(e) => {
                         eprintln!("[consensus] failed to create prevote: {}", e);
@@ -159,7 +159,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         validator_pk: self.node.config().node_pk_hash.to_vec(),
                         falcon_sig: vec![],
                     };
-                    self.broadcast_msg(ConsensusMsg::Precommit(precommit)).await;
+                    self.broadcast_msg(ConsensusMsg::Precommit(precommit));
                 }
             }
 
@@ -171,7 +171,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         qc.height
                     );
                     // Broadcast QC
-                    self.broadcast_msg(ConsensusMsg::QuorumCert(qc)).await;
+                    self.broadcast_msg(ConsensusMsg::QuorumCert(qc));
                 }
             }
 
@@ -216,32 +216,32 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     /// Sprawdza timeout i wysyła ViewChange jeśli potrzeba.
-    async fn check_and_handle_timeout(&mut self) {
+    fn check_and_handle_timeout(&mut self) {
         let now = current_time_ms();
         if let Some(vc) = self.node.check_timeout_default(now) {
             eprintln!(
                 "[consensus] TIMEOUT! Sending ViewChange for round {}",
                 vc.new_round
             );
-            self.broadcast_msg(ConsensusMsg::ViewChange(vc)).await;
+            self.broadcast_msg(ConsensusMsg::ViewChange(vc));
         }
     }
 
-    /// Broadcastuje wiadomość do wszystkich peerów.
-    async fn broadcast_msg(&self, msg: ConsensusMsg) {
-        let results = net::broadcast(
-            &self.peer_book,
-            &self.net_config.my_peer_id,
-            &self.net_config.tor_socks_url,
-            &msg,
-        )
-        .await;
+    /// Broadcastuje wiadomość do wszystkich peerów — FIRE AND FORGET.
+    /// Nie blokuje pętli konsensusu — spawnowanie w tle.
+    fn broadcast_msg(&self, msg: ConsensusMsg) {
+        let peer_book = self.peer_book.clone();
+        let my_id = self.net_config.my_peer_id.clone();
+        let tor_url = self.net_config.tor_socks_url.clone();
 
-        for (peer_id, result) in results {
-            if let Err(e) = result {
-                eprintln!("[consensus] broadcast to {} failed: {}", peer_id, e);
+        tokio::spawn(async move {
+            let results = net::broadcast(&peer_book, &my_id, &tor_url, &msg).await;
+            for (peer_id, result) in results {
+                if let Err(e) = result {
+                    eprintln!("[consensus] broadcast to {} failed: {}", peer_id, e);
+                }
             }
-        }
+        });
     }
 }
 
