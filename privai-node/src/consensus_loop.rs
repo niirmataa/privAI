@@ -236,6 +236,33 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     round
                 );
             }
+
+            ConsensusMsg::SyncRequest { from_height, to_height, requester_pk_hash } => {
+                eprintln!(
+                    "[consensus] SyncRequest from {:?} for {}..{}",
+                    &requester_pk_hash[..8],
+                    from_height,
+                    to_height
+                );
+                crate::state_sync::handle_sync_request(
+                    &self.node,
+                    &self.block_cache,
+                    from_height,
+                    to_height,
+                    requester_pk_hash,
+                    &self.net_config,
+                    &self.peer_book,
+                );
+            }
+
+            ConsensusMsg::SyncResponse { blocks, qcs, sender_pk_hash } => {
+                crate::state_sync::handle_sync_response(
+                    &mut self.node,
+                    blocks,
+                    qcs,
+                    sender_pk_hash,
+                );
+            }
         }
     }
 

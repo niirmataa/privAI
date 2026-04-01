@@ -362,6 +362,20 @@ pub enum ConsensusMsg {
         round: u32,
         sender_pk_hash: Hash32,
     },
+
+    /// Żądanie bloków od peera (state sync).
+    SyncRequest {
+        from_height: u64,
+        to_height: u64,
+        requester_pk_hash: Hash32,
+    },
+
+    /// Odpowiedź z blokami (state sync).
+    SyncResponse {
+        blocks: Vec<Block>,
+        qcs: Vec<QuorumCertificate>,
+        sender_pk_hash: Hash32,
+    },
 }
 
 impl ConsensusMsg {
@@ -373,6 +387,8 @@ impl ConsensusMsg {
             Self::QuorumCert(_) => "quorum_cert",
             Self::ViewChange(_) => "view_change",
             Self::Ping { .. } => "ping",
+            Self::SyncRequest { .. } => "sync_request",
+            Self::SyncResponse { .. } => "sync_response",
         }
     }
 
@@ -383,6 +399,8 @@ impl ConsensusMsg {
             Self::QuorumCert(qc) => qc.height,
             Self::ViewChange(vc) => vc.height,
             Self::Ping { height, .. } => *height,
+            Self::SyncRequest { from_height, .. } => *from_height,
+            Self::SyncResponse { blocks, .. } => blocks.first().map(|b| b.header.height).unwrap_or(0),
         }
     }
 
@@ -393,6 +411,7 @@ impl ConsensusMsg {
             Self::QuorumCert(qc) => qc.round,
             Self::ViewChange(vc) => vc.new_round,
             Self::Ping { round, .. } => *round,
+            Self::SyncRequest { .. } | Self::SyncResponse { .. } => 0,
         }
     }
 }
@@ -425,6 +444,18 @@ impl CanonicalEncode for ConsensusMsg {
                 write_u8(out, 0x10);
                 write_u64(out, *height);
                 write_u32(out, *round);
+                write_fixed(out, sender_pk_hash);
+            }
+            Self::SyncRequest { from_height, to_height, requester_pk_hash } => {
+                write_u8(out, 0x20);
+                write_u64(out, *from_height);
+                write_u64(out, *to_height);
+                write_fixed(out, requester_pk_hash);
+            }
+            Self::SyncResponse { blocks, qcs, sender_pk_hash } => {
+                write_u8(out, 0x21);
+                write_vec(out, blocks);
+                write_vec(out, qcs);
                 write_fixed(out, sender_pk_hash);
             }
         }
