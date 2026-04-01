@@ -17,7 +17,11 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock, Semaphore};
+
+/// Maksymalna liczba jednoczesnych Tor circuit builds.
+/// Zapobiega floodowaniu Tora przy burst'ach Gossip.
+const MAX_CONCURRENT_BUILDS: usize = 3;
 
 /// Protokół wersji handshake.
 const HANDSHAKE_VERSION: u8 = 1;
@@ -89,10 +93,17 @@ pub enum NetError {
 }
 
 /// Serwer nasłuchujący na incoming connections (Tor hidden service).
-/// Deserializuje ConsensusMsg i wysyła do channel'a do przetworzenia przez node.
+/// 
+/// Flow incoming:
+/// 1. Odbierz HandshakeMsg od peera (kem_pk, sig_pk)
+/// 2. Wyślij nasz HandshakeMsg w odpowiedzi
+/// 3. Czytaj ConsensusMsg w pętli
 pub async fn run_listener(
     config: NetConfig,
     msg_tx: mpsc::UnboundedSender<(String, ConsensusMsg)>,
+    node_kem_pk: Vec<u8>,
+    node_sig_pk: Vec<u8>,
+    node_peer_id: String,
 ) -> Result<(), NetError> {
     let listener = serve(&config.listen_addr).await?;
     eprintln!(
@@ -103,9 +114,68 @@ pub async fn run_listener(
     loop {
         let (mut stream, addr) = listener.accept().await?;
         let tx = msg_tx.clone();
+        let kem_pk = node_kem_pk.clone();
+        let sig_pk = node_sig_pk.clone();
+        let peer_id = node_peer_id.clone();
 
         tokio::spawn(async move {
-            // Czytaj frame'y w pętli od tego peera
+            // --- PQC Handshake: odbierz od peera ---
+            use base64::Engine;
+            use base64::engine::general_purpose::STANDARD as B64;
+
+            let peer_handshake_bytes = match read_frame(&mut stream, 64 * 1024).await {
+                Ok(data) => data,
+                Err(e) => {
+                    eprintln!("[net] incoming handshake read from {} failed: {}", addr, e);
+                    return;
+                }
+            };
+
+            let peer_handshake: HandshakeMsg = match serde_json::from_slice(&peer_handshake_bytes) {
+                Ok(h) => h,
+                Err(e) => {
+                    eprintln!("[net] incoming handshake deserialize from {} failed: {}", addr, e);
+                    return;
+                }
+            };
+
+            if peer_handshake.version != HANDSHAKE_VERSION {
+                eprintln!(
+                    "[net] incoming handshake from {} unsupported version {}",
+                    addr, peer_handshake.version
+                );
+                return;
+            }
+
+            eprintln!(
+                "[net] PQC handshake from {} (peer_id: {})",
+                addr, peer_handshake.peer_id
+            );
+
+            // --- PQC Handshake: wyślij nasz ---
+            let my_handshake = HandshakeMsg {
+                version: HANDSHAKE_VERSION,
+                kem_pk_b64: B64.encode(&kem_pk),
+                sig_pk_b64: B64.encode(&sig_pk),
+                peer_id,
+            };
+
+            let handshake_bytes = match serde_json::to_vec(&my_handshake) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("[net] handshake serialize failed: {}", e);
+                    return;
+                }
+            };
+
+            if let Err(e) = write_frame(&mut stream, &handshake_bytes).await {
+                eprintln!("[net] handshake write to {} failed: {}", addr, e);
+                return;
+            }
+
+            eprintln!("[net] handshake with {} complete, entering msg loop", addr);
+
+            // --- Czytaj ConsensusMsg w pętli ---
             loop {
                 match read_frame(&mut stream, 1024 * 1024).await {
                     Ok(data) => {
@@ -232,6 +302,7 @@ impl Default for ConnectionPoolConfig {
 /// - Każde połączenie ma metadane (wiek, ostatnia aktywność)
 /// - Tła zadanie "pool maintenance" sprawdza zdrowie połączeń
 /// - Zepsute/stare połączenia są automatycznie przebudowywane
+/// - Semaphore limituje jednoczesne circuit builds (max 3)
 #[derive(Clone)]
 pub struct ConnectionPool {
     /// Mapa: PeerId -> metadane połączenia
@@ -242,6 +313,8 @@ pub struct ConnectionPool {
     config: ConnectionPoolConfig,
     /// Statystyki dla monitoringu
     stats: Arc<RwLock<PoolStats>>,
+    /// Limit jednoczesnych Tor circuit builds
+    circuit_semaphore: Arc<Semaphore>,
 }
 
 /// Statystyki puli połączeń (do monitoringu/loggingu).
@@ -266,6 +339,7 @@ impl ConnectionPool {
             tor_socks_url,
             config,
             stats: Arc::new(RwLock::new(PoolStats::default())),
+            circuit_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BUILDS)),
         }
     }
 
@@ -394,6 +468,10 @@ impl ConnectionPool {
             peer.id, peer.host, peer.port
         );
 
+        // Ogranicz jednoczesne circuit builds (zapobiega floodowaniu Tora)
+        let _permit = self.circuit_semaphore.acquire().await
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("semaphore closed: {}", e)))?;
+
         // WOLNA ŚCIEŻKA: Tor Circuit Build
         let mut stream = connect_via_tor(&self.tor_socks_url, &peer.host, peer.port)
             .await
@@ -506,7 +584,8 @@ impl ConnectionPool {
     }
 
     /// Broadcastuje wiadomość do wszystkich peerów z PeerBook (oprócz siebie).
-    pub async fn broadcast_message<T: Serialize>(
+    /// Wysyła równolegle — nie blokuje na wolnych peerach.
+    pub async fn broadcast_message<T: Serialize + Clone + Send + Sync + 'static>(
         &self,
         peer_book: &PeerBook,
         my_id: &str,
@@ -515,11 +594,28 @@ impl ConnectionPool {
         my_sig_pk: &[u8],
     ) -> Vec<(String, Result<(), NetError>)> {
         let peers = peer_book.others(my_id);
-        let mut results = Vec::with_capacity(peers.len());
+        let mut handles = Vec::with_capacity(peers.len());
 
         for peer in peers {
-            let result = self.send_message(peer, msg, my_kem_pk, my_sig_pk, my_id).await;
-            results.push((peer.id.clone(), result));
+            let pool = self.clone();
+            let peer = peer.clone();
+            let msg = msg.clone();
+            let kem_pk = my_kem_pk.to_vec();
+            let sig_pk = my_sig_pk.to_vec();
+            let id = my_id.to_string();
+
+            handles.push(tokio::spawn(async move {
+                let result = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &id).await;
+                (peer.id.clone(), result)
+            }));
+        }
+
+        let mut results = Vec::with_capacity(handles.len());
+        for handle in handles {
+            match handle.await {
+                Ok((peer_id, result)) => results.push((peer_id, result)),
+                Err(e) => results.push(("unknown".to_string(), Err(NetError::Transport(anyhow::anyhow!("join error: {}", e))))),
+            }
         }
 
         results

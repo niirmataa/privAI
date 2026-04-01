@@ -112,25 +112,27 @@ impl Mempool {
         txs
     }
 
-    /// Usuwa przestarzałe transakcje.
+    /// Usuwa przestarzałe transakcje. O(n) — retain zamiast O(n²) remove-by-index.
     pub fn evict_stale(&mut self, current_time_ms: u64) {
-        let mut to_remove = Vec::new();
+        let stale_hashes: Vec<Hash32> = self.entries.iter()
+            .filter(|e| current_time_ms.saturating_sub(e.received_at_ms) > MAX_TX_AGE_MS)
+            .map(|e| e.tx_hash)
+            .collect();
 
-        for (i, entry) in self.entries.iter().enumerate() {
-            if current_time_ms.saturating_sub(entry.received_at_ms) > MAX_TX_AGE_MS {
-                to_remove.push(i);
-            }
+        for hash in &stale_hashes {
+            self.by_hash.remove(hash);
         }
 
-        // Usuwamy od końca żeby indeksy się nie przesunęły
-        for i in to_remove.into_iter().rev() {
-            if let Some(entry) = self.entries.remove(i) {
-                self.by_hash.remove(&entry.tx_hash);
-                if let Some(count) = self.by_sender.get_mut(&entry.sender_pk_hash) {
-                    *count = count.saturating_sub(1);
+        self.entries.retain(|e| {
+            if current_time_ms.saturating_sub(e.received_at_ms) > MAX_TX_AGE_MS {
+                if let Some(c) = self.by_sender.get_mut(&e.sender_pk_hash) {
+                    *c = c.saturating_sub(1);
                 }
+                false
+            } else {
+                true
             }
-        }
+        });
     }
 
     /// Liczba transakcji w mempoolu.

@@ -67,6 +67,14 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         self.snapshot.height = block.header.height;
         self.snapshot.tip_hash = block.hash();
         self.snapshot.blocks.insert(block.header.height, block.clone());
+
+        // Limit cached blocks in memory — keep only last 128
+        const MAX_CACHED_BLOCKS: u64 = 128;
+        if self.snapshot.blocks.len() as u64 > MAX_CACHED_BLOCKS {
+            let cutoff = self.snapshot.height.saturating_sub(MAX_CACHED_BLOCKS);
+            self.snapshot.blocks.retain(|h, _| *h > cutoff);
+        }
+
         self.mempool.remove_committed_block(&block.body.txs);
         self.store.save(&self.snapshot)?;
         Ok(())

@@ -58,7 +58,7 @@ pub async fn request_blocks(
 /// Obsługuje przychodzący SyncRequest — wysyła bloki do requestera.
 pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
     node: &PrivaiNode<S, V, A, P>,
-    _block_cache: &std::collections::HashMap<Hash32, Block>,
+    block_cache: &std::collections::HashMap<Hash32, Block>,
     from_height: u64,
     to_height: u64,
     requester_pk_hash: Hash32,
@@ -78,13 +78,6 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
         return;
     }
 
-    // Zbieramy bloki z cache (w v0 cache jest w pamięci)
-    // W v1 trzeba czytać z persistent storage
-    let blocks = Vec::new();
-    let qcs = Vec::new();
-
-    // TODO: W v1 czytaj bloki z ledger storage po height
-    // Na razie logujemy — full sync wymaga persistent block storage
     eprintln!(
         "[sync] SyncRequest from {:?} for heights {}..{} (current={})",
         &requester_pk_hash[..8],
@@ -93,41 +86,77 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
         current_height
     );
 
-    if blocks.is_empty() && from < current_height {
+    // Zbieramy bloki z block_cache po zakresie height.
+    // block_cache jest keyed by hash — skanujemy po height.
+    let mut blocks: Vec<Block> = block_cache
+        .values()
+        .filter(|b| b.header.height >= from && b.header.height <= to)
+        .cloned()
+        .collect();
+    blocks.sort_by_key(|b| b.header.height);
+
+    // TODO: W v1 czytaj też z persistent storage — block_cache
+    // zawiera tylko ostatnie bloki widziane w tej sesji.
+    if blocks.is_empty() {
         eprintln!(
-            "[sync] cannot serve SyncRequest: no persistent block storage yet (v0 limitation)"
+            "[sync] no blocks in cache for range {}..{} (cache has {} blocks)",
+            from, to, block_cache.len()
+        );
+        return;
+    }
+
+    eprintln!(
+        "[sync] serving {} blocks (heights {}..{})",
+        blocks.len(),
+        blocks.first().map(|b| b.header.height).unwrap_or(0),
+        blocks.last().map(|b| b.header.height).unwrap_or(0),
+    );
+
+    let response = ConsensusMsg::SyncResponse {
+        blocks,
+        qcs: Vec::new(), // TODO: QC storage w v1
+        sender_pk_hash: node.config().node_pk_hash,
+    };
+
+    // Znajdź requestera po pk_hash — porównaj z Falcon pk hash z PeerBook
+    let target_peer = find_peer_by_pk_hash(peer_book, &requester_pk_hash);
+
+    if let Some(peer) = target_peer {
+        let pool = connection_pool.clone();
+        let kem_pk = node_kem_pk.to_vec();
+        let sig_pk = node_sig_pk.to_vec();
+        let peer_id = node_peer_id.to_string();
+        tokio::spawn(async move {
+            if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &sig_pk, &peer_id).await {
+                eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
+            }
+        });
+    } else {
+        eprintln!(
+            "[sync] requester {:?} not found in peer_book — cannot send targeted response",
+            &requester_pk_hash[..8]
         );
     }
+}
 
-    // Wysyłamy response jeśli mamy bloki
-    if !blocks.is_empty() {
-        let response = ConsensusMsg::SyncResponse {
-            blocks,
-            qcs,
-            sender_pk_hash: node.config().node_pk_hash,
-        };
+/// Znajduje peera w PeerBook po pk_hash (hash Falcon public key).
+/// falcon_pk_hash = BLAKE3("privai:falcon-pk:v0" || pk_bytes)
+fn find_peer_by_pk_hash(peer_book: &PeerBook, pk_hash: &Hash32) -> Option<nxms_transport::peers::Peer> {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as B64;
+    use privai_chain::hash::domain_hash;
 
-        // Znajdź requestera w peer_book i wyślij TYLKO do niego
-        // (nie broadcast — SyncResponse może być duży ~10MB)
-        if let Some(peer) = peer_book.peers.iter().find(|_p| {
-            // TODO: w v1 peer_book powinien mapować pk_hash → peer
-            // Na razie wysyłamy do pierwszego dostępnego peera
-            true
-        }) {
-            let peer = peer.clone();
-            let pool = connection_pool.clone();
-            let kem_pk = node_kem_pk.to_vec();
-            let sig_pk = node_sig_pk.to_vec();
-            let peer_id = node_peer_id.to_string();
-            tokio::spawn(async move {
-                if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &sig_pk, &peer_id).await {
-                    eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
-                }
-            });
-        } else {
-            eprintln!("[sync] requester peer not found in peer_book");
+    const FALCON_PK_DOMAIN: &str = "privai:falcon-pk:v0";
+
+    for peer in &peer_book.peers {
+        if let Ok(pk_bytes) = B64.decode(&peer.sig_pk_b64) {
+            let hash = domain_hash(FALCON_PK_DOMAIN, &[&pk_bytes]);
+            if hash == *pk_hash {
+                return Some(peer.clone());
+            }
         }
     }
+    None
 }
 
 /// Obsługuje przychodzący SyncResponse — importuje bloki i finalizuje.

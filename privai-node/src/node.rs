@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet};
 
 use privai_chain::{
     Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32, ProofCertificate, Transaction,
@@ -53,14 +53,15 @@ pub struct PrivaiNode<
     proof_artifacts: A,
     artifact_verifier: P,
     
-    // Proste liczniki glosow z pamiecia 1 epoki w PC-BFT do budowy QC
-    prevotes: HashMap<Hash32, BTreeSet<Vec<u8>>>,
-    precommits: HashMap<Hash32, BTreeSet<Vec<u8>>>,
-    
+    // Stake-weighted vote tracking: block_hash -> (set of voter pk_hashes, accumulated stake)
+    prevotes: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64)>,
+    precommits: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64)>,
+    /// QC already emitted for (block_hash, vote_type) — prevents duplicate broadcasts
+    qc_emitted: HashSet<(Hash32, u8)>,
+
     // PC-BFT Liveness & View Change
     pub current_round: u32,
     pub round_start_time_ms: u64,
-    // Przechowuje pule żądań ViewChange (głosy za przejściem do konkretnej rundy)
     view_changes: HashMap<u32, BTreeSet<Vec<u8>>>,
 
     // Do generowania odpornych sygnatur (Non-Custodial / Anti-Forging)
@@ -140,6 +141,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             artifact_verifier,
             prevotes: HashMap::new(),
             precommits: HashMap::new(),
+            qc_emitted: HashSet::new(),
             current_round: 0,
             round_start_time_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -191,6 +193,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     pub fn config(&self) -> &NodeConfig {
         &self.config
+    }
+
+    pub fn falcon_sk(&self) -> Option<&[u8]> {
+        self.falcon_sk.as_deref()
     }
 
     pub fn ledger(&self) -> &Ledger<S, V> {
@@ -350,14 +356,28 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     pub fn check_timeout(&mut self, current_time_ms: u64, timeout_limit_ms: u64) -> Option<ViewChange> {
         if current_time_ms.saturating_sub(self.round_start_time_ms) > timeout_limit_ms {
             let next_round = self.current_round + 1;
-            
-            // Wysylamy zawiadomienie ViewChange - my nie otrzymalismy bloku w czasie.
+
+            let mut falcon_sig = vec![];
+            if let Some(sk) = &self.falcon_sk {
+                let msg = privai_chain::hash::domain_hash(
+                    "privai:view-change:v0",
+                    &[&next_round.to_le_bytes()],
+                );
+                if let Ok(sig) = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &msg) {
+                    falcon_sig = sig;
+                }
+            }
+
             let vc = ViewChange {
                 height: self.ledger.snapshot().height + 1,
                 new_round: next_round,
-                validator_pk: self.config.node_pk_hash.to_vec(), // Using node_pk_hash as a mock for the pk
-                falcon_sig: vec![],
+                validator_pk: self.config.node_pk_hash.to_vec(),
+                falcon_sig,
             };
+
+            // Reset timer — zapobiega spamowi ViewChange co 1s
+            self.round_start_time_ms = current_time_ms;
+
             return Some(vc);
         }
         None
@@ -379,6 +399,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             // Wyczysc stare stany, gotowi do nowej rundy.
             self.prevotes.clear();
             self.precommits.clear();
+            self.qc_emitted.clear();
             return true;
         }
 
@@ -386,44 +407,74 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     pub fn receive_vote(&mut self, vote: Vote) -> Option<QuorumCertificate> {
-        let threshold = (self.config.validators.len() * 2) / 3 + 1; // TODO: Weighted voting w Quorum
+        // 1. Weryfikuj że głosujący jest znanym validatorem (anti-sybil)
+        let voter_pk_hash = privai_chain::hash::domain_hash(
+            "privai:falcon-pk:v0",
+            &[&vote.validator_pk],
+        );
+        let voter_stake = match self.config.validators.iter()
+            .find(|v| v.pk_hash == voter_pk_hash)
+        {
+            Some(v) => v.stake_weight,
+            None => {
+                eprintln!("[node] rejected vote from unknown validator {:?}", &voter_pk_hash[..8]);
+                return None;
+            }
+        };
 
-        // Falcon Quantum-Resistant Verify logic (anti-forging)
+        // 2. Falcon signature verify (anti-forging)
         if !vote.falcon_sig.is_empty() && !vote.validator_pk.is_empty() {
             if nxms_transport::crypto::falcon_verify(&vote.validator_pk, &vote.block_hash, &vote.falcon_sig).is_err() {
-                return None; // Zignoruj falszywy podpis
+                eprintln!("[node] rejected vote: invalid Falcon signature");
+                return None;
             }
         }
-        // TODO: enforce mandatory signatures on v1. Muted empty checking for scaffold v0.
+
+        // 3. Sprawdź czy QC już wyemitowany (deduplikacja)
+        let qc_key = (vote.block_hash, vote.vote_type as u8);
+        if self.qc_emitted.contains(&qc_key) {
+            return None;
+        }
+
+        // 4. Stake-weighted threshold: >= 2/3 total stake
+        let total_stake: u64 = self.config.validators.iter().map(|v| v.stake_weight).sum();
+        let required_stake = (total_stake * 2) / 3 + 1;
 
         match vote.vote_type {
             VoteType::Prevote => {
-                let entry = self.prevotes.entry(vote.block_hash).or_insert_with(BTreeSet::new);
-                entry.insert(vote.validator_pk.clone());
-                
-                // Gdy przebije threshold, walidator lokalny emituje / buduje QC
-                if entry.len() >= threshold {
+                let entry = self.prevotes.entry(vote.block_hash)
+                    .or_insert_with(|| (BTreeSet::new(), 0));
+                if entry.0.insert(vote.validator_pk.clone()) {
+                    entry.1 += voter_stake; // dodaj stake tylko jeśli nowy głos
+                }
+
+                if entry.1 >= required_stake {
+                    self.qc_emitted.insert(qc_key);
                     return Some(QuorumCertificate {
                         height: vote.height,
                         round: vote.round,
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Prevote,
-                        signers: entry.iter().cloned().collect(),
-                        signatures: vec![], // Tu nalezaloby zaggregowac autentyczne sygnatury w warstwie sieci (tu dla v0 skip)
+                        signers: entry.0.iter().cloned().collect(),
+                        signatures: vec![],
                     });
                 }
             }
             VoteType::Precommit => {
-                let entry = self.precommits.entry(vote.block_hash).or_insert_with(BTreeSet::new);
-                entry.insert(vote.validator_pk.clone());
+                let entry = self.precommits.entry(vote.block_hash)
+                    .or_insert_with(|| (BTreeSet::new(), 0));
+                if entry.0.insert(vote.validator_pk.clone()) {
+                    entry.1 += voter_stake;
+                }
 
-                if entry.len() >= threshold {
+                if entry.1 >= required_stake {
+                    self.qc_emitted.insert(qc_key);
                     return Some(QuorumCertificate {
                         height: vote.height,
                         round: vote.round,
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Precommit,
-                        signers: entry.iter().cloned().collect(),
+                        signers: entry.0.iter().cloned().collect(),
                         signatures: vec![],
                     });
                 }
@@ -445,15 +496,19 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             });
         }
         if qc.vote_type != VoteType::Precommit {
-            return Err(NodeError::NoValidators); // Tylko QC precommit daje finality
+            return Err(NodeError::VoteError("Only Precommit QC gives finality".into()));
         }
 
-        // Twarda autoryzacja stanu na blockchain, osiagnieto konsensus.
-        self.import_block(block)?;
+        // Blok powinien być już zaimportowany przy Proposal.
+        // Jeśli nie (np. state sync) — importuj teraz.
+        if self.ledger.snapshot().tip_hash != block.hash() {
+            self.import_block(block)?;
+        }
 
-        // Wyczyść stany starych glosowan po zaimportowaniu
+        // Wyczyść stany starych głosowań
         self.prevotes.clear();
         self.precommits.clear();
+        self.qc_emitted.clear();
 
         Ok(())
     }
@@ -764,46 +819,55 @@ mod tests {
         assert_eq!(node.round_start_time_ms, 6001);
     }
 
+    /// Helper: derive pk_hash from a fake "public key" the same way receive_vote does
+    fn test_pk_hash(pk: &[u8]) -> Hash32 {
+        privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[pk])
+    }
+
     #[test]
     fn node_builds_qc_on_threshold_votes() {
-        let config = NodeConfig::example(); // Domyslnie example validator.len() wynosi np. 1. Dopiszemy ich tu wiecej
+        // Klucze publiczne validatorów (fake — ale muszą być spójne z pk_hash w configu)
+        let pk1 = vec![1u8];
+        let pk2 = vec![2u8];
+        let pk3 = vec![3u8];
+        let pk4 = vec![4u8];
+
+        let config = NodeConfig::example();
         let mut config_modified = config.clone();
         config_modified.validators = vec![
-            ValidatorConfig { pk_hash: [1u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: [2u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: [3u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: [4u8; 32], stake_weight: 1, availability: 100, proof_score: 100 },
-        ]; // 4 val
+            ValidatorConfig { pk_hash: test_pk_hash(&pk1), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk2), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk3), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk4), stake_weight: 1, availability: 100, proof_score: 100 },
+        ]; // 4 val, equal stake — threshold = 4*2/3+1 = 3 stake
 
         let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
 
         let hash = [9u8; 32];
-        
-        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![1], falcon_sig: vec![] };
-        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![2], falcon_sig: vec![] };
-        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![3], falcon_sig: vec![] };
 
-        // 1szy i 2gi glos nic nie daja na QC
+        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk1, falcon_sig: vec![] };
+        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk2, falcon_sig: vec![] };
+        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: pk3, falcon_sig: vec![] };
+
+        // 1szy i 2gi glos nic nie daja na QC (stake 1+1 = 2 < 3)
         assert!(node.receive_vote(vote1).is_none());
         assert!(node.receive_vote(vote2).is_none());
-        
-        // 3ci głos to quorum (3 to próg dla f=1 w n=4). Oddaje zbudowane QC:
+
+        // 3ci głos: stake = 3 >= required 3. QC!
         let qc_option = node.receive_vote(vote3);
         assert!(qc_option.is_some());
-        
+
         let qc = qc_option.unwrap();
         assert_eq!(qc.vote_type, VoteType::Precommit);
         assert_eq!(qc.signers.len(), 3);
-        
-        // Finalizacja pojdzie po qc do importu ledgera!
+
+        // QC dedup: 4ty głos nie buduje drugiego QC
+        let vote4 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![4u8], falcon_sig: vec![] };
+        assert!(node.receive_vote(vote4).is_none());
+
+        // Finalizacja z niepasującym blokiem → QcHashMismatch
         let (block, _) = sample_block_and_artifacts(10);
-        let mut final_block = block.clone();
-        final_block.header.height = 1;
-        
-        // Finalizacja rzuca blad poniewaz 'qc.block_hash' == [9u8; 32] 
-        // (zainicjowany w fake test setup), ale sample_block wyliczyl sie na unikalny Hash
-        // To dowodzi, ze zwalidowano QuorumCertificate pod kątem powiazania z wlasciwym blokiem w ledgery!
-        let result = node.finalize_block_with_qc(&final_block, &qc);
+        let result = node.finalize_block_with_qc(&block, &qc);
         assert!(matches!(result, Err(NodeError::QcHashMismatch { .. })));
     }
 }

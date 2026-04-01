@@ -32,8 +32,9 @@ where
     pub peer_book: PeerBook,
     pub connection_pool: net::ConnectionPool,
     /// Cache bloków po hashu — potrzebny do finalizacji po otrzymaniu QC.
-    /// Klucz: block_hash, wartość: Block.
     block_cache: HashMap<Hash32, Block>,
+    /// Cache QC po block_hash — potrzebny do state sync.
+    qc_cache: HashMap<Hash32, privai_chain::QuorumCertificate>,
 }
 
 impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>
@@ -51,6 +52,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             peer_book,
             connection_pool,
             block_cache: HashMap::new(),
+            qc_cache: HashMap::new(),
         }
     }
 
@@ -65,8 +67,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
         // Start Tor listener w tle
         let net_config = self.net_config.clone();
+        let kem_pk = self.node.config().node_kem_pk.clone();
+        let sig_pk = self.node.config().node_sig_pk.clone();
+        let peer_id = self.net_config.my_peer_id.clone();
         let listener_handle = tokio::spawn(async move {
-            if let Err(e) = net::run_listener(net_config, msg_tx).await {
+            if let Err(e) = net::run_listener(net_config, msg_tx, kem_pk, sig_pk, peer_id).await {
                 eprintln!("[consensus] listener error: {}", e);
             }
         });
@@ -120,6 +125,20 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     block.header.round,
                     &block.hash()[..8]
                 );
+
+                // Weryfikacja proposera — czy jest uprawniony dla (epoch_seed, round)
+                let expected_proposer = self.node.next_proposer(
+                    &block.header.epoch_seed_hash,
+                    block.header.round,
+                );
+                if expected_proposer != Some(block.header.proposer_pk_hash) {
+                    eprintln!(
+                        "[consensus] REJECTED proposal: wrong proposer {:?} (expected {:?})",
+                        &block.header.proposer_pk_hash[..8],
+                        expected_proposer.map(|p| format!("{:?}", &p[..8]))
+                    );
+                    return;
+                }
 
                 // Walidacja: roots muszą się zgadzać
                 if !block.roots_match() {
@@ -176,13 +195,21 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         qc.height
                     );
                     // Broadcast Precommit po osiągnięciu prevote threshold
+                    // Używamy Falcon PK z configu, podpisujemy block_hash
+                    let validator_pk = self.node.config().node_sig_pk.clone();
+                    let mut falcon_sig = vec![];
+                    if let Some(sk) = self.node.falcon_sk() {
+                        if let Ok(sig) = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &vote.block_hash) {
+                            falcon_sig = sig;
+                        }
+                    }
                     let precommit = privai_chain::Vote {
                         height: vote.height,
                         round: vote.round,
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Precommit,
-                        validator_pk: self.node.config().node_pk_hash.to_vec(),
-                        falcon_sig: vec![],
+                        validator_pk,
+                        falcon_sig,
                     };
                     self.broadcast_msg(ConsensusMsg::Precommit(precommit));
                 }
@@ -208,6 +235,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     qc.round,
                     qc.vote_type
                 );
+
+                // Zapisz QC do cache (potrzebny do state sync)
+                self.qc_cache.insert(qc.block_hash, qc.clone());
 
                 // Finalizacja tylko dla Precommit QC
                 if qc.vote_type == VoteType::Precommit {

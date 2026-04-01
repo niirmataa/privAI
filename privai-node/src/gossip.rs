@@ -13,6 +13,7 @@
 
 use nxms_transport::peers::PeerBook;
 use privai_chain::{Hash32, Transaction};
+use privai_chain::hash::domain_hash;
 
 use crate::mempool::{Mempool, MempoolEntry};
 use crate::net::NetConfig;
@@ -127,9 +128,14 @@ fn propagate_tx(
         return;
     }
 
-    // Wybierz losowy subset peerów (fanout)
+    // Wybierz losowy subset peerów (fanout) — Fisher-Yates partial shuffle
     let fanout = GOSSIP_FANOUT.min(peers.len());
-    let selected: Vec<_> = peers.into_iter().take(fanout).cloned().collect();
+    let mut peers: Vec<_> = peers.into_iter().cloned().collect();
+    for i in 0..fanout {
+        let j = i + (random_u64() as usize % (peers.len() - i));
+        peers.swap(i, j);
+    }
+    let selected: Vec<_> = peers.into_iter().take(fanout).collect();
 
     let gossip_msg = GossipTxMsg {
         tx: tx.clone(),
@@ -182,8 +188,7 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
 ) -> bool {
     let tx_hash = tx.tx_id();
 
-    // TODO: Wyciągnij sender_pk_hash z podpisu Falcon
-    let sender_pk_hash = [0u8; 32]; // placeholder
+    let sender_pk_hash = extract_sender_pk_hash(&tx);
 
     let entry = MempoolEntry {
         tx: tx.clone(),
@@ -219,9 +224,39 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     true
 }
 
+/// Wyciąga sender_pk_hash z pierwszego InputAuth transakcji.
+/// Hashuje pierwszy klucz publiczny Falcon z auth — zgodnie ze spec
+/// falcon_pk_hash = BLAKE3("privai:falcon-pk:v0" || pk_bytes).
+fn extract_sender_pk_hash(tx: &Transaction) -> Hash32 {
+    const FALCON_PK_DOMAIN: &str = "privai:falcon-pk:v0";
+
+    let auth = &tx.core().auth;
+    if let Some(first_auth) = auth.first() {
+        if let Some(first_pk) = first_auth.signer_pks.first() {
+            return domain_hash(FALCON_PK_DOMAIN, &[first_pk]);
+        }
+    }
+    [0u8; 32] // no auth — genesis / coinbase
+}
+
 fn current_time_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64
+}
+
+/// Pseudo-random u64 do gossip fanout selection.
+/// Używa system entropy via RandomState — nie kryptograficzny ale dobra dystrybucja.
+/// Cel: unikanie deterministycznych patternów (hot-node bias).
+fn random_u64() -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+
+    static RANDOM: OnceLock<RandomState> = OnceLock::new();
+    let state = RANDOM.get_or_init(RandomState::new);
+    let mut hasher = state.build_hasher();
+    hasher.write_u64(current_time_ms());
+    hasher.finish()
 }
