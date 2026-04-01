@@ -23,6 +23,19 @@ use tokio::sync::{RwLock, Semaphore};
 /// Zapobiega floodowaniu Tora przy burst'ach Gossip.
 const MAX_CONCURRENT_BUILDS: usize = 3;
 
+/// Maksymalna liczba jednoczesnych incoming connections.
+/// Zapobiega resource exhaustion przez atak DDoS.
+const MAX_INCOMING_CONNECTIONS: usize = 10;
+
+/// Czas banowania złośliwego peera (sekundy).
+const BAN_DURATION_SECS: u64 = 3600; // 1 godzina
+
+/// Maksymalna liczba połączeń z tego samego źródła w oknie czasowym.
+const MAX_CONNECTIONS_PER_SOURCE: usize = 5;
+
+/// Okno czasowe dla rate limitingu (sekundy).
+const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+
 /// Protokół wersji handshake.
 const HANDSHAKE_VERSION: u8 = 1;
 
@@ -94,31 +107,67 @@ pub enum NetError {
 
 /// Serwer nasłuchujący na incoming connections (Tor hidden service).
 /// 
-/// Flow incoming:
-/// 1. Odbierz HandshakeMsg od peera (kem_pk, sig_pk)
-/// 2. Wyślij nasz HandshakeMsg w odpowiedzi
-/// 3. Czytaj ConsensusMsg w pętli
+/// Flow incoming (zabezpieczony):
+/// 1. Rate limiter check (max 5 conn/min z tego samego source)
+/// 2. Ban list check
+/// 3. Semaphore (max 10 jednoczesnych incoming)
+/// 4. Odbierz HandshakeMsg od peera (kem_pk, sig_pk)
+/// 5. Weryfikacja peer_id w PeerBook (anti-sybil)
+/// 6. Wyślij nasz HandshakeMsg w odpowiedzi
+/// 7. Czytaj ConsensusMsg w pętli
 pub async fn run_listener(
     config: NetConfig,
     msg_tx: mpsc::UnboundedSender<(String, ConsensusMsg)>,
     node_kem_pk: Vec<u8>,
     node_sig_pk: Vec<u8>,
     node_peer_id: String,
+    peer_book: PeerBook,
+    ban_list: BanList,
+    rate_limiter: RateLimiter,
 ) -> Result<(), NetError> {
     let listener = serve(&config.listen_addr).await?;
+    let incoming_semaphore = Arc::new(Semaphore::new(MAX_INCOMING_CONNECTIONS));
+
     eprintln!(
-        "[net] listening on {} for consensus messages",
-        config.listen_addr
+        "[net] listening on {} for consensus messages (max {} incoming)",
+        config.listen_addr, MAX_INCOMING_CONNECTIONS
     );
 
     loop {
         let (mut stream, addr) = listener.accept().await?;
+
+        // --- Security: Rate limiter ---
+        let source = addr.to_string();
+        if !rate_limiter.check(&source).await {
+            eprintln!("[net] rate limited connection from {}", source);
+            drop(stream);
+            continue;
+        }
+
+        // --- Security: Ban list ---
+        // Sprawdzamy po handshake, bo nie znamy peer_id przed handshake
+        // (Tor hidden service nie ujawnia prawdziwego IP)
+
+        // --- Security: Incoming connection semaphore ---
+        let permit = match incoming_semaphore.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                eprintln!("[net] too many incoming connections, rejecting {}", source);
+                drop(stream);
+                continue;
+            }
+        };
+
         let tx = msg_tx.clone();
         let kem_pk = node_kem_pk.clone();
         let sig_pk = node_sig_pk.clone();
-        let peer_id = node_peer_id.clone();
+        let my_peer_id = node_peer_id.clone();
+        let peers = peer_book.peers.clone();
+        let ban_list = ban_list.clone();
 
         tokio::spawn(async move {
+            let _permit = permit; // Hold semaphore until connection closes
+
             // --- PQC Handshake: odbierz od peera ---
             use base64::Engine;
             use base64::engine::general_purpose::STANDARD as B64;
@@ -147,9 +196,29 @@ pub async fn run_listener(
                 return;
             }
 
+            // --- Security: Ban list check ---
+            if ban_list.is_banned(&peer_handshake.peer_id).await {
+                eprintln!(
+                    "[net] rejected banned peer {} from {}",
+                    peer_handshake.peer_id, addr
+                );
+                return;
+            }
+
+            // --- Security: Peer verification (anti-sybil) ---
+            let peer_known = peers.iter().any(|p| p.id == peer_handshake.peer_id);
+            if !peer_known {
+                eprintln!(
+                    "[net] rejected unknown peer {} from {} (not in PeerBook)",
+                    peer_handshake.peer_id, addr
+                );
+                ban_list.ban(&peer_handshake.peer_id).await;
+                return;
+            }
+
             eprintln!(
-                "[net] PQC handshake from {} (peer_id: {})",
-                addr, peer_handshake.peer_id
+                "[net] PQC handshake from verified peer {} (addr: {})",
+                peer_handshake.peer_id, addr
             );
 
             // --- PQC Handshake: wyślij nasz ---
@@ -157,7 +226,7 @@ pub async fn run_listener(
                 version: HANDSHAKE_VERSION,
                 kem_pk_b64: B64.encode(&kem_pk),
                 sig_pk_b64: B64.encode(&sig_pk),
-                peer_id,
+                peer_id: my_peer_id,
             };
 
             let handshake_bytes = match serde_json::to_vec(&my_handshake) {
@@ -173,7 +242,10 @@ pub async fn run_listener(
                 return;
             }
 
-            eprintln!("[net] handshake with {} complete, entering msg loop", addr);
+            eprintln!(
+                "[net] handshake with {} complete, entering msg loop",
+                peer_handshake.peer_id
+            );
 
             // --- Czytaj ConsensusMsg w pętli ---
             loop {
@@ -181,20 +253,25 @@ pub async fn run_listener(
                     Ok(data) => {
                         match serde_json::from_slice::<ConsensusMsg>(&data) {
                             Ok(msg) => {
-                                let peer_hint = addr.to_string();
+                                let peer_hint = peer_handshake.peer_id.clone();
                                 if tx.send((peer_hint, msg)).is_err() {
                                     break; // channel zamknięty
                                 }
                             }
                             Err(e) => {
-                                eprintln!("[net] failed to deserialize ConsensusMsg from {}: {}", addr, e);
+                                eprintln!(
+                                    "[net] failed to deserialize ConsensusMsg from {}: {}",
+                                    peer_handshake.peer_id, e
+                                );
                                 break;
                             }
                         }
                     }
                     Err(e) => {
-                        // EOF lub timeout — zamykamy połączenie
-                        eprintln!("[net] connection from {} closed: {}", addr, e);
+                        eprintln!(
+                            "[net] connection from {} closed: {}",
+                            peer_handshake.peer_id, e
+                        );
                         break;
                     }
                 }
@@ -326,6 +403,105 @@ pub struct PoolStats {
     pub total_messages_sent: u64,
     pub total_reconnects: u64,
     pub total_circuit_builds: u64,
+}
+
+/// Ban list z TTL — zapobiega ponownemu łączeniu złośliwych peerów.
+#[derive(Clone)]
+pub struct BanList {
+    /// Mapa: peer_id -> ban expiry timestamp (sekundy od UNIX_EPOCH)
+    banned: Arc<RwLock<HashMap<String, u64>>>,
+}
+
+impl BanList {
+    pub fn new() -> Self {
+        Self {
+            banned: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Sprawdza czy peer jest zbanowany.
+    pub async fn is_banned(&self, peer_id: &str) -> bool {
+        let banned = self.banned.read().await;
+        if let Some(&expiry) = banned.get(peer_id) {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            if now < expiry {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Banuje peera na BAN_DURATION_SECS.
+    pub async fn ban(&self, peer_id: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut banned = self.banned.write().await;
+        banned.insert(peer_id.to_string(), now + BAN_DURATION_SECS);
+        eprintln!("[net] banned peer {} for {}s", peer_id, BAN_DURATION_SECS);
+    }
+
+    /// Czyści wygasłe bany.
+    pub async fn cleanup(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut banned = self.banned.write().await;
+        banned.retain(|_, &mut expiry| expiry > now);
+    }
+}
+
+/// Rate limiter na incoming connections per source.
+/// Zapobiega floodowaniu z tego samego .onion address.
+#[derive(Clone)]
+pub struct RateLimiter {
+    /// Mapa: source_addr -> (count, window_start)
+    counters: Arc<RwLock<HashMap<String, (u64, u64)>>>,
+}
+
+impl RateLimiter {
+    pub fn new() -> Self {
+        Self {
+            counters: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Sprawdza czy source przekroczył limit.
+    /// Zwraca true jeśli dozwolone, false jeśli rate limited.
+    pub async fn check(&self, source: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut counters = self.counters.write().await;
+        let entry = counters.entry(source.to_string()).or_insert((0, now));
+
+        // Reset okna jeśli minęło
+        if now - entry.1 >= RATE_LIMIT_WINDOW_SECS {
+            entry.0 = 1;
+            entry.1 = now;
+            return true;
+        }
+
+        entry.0 += 1;
+        entry.0 <= MAX_CONNECTIONS_PER_SOURCE as u64
+    }
+
+    /// Czyści stare wpisy.
+    pub async fn cleanup(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut counters = self.counters.write().await;
+        counters.retain(|_, (_, window_start)| now - *window_start < RATE_LIMIT_WINDOW_SECS);
+    }
 }
 
 impl ConnectionPool {

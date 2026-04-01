@@ -14,7 +14,7 @@ use tokio::time::{interval, Duration};
 use nxms_transport::peers::PeerBook;
 use privai_chain::{Block, ConsensusMsg, Hash32, VoteType};
 
-use crate::net::{self, NetConfig, NetError};
+use crate::net::{self, BanList, NetConfig, NetError, RateLimiter};
 use crate::node::{NodeError, PrivaiNode};
 use privai_ledger::LedgerStore;
 use privai_proof::{BlockArtifactVerifier, ProofVerifier};
@@ -31,6 +31,10 @@ where
     pub net_config: NetConfig,
     pub peer_book: PeerBook,
     pub connection_pool: net::ConnectionPool,
+    /// Ban list — blokuje złośliwe peerów.
+    pub ban_list: BanList,
+    /// Rate limiter — zapobiega floodowi incoming connections.
+    pub rate_limiter: RateLimiter,
     /// Cache bloków po hashu — potrzebny do finalizacji po otrzymaniu QC.
     block_cache: HashMap<Hash32, Block>,
     /// Cache QC po block_hash — potrzebny do state sync.
@@ -51,6 +55,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             net_config,
             peer_book,
             connection_pool,
+            ban_list: BanList::new(),
+            rate_limiter: RateLimiter::new(),
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),
         }
@@ -65,13 +71,27 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         // Channel na incoming messages
         let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<(String, ConsensusMsg)>();
 
-        // Start Tor listener w tle
+        // Start Tor listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
         let net_config = self.net_config.clone();
         let kem_pk = self.node.config().node_kem_pk.clone();
         let sig_pk = self.node.config().node_sig_pk.clone();
         let peer_id = self.net_config.my_peer_id.clone();
+        let peer_book = self.peer_book.clone();
+        let ban_list = self.ban_list.clone();
+        let rate_limiter = self.rate_limiter.clone();
         let listener_handle = tokio::spawn(async move {
-            if let Err(e) = net::run_listener(net_config, msg_tx, kem_pk, sig_pk, peer_id).await {
+            if let Err(e) = net::run_listener(
+                net_config,
+                msg_tx,
+                kem_pk,
+                sig_pk,
+                peer_id,
+                peer_book,
+                ban_list,
+                rate_limiter,
+            )
+            .await
+            {
                 eprintln!("[consensus] listener error: {}", e);
             }
         });
