@@ -244,6 +244,23 @@ pub struct Vote {
     pub falcon_sig: Vec<u8>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ViewChange {
+    pub height: u64,
+    pub new_round: u32,
+    pub validator_pk: Vec<u8>,
+    pub falcon_sig: Vec<u8>,
+}
+
+impl CanonicalEncode for ViewChange {
+    fn encode(&self, out: &mut Vec<u8>) {
+        write_u64(out, self.height);
+        write_u32(out, self.new_round);
+        crate::canonical::write_bytes(out, &self.validator_pk);
+        crate::canonical::write_bytes(out, &self.falcon_sig);
+    }
+}
+
 impl CanonicalEncode for Vote {
     fn encode(&self, out: &mut Vec<u8>) {
         write_u64(out, self.height);

@@ -12,7 +12,7 @@ pub use canonical::{CanonicalEncode, canonical_bytes};
 pub use decode::{CanonicalDecode, DecodeError};
 pub use consensus::{
     Block, BlockBody, BlockHeader, BlockTemplate, ConsensusReceipt, EpochParams, ExecutionBundle,
-    ExecutionMode, ProofCertificate, QuorumCertificate, Vote, VoteType,
+    ExecutionMode, ProofCertificate, QuorumCertificate, Vote, VoteType, ViewChange,
 };
 pub use hash::{derive_epoch_seed, merkle_root};
 pub use note::{

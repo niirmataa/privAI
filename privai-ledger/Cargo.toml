@@ -6,6 +6,7 @@ license = "MIT"
 description = "Ledger state, storage, mempool, and block application logic for privAI"
 
 [dependencies]
+nxms-transport = { path = "../nxms-transport", default-features = false, features = ["crypto"] }
 privai-chain = { path = "../privai-chain" }
 privai-proof = { path = "../privai-proof" }
 serde = { version = "1.0", features = ["derive"] }

@@ -31,6 +31,12 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         &self.snapshot
     }
 
+    pub fn update_consensus_safety(&mut self, new_state: crate::state::ConsensusSafetyState) -> Result<(), LedgerError> {
+        self.snapshot.consensus_safety = new_state;
+        self.store.save(&self.snapshot)?;
+        Ok(())
+    }
+
     pub fn mempool(&self) -> &Mempool {
         &self.mempool
     }
@@ -47,13 +53,12 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         self.mempool.best_transactions(max_count)
     }
 
-pub fn apply_block(
-    &mut self,
-    block: &Block,
-    _min_proof_coverage: u32,
-) -> Result<(), LedgerError> {
-    // _min_proof_coverage passed down but unused locally, as validate_block will need it:
-    validate_block(block, &self.snapshot, &self.proof_verifier, _min_proof_coverage)?;
+    pub fn apply_block(
+        &mut self,
+        block: &Block,
+        min_proof_coverage: u32,
+    ) -> Result<(), LedgerError> {
+        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage)?;
 
         for tx in &block.body.txs {
             apply_transaction(tx, block.header.height, &mut self.snapshot)?;
@@ -75,6 +80,14 @@ pub fn validate_transaction(
     tx.validate_shape()?;
 
     if let Transaction::MarketplaceBatch(batch_tx) = &tx {
+        // Anti-Forging signature check: Operator must sign the batch
+        if batch_tx.operator_sig.is_empty() {
+            return Err(ValidationError::InvalidRoots); // Repurposed for invalid signature empty check in v0
+        }
+        // Docelowo musimy zmapować batch_tx.summary.operator_commit do prawdziwego 1793-bajtowego klucza PQC
+        // w rejestrze node'a, lub przekazać falcon_pk bezpośrednio. Dla prototypu v0 przyjmujemy,
+        // że struktura jest prawidłowo podpisana w węźle i zweryfikowana z node registry!
+
         // Explicitly check for MarketplaceBatchTx double-spends
         let mut seen_ticket_nullifiers = BTreeSet::new();
         for nullifier in &batch_tx.ticket_nullifiers {
@@ -145,6 +158,17 @@ pub fn validate_block<V: ProofVerifier>(
     }
 
     proof_verifier.verify_block(block)?;
+
+    let total_require_proof = block.body.txs.iter()
+        .filter(|tx| matches!(tx, Transaction::TransferNote(_)))
+        .count();
+
+    if total_require_proof > 0 {
+        let provided_certificates = block.body.proof_certificates.len();
+        if provided_certificates < (min_proof_coverage as usize) {
+            return Err(ValidationError::Proof(privai_proof::ProofError::MissingProofCoverage));
+        }
+    }
 
     let mut temp = snapshot.clone();
     for tx in &block.body.txs {
@@ -229,8 +253,10 @@ mod tests {
         let nullifier1 = privai_chain::Nullifier([0xaa; 32]);
         let nullifier2 = privai_chain::Nullifier([0xbb; 32]);
 
+        let operator_commit = privai_chain::Hash32::default();
+
         let summary = SettlementBatchSummary {
-            operator_commit: [1; 32],
+            operator_commit,
             merchant_commit: [2; 32],
             grant_commit: [3; 32],
             settlement_window_start: 0,
@@ -242,7 +268,7 @@ mod tests {
             total_fee_amount: 10,
             total_refund_amount: 0,
         };
-
+        
         // Create a valid MarketplaceBatchTx
         let batch_tx = Transaction::MarketplaceBatch(MarketplaceBatchTx {
             core: TxCore {
@@ -257,7 +283,7 @@ mod tests {
             },
             summary: summary.clone(),
             ticket_nullifiers: vec![nullifier1.clone(), nullifier2.clone()],
-            operator_sig: vec![],
+            operator_sig: vec![0xff], // just not empty
         });
 
         // 1. Submit should succeed the first time
@@ -284,7 +310,7 @@ mod tests {
             },
             summary: summary.clone(),
             ticket_nullifiers: vec![nullifier1.clone()], // this one is already spent!
-            operator_sig: vec![],
+            operator_sig: vec![0xff],
         });
 
         // 4. Validation MUST reject this

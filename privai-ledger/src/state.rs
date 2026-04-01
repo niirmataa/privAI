@@ -20,6 +20,15 @@ pub struct NoteRecord {
     pub status: NoteStatus,
 }
 
+use privai_chain::QuorumCertificate;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ConsensusSafetyState {
+    pub current_view: u32,
+    pub last_voted_view: u32,
+    pub locked_qc: Option<QuorumCertificate>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LedgerSnapshot {
     pub chain_id: u32,
@@ -28,6 +37,7 @@ pub struct LedgerSnapshot {
     pub blocks: BTreeMap<u64, Block>,
     pub notes: BTreeMap<Hash32, NoteRecord>,
     pub spent_nullifiers: BTreeSet<Nullifier>,
+    pub consensus_safety: ConsensusSafetyState,
 }
 
 impl LedgerSnapshot {
@@ -39,6 +49,7 @@ impl LedgerSnapshot {
             blocks: BTreeMap::new(),
             notes: BTreeMap::new(),
             spent_nullifiers: BTreeSet::new(),
+            consensus_safety: ConsensusSafetyState::default(),
         }
     }
 
