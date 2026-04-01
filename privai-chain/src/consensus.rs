@@ -161,6 +161,13 @@ impl CanonicalEncode for BlockBody {
     }
 }
 
+impl CanonicalEncode for Block {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.header.encode(out);
+        self.body.encode(out);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Block {
     pub header: BlockHeader,
@@ -327,10 +334,153 @@ pub fn proof_cert_root(proof_certificates: &[ProofCertificate]) -> Hash32 {
     )
 }
 
+/// ConsensusMsg — envelope P2P dla wiadomości konsensusowych wysyłanych między nodami.
+/// Każdy variant jest wysyłany broadcastem do validatorów przez Tor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ConsensusMsg {
+    /// Proposer wysyła blok do walidacji.
+    Proposal {
+        block: Block,
+        proposer_sig: Vec<u8>,
+    },
+
+    /// Walidator głosuje prevote (akceptuje blok do dalszej tury).
+    Prevote(Vote),
+
+    /// Walidator głosuje precommit (zatwierdza blok).
+    Precommit(Vote),
+
+    /// Zbudowany QuorumCertificate — broadcastowany po osiągnięciu thresholdu.
+    QuorumCert(QuorumCertificate),
+
+    /// ViewChange — timeout w rundzie, walidator prosi o nową rundę.
+    ViewChange(ViewChange),
+
+    /// Ping/keepalive między nodami (opcjonalny, do przyszłego użycia).
+    Ping {
+        height: u64,
+        round: u32,
+        sender_pk_hash: Hash32,
+    },
+}
+
+impl ConsensusMsg {
+    pub fn msg_type(&self) -> &'static str {
+        match self {
+            Self::Proposal { .. } => "proposal",
+            Self::Prevote(_) => "prevote",
+            Self::Precommit(_) => "precommit",
+            Self::QuorumCert(_) => "quorum_cert",
+            Self::ViewChange(_) => "view_change",
+            Self::Ping { .. } => "ping",
+        }
+    }
+
+    pub fn height(&self) -> u64 {
+        match self {
+            Self::Proposal { block, .. } => block.header.height,
+            Self::Prevote(v) | Self::Precommit(v) => v.height,
+            Self::QuorumCert(qc) => qc.height,
+            Self::ViewChange(vc) => vc.height,
+            Self::Ping { height, .. } => *height,
+        }
+    }
+
+    pub fn round(&self) -> u32 {
+        match self {
+            Self::Proposal { block, .. } => block.header.round,
+            Self::Prevote(v) | Self::Precommit(v) => v.round,
+            Self::QuorumCert(qc) => qc.round,
+            Self::ViewChange(vc) => vc.new_round,
+            Self::Ping { round, .. } => *round,
+        }
+    }
+}
+
+impl CanonicalEncode for ConsensusMsg {
+    fn encode(&self, out: &mut Vec<u8>) {
+        match self {
+            Self::Proposal { block, proposer_sig } => {
+                write_u8(out, 0x01);
+                block.encode(out);
+                crate::canonical::write_bytes(out, proposer_sig);
+            }
+            Self::Prevote(vote) => {
+                write_u8(out, 0x02);
+                vote.encode(out);
+            }
+            Self::Precommit(vote) => {
+                write_u8(out, 0x03);
+                vote.encode(out);
+            }
+            Self::QuorumCert(qc) => {
+                write_u8(out, 0x04);
+                qc.encode(out);
+            }
+            Self::ViewChange(vc) => {
+                write_u8(out, 0x05);
+                vc.encode(out);
+            }
+            Self::Ping { height, round, sender_pk_hash } => {
+                write_u8(out, 0x10);
+                write_u64(out, *height);
+                write_u32(out, *round);
+                write_fixed(out, sender_pk_hash);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::tx::{TX_TYPE_TRANSFER_NOTE, TransferNoteTx, TxCore};
+
+    #[test]
+    fn consensus_msg_type_and_height_round() {
+        let vote = Vote {
+            height: 42,
+            round: 7,
+            block_hash: [0xAA; 32],
+            vote_type: VoteType::Prevote,
+            validator_pk: vec![1, 2, 3],
+            falcon_sig: vec![4, 5, 6],
+        };
+
+        let msg = ConsensusMsg::Prevote(vote.clone());
+        assert_eq!(msg.msg_type(), "prevote");
+        assert_eq!(msg.height(), 42);
+        assert_eq!(msg.round(), 7);
+
+        let msg2 = ConsensusMsg::Precommit(vote);
+        assert_eq!(msg2.msg_type(), "precommit");
+    }
+
+    #[test]
+    fn consensus_msg_view_change() {
+        let vc = ViewChange {
+            height: 10,
+            new_round: 5,
+            validator_pk: vec![1, 2, 3],
+            falcon_sig: vec![],
+        };
+        let msg = ConsensusMsg::ViewChange(vc);
+        assert_eq!(msg.msg_type(), "view_change");
+        assert_eq!(msg.height(), 10);
+        assert_eq!(msg.round(), 5);
+    }
+
+    #[test]
+    fn consensus_msg_ping() {
+        let msg = ConsensusMsg::Ping {
+            height: 100,
+            round: 3,
+            sender_pk_hash: [0xBB; 32],
+        };
+        assert_eq!(msg.msg_type(), "ping");
+        assert_eq!(msg.height(), 100);
+        assert_eq!(msg.round(), 3);
+    }
 
     #[test]
     fn block_roots_validate() {
