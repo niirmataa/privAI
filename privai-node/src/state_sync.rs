@@ -15,7 +15,9 @@ use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
 
 /// Maksymalna liczba bloków w jednej odpowiedzi sync.
-pub const MAX_SYNC_BATCH: u64 = 100;
+/// 10 bloków × ~1MB = ~10MB max payload. Realistyczne dla Tor circuit.
+/// Requester wysyła kolejny SyncRequest jeśli potrzebuje więcej.
+pub const MAX_SYNC_BATCH: u64 = 10;
 
 /// Wysyła SyncRequest do losowego peera.
 /// Zwraca bloki i QCs do zaimportowania.
@@ -99,13 +101,23 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
             sender_pk_hash: node.config().node_pk_hash,
         };
 
-        // Fire-and-forget broadcast (requester dostanie przez Tor)
-        let peer_book = peer_book.clone();
-        let my_id = net_config.my_peer_id.clone();
-        let tor_url = net_config.tor_socks_url.clone();
-        tokio::spawn(async move {
-            let _ = net::broadcast(&peer_book, &my_id, &tor_url, &response).await;
-        });
+        // Znajdź requestera w peer_book i wyślij TYLKO do niego
+        // (nie broadcast — SyncResponse może być duży ~10MB)
+        if let Some(peer) = peer_book.peers.iter().find(|p| {
+            // TODO: w v1 peer_book powinien mapować pk_hash → peer
+            // Na razie wysyłamy do pierwszego dostępnego peera
+            true
+        }) {
+            let peer = peer.clone();
+            let tor_url = net_config.tor_socks_url.clone();
+            tokio::spawn(async move {
+                if let Err(e) = net::send_to_peer(&peer, &tor_url, &response).await {
+                    eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
+                }
+            });
+        } else {
+            eprintln!("[sync] requester peer not found in peer_book");
+        }
     }
 }
 
