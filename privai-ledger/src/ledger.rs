@@ -47,12 +47,13 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         self.mempool.best_transactions(max_count)
     }
 
-    pub fn apply_block(
-        &mut self,
-        block: &Block,
-        min_proof_coverage: u32,
-    ) -> Result<(), LedgerError> {
-        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage)?;
+pub fn apply_block(
+    &mut self,
+    block: &Block,
+    _min_proof_coverage: u32,
+) -> Result<(), LedgerError> {
+    // _min_proof_coverage passed down but unused locally, as validate_block will need it:
+    validate_block(block, &self.snapshot, &self.proof_verifier, _min_proof_coverage)?;
 
         for tx in &block.body.txs {
             apply_transaction(tx, block.header.height, &mut self.snapshot)?;

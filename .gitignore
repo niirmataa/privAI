@@ -26,3 +26,9 @@
 
 # General
 .DS_Store
+google-cloud-sdk/
+*.tar.gz
+*.lnk
+*.log
+*.pid
+co ty na to.txt

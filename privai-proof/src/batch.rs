@@ -50,16 +50,33 @@ pub fn build_execution_bundle_from_transactions(
         });
     }
 
-    let statement_commits = txs.iter().map(Transaction::statement_commit).collect::<Vec<_>>();
-    let covered_tx_indexes = (0..txs.len()).map(|index| index as u32).collect::<Vec<_>>();
-    let public_inputs_root =
-        merkle_root(txs.iter().map(public_inputs_hash_for_transaction).collect::<Result<Vec<_>, _>>()?);
+    let mut statement_commits = Vec::new();
+    let mut covered_tx_indexes = Vec::new();
+    let mut public_inputs_hashes = Vec::new();
+
+    for (i, tx) in txs.iter().enumerate() {
+        // Filter out transactions that do NOT require a ZK proof in the Execution Bundle
+        if matches!(tx, Transaction::TransferNote(_)) {
+            statement_commits.push(tx.statement_commit());
+            covered_tx_indexes.push(i as u32);
+            public_inputs_hashes.push(public_inputs_hash_for_transaction(tx)?);
+        }
+    }
+
+    let public_inputs_root = merkle_root(public_inputs_hashes);
+
+    // If there were no proof-requiring txs (e.g. only MarketplaceBatchTx), we default to Housekeeping Mode.
+    let execution_mode = if statement_commits.is_empty() {
+        ExecutionMode::Housekeeping
+    } else {
+        mode
+    };
 
     Ok(ExecutionBundle {
         statement_commits,
         covered_tx_indexes,
         public_inputs_root,
-        execution_mode: mode,
+        execution_mode,
     })
 }
 

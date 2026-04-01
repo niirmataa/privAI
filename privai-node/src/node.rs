@@ -1,7 +1,10 @@
 use thiserror::Error;
 
+use std::collections::{HashMap, BTreeSet};
+
 use privai_chain::{
     Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32, ProofCertificate, Transaction,
+    Vote, VoteType, QuorumCertificate
 };
 use privai_ledger::{Ledger, LedgerError, LedgerStore};
 use privai_proof::{
@@ -42,6 +45,10 @@ pub struct PrivaiNode<
     ledger: Ledger<S, V>,
     proof_artifacts: A,
     artifact_verifier: P,
+    
+    // Proste liczniki glosow z pamiecia 1 epoki w PC-BFT do budowy QC
+    prevotes: HashMap<Hash32, BTreeSet<Vec<u8>>>,
+    precommits: HashMap<Hash32, BTreeSet<Vec<u8>>>,
 }
 
 impl<S: LedgerStore> PrivaiNode<S, StructuralProofVerifier, MemoryProofArtifactStore, SidecarProofVerifier> {
@@ -113,6 +120,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             ledger,
             proof_artifacts: artifact_store,
             artifact_verifier,
+            prevotes: HashMap::new(),
+            precommits: HashMap::new(),
         })
     }
 
@@ -229,6 +238,68 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             self.record_block_artifacts(block, artifacts)?;
         }
         self.import_block(block)
+    }
+
+    pub fn receive_vote(&mut self, vote: Vote) -> Option<QuorumCertificate> {
+        let threshold = (self.config.validators.len() * 2) / 3 + 1; // Proste zalozenie > 2/3 wag lub validatorow
+
+        match vote.vote_type {
+            VoteType::Prevote => {
+                let entry = self.prevotes.entry(vote.block_hash).or_insert_with(BTreeSet::new);
+                entry.insert(vote.validator_pk.clone());
+                
+                // Gdy przebije threshold, walidator lokalny emituje / buduje QC
+                if entry.len() >= threshold {
+                    return Some(QuorumCertificate {
+                        height: vote.height,
+                        round: vote.round,
+                        block_hash: vote.block_hash,
+                        vote_type: VoteType::Prevote,
+                        signers: entry.iter().cloned().collect(),
+                        signatures: vec![], // Tu nalezaloby zaggregowac autentyczne sygnatury w warstwie sieci (tu dla v0 skip)
+                    });
+                }
+            }
+            VoteType::Precommit => {
+                let entry = self.precommits.entry(vote.block_hash).or_insert_with(BTreeSet::new);
+                entry.insert(vote.validator_pk.clone());
+
+                if entry.len() >= threshold {
+                    return Some(QuorumCertificate {
+                        height: vote.height,
+                        round: vote.round,
+                        block_hash: vote.block_hash,
+                        vote_type: VoteType::Precommit,
+                        signers: entry.iter().cloned().collect(),
+                        signatures: vec![],
+                    });
+                }
+            }
+        }
+        None
+    }
+
+    /// Implementacja sciezki finalizujacej import - gdy uzyskamy QuorumCertificate typu PRECOMMIT, osiagamy pelne Finality.
+    pub fn finalize_block_with_qc(
+        &mut self,
+        block: &Block,
+        qc: &QuorumCertificate,
+    ) -> Result<(), NodeError> {
+        if qc.block_hash != block.hash() {
+            return Err(NodeError::NotProposer { round: qc.round }); // Reuse error temporary for hash mismatch logic
+        }
+        if qc.vote_type != VoteType::Precommit {
+            return Err(NodeError::NoValidators); // Tylko QC precommit daje finality
+        }
+
+        // Twarda autoryzacja stanu na blockchain, osiagnieto konsensus.
+        self.import_block(block)?;
+
+        // Wyczyść stany starych glosowan po zaimportowaniu
+        self.prevotes.clear();
+        self.precommits.clear();
+
+        Ok(())
     }
 }
 
@@ -448,5 +519,49 @@ mod tests {
             node.record_block_artifacts(&block, &artifacts),
             Err(NodeError::ArtifactVerify(privai_proof::ArtifactVerificationError::Backend { .. }))
         ));
+    }
+
+    use crate::config::ValidatorConfig;
+
+    #[test]
+    fn node_builds_qc_on_threshold_votes() {
+        let config = NodeConfig::example(); // Domyslnie example validator.len() wynosi np. 1. Dopiszemy ich tu wiecej
+        let mut config_modified = config.clone();
+        config_modified.validators = vec![
+            ValidatorConfig { pk_hash: [1u8; 32], weight: 1 },
+            ValidatorConfig { pk_hash: [2u8; 32], weight: 1 },
+            ValidatorConfig { pk_hash: [3u8; 32], weight: 1 },
+            ValidatorConfig { pk_hash: [4u8; 32], weight: 1 },
+        ]; // 4 val
+
+        let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
+
+        let hash = [9u8; 32];
+        
+        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![1], falcon_sig: vec![] };
+        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![2], falcon_sig: vec![] };
+        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Precommit, validator_pk: vec![3], falcon_sig: vec![] };
+
+        // 1szy i 2gi glos nic nie daja na QC
+        assert!(node.receive_vote(vote1).is_none());
+        assert!(node.receive_vote(vote2).is_none());
+        
+        // 3ci głos to quorum (3 to próg dla f=1 w n=4). Oddaje zbudowane QC:
+        let qc_option = node.receive_vote(vote3);
+        assert!(qc_option.is_some());
+        
+        let qc = qc_option.unwrap();
+        assert_eq!(qc.vote_type, VoteType::Precommit);
+        assert_eq!(qc.signers.len(), 3);
+        
+        // Finalizacja pojdzie po qc do importu ledgera!
+        let (block, _) = sample_block_and_artifacts(10);
+        let mut final_block = block.clone();
+        final_block.header.height = 1;
+        
+        // To powinnosie wypalic ale z bledem NotProposer/Hash, bo hash() sztucznego QC sie nie zgadza z naszym dummy sample_block. 
+        // Oznacz to po prostu wyjsciem None-err.
+        let result = node.finalize_block_with_qc(&final_block, &qc);
+        assert!(result.is_err());
     }
 }
