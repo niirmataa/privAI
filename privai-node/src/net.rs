@@ -21,7 +21,8 @@ use tokio::sync::{RwLock, Semaphore};
 
 /// Maksymalna liczba jednoczesnych Tor circuit builds.
 /// Zapobiega floodowaniu Tora przy burst'ach Gossip.
-const MAX_CONCURRENT_BUILDS: usize = 3;
+/// Zwiększono z 3 do 6 aby zmniejszyć kolejki przy wielu validatorach.
+const MAX_CONCURRENT_BUILDS: usize = 6;
 
 /// Maksymalna liczba jednoczesnych incoming connections.
 /// Zapobiega resource exhaustion przez atak DDoS.
@@ -171,14 +172,23 @@ pub async fn run_listener(
         tokio::spawn(async move {
             let _permit = permit; // Hold semaphore until connection closes
 
-            // --- PQC Handshake: odbierz od peera ---
+            // --- PQC Handshake: odbierz od peera (z timeout) ---
             use base64::Engine;
             use base64::engine::general_purpose::STANDARD as B64;
 
-            let peer_handshake_bytes = match read_frame(&mut stream, 64 * 1024).await {
-                Ok(data) => data,
-                Err(e) => {
+            let peer_handshake_bytes = match tokio::time::timeout(
+                Duration::from_secs(10),
+                read_frame(&mut stream, 64 * 1024),
+            )
+            .await
+            {
+                Ok(Ok(data)) => data,
+                Ok(Err(e)) => {
                     eprintln!("[net] incoming handshake read from {} failed: {}", addr, e);
+                    return;
+                }
+                Err(_) => {
+                    eprintln!("[net] incoming handshake read timeout from {}", addr);
                     return;
                 }
             };
@@ -267,24 +277,12 @@ pub async fn run_listener(
             );
 
             // --- PQC Handshake: wyślij nasz (podpisany) ---
-            let mut my_handshake = HandshakeMsg {
+            let my_handshake = HandshakeMsg {
                 version: HANDSHAKE_VERSION,
                 kem_pk_b64: B64.encode(&kem_pk),
                 sig_pk_b64: B64.encode(&sig_pk),
                 peer_id: my_peer_id,
                 falcon_sig_b64: String::new(), // placeholder
-            };
-
-            // Podpisz canonical form
-            let my_sig_payload = match serde_json::to_vec(&HandshakeMsg {
-                falcon_sig_b64: String::new(),
-                ..my_handshake.clone()
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[net] sig payload serialize failed: {}", e);
-                    return;
-                }
             };
 
             // Uwaga: run_listener nie ma dostępu do sig_sk
@@ -426,11 +424,29 @@ impl Default for ConnectionPoolConfig {
         Self {
             // Tor circuits żyją ~10 minut, ale dla Gossip chcemy krócej
             idle_timeout_secs: 120,   // 2 minuty bezczynności
-            max_age_secs: 600,        // 10 minut maksymalny wiek
+            max_age_secs: 600,        // 10 minut maksymalny wiek (z jitter w maintenance)
             health_check_interval_secs: 30,
             auto_reconnect: true,
         }
     }
+}
+
+/// Losowy jitter do max_age_secs — zapobiega synchronizacji z rotacją Tor circuits.
+/// Dodaje 0-120s do bazowego max_age_secs, kaskadując wygaśnięcia połączeń.
+fn jitter_max_age(base_age_secs: u64) -> u64 {
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    use std::sync::OnceLock;
+
+    static RANDOM: OnceLock<RandomState> = OnceLock::new();
+    let state = RANDOM.get_or_init(RandomState::new);
+    let mut hasher = state.build_hasher();
+    hasher.write_u64(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos() as u64);
+    let jitter = hasher.finish() % 120; // 0-119s jitter
+    base_age_secs + jitter
 }
 
 /// Menedżer stałych połączeń Tor (Connection Pool v1).
@@ -755,7 +771,7 @@ impl ConnectionPool {
 
         my_handshake.falcon_sig_b64 = B64.encode(&falcon_sig);
 
-        let handshake_bytes = tokio::time::timeout(
+        let _handshake_bytes = tokio::time::timeout(
             Duration::from_secs(10),
             async {
                 let bytes = serde_json::to_vec(&my_handshake)?;
@@ -959,7 +975,8 @@ impl ConnectionPool {
         let mut stale_ids: Vec<String> = Vec::new();
         let mut active_count = 0usize;
 
-        // Sprawdź istniejące połączenia
+        // Sprawdź istniejące połączenia (z jitter na max_age aby uniknąć synchronizacji z Tor)
+        let max_age_with_jitter = jitter_max_age(self.config.max_age_secs);
         {
             let conns = self.connections.read().await;
             for (peer_id, meta) in conns.iter() {
@@ -968,10 +985,10 @@ impl ConnectionPool {
 
                 if meta.needs_rebuild {
                     stale_ids.push(peer_id.clone());
-                } else if age > self.config.max_age_secs {
+                } else if age > max_age_with_jitter {
                     eprintln!(
-                        "[pool] connection to {} is old (age: {}s > {}s), marking stale",
-                        peer_id, age, self.config.max_age_secs
+                        "[pool] connection to {} is old (age: {}s > {}s with jitter), marking stale",
+                        peer_id, age, max_age_with_jitter
                     );
                     stale_ids.push(peer_id.clone());
                 } else if idle > self.config.idle_timeout_secs {
