@@ -2,6 +2,7 @@ use privai_chain::{
     merkle_root, ExecutionBundle, ExecutionMode, Hash32, ModelTx, SettlementTx, StakeTx,
     Transaction,
 };
+use privai_chain::tx::MarketplaceBatchTx;
 use thiserror::Error;
 
 use crate::{TransferProvingData, TransferPublicInputs};
@@ -28,6 +29,9 @@ pub fn public_inputs_hash_for_transaction(tx: &Transaction) -> Result<Hash32, Ba
             tx_type: core.tx_type,
         }),
         Transaction::Stake(StakeTx { core, .. }) => Err(BatchBuildError::UnsupportedTransactionType {
+            tx_type: core.tx_type,
+        }),
+        Transaction::MarketplaceBatch(MarketplaceBatchTx { core, .. }) => Err(BatchBuildError::UnsupportedTransactionType {
             tx_type: core.tx_type,
         }),
     }

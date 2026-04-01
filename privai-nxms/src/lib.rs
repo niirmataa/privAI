@@ -1,4 +1,5 @@
 use nxms_transport::wire::{NXMS_PROTO_V2, NxmsPayloadV2};
+use privai_chain::small_payments::{SpendGrant, Receipt, ServicePaymentPolicy};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -66,6 +67,8 @@ pub struct MarketOfferBody {
     pub price_units: u64,
     pub max_context_tokens: u32,
     pub terms_commit: Hash32,
+    /// Zaktualizowane dla v0 SmallPaymentsRail
+    pub small_payments_policy: Option<ServicePaymentPolicy>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -74,6 +77,8 @@ pub struct MarketAcceptBody {
     pub session_context: ContextId,
     pub escrow_required: bool,
     pub accepted_price_units: u64,
+    /// Przypisany Grant dla transakcji w Railu, autoryzujący małe płatności z portfela Usera.
+    pub spend_grant: Option<SpendGrant>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -90,6 +95,8 @@ pub struct InferenceResponseBody {
     pub response_box: Vec<u8>,
     pub response_commit: Hash32,
     pub usage_units: u64,
+    /// Rachunek do podpisania/odesłania do Operatora jako płatność za Inferencję.
+    pub receipt_offer: Option<Receipt>, 
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -294,6 +301,7 @@ mod tests {
             price_units: 42,
             max_context_tokens: 4096,
             terms_commit: h32(3),
+            small_payments_policy: None,
         });
 
         let payload = body
@@ -461,5 +469,93 @@ mod tests {
             ProtocolError::UnexpectedAppProto(value) => assert_eq!(value, "ESCROW/1"),
             other => panic!("unexpected error: {other}"),
         }
+    }
+
+    #[test]
+    fn marketplace_small_payments_v0_nxms_flow() {
+        use privai_chain::small_payments::{AllowedRail, PricingMode as SpPricingMode};
+
+        // 1. Operator (Provider) prepares a MarketOffer with a small payment policy
+        let policy = ServicePaymentPolicy {
+            policy_version: 1,
+            merchant_commit: h32(0x10),
+            service_commit: None,
+            allowed_rail: AllowedRail::SmallPaymentsRail,
+            pricing_mode: SpPricingMode::ReservationThenSettle,
+            min_deposit_required: 1000,
+            max_spend_per_session: 5000,
+            max_spend_per_window: 10000,
+            grant_expiry_rule: 3600,
+            settlement_window_rule: 86400,
+            requires_full_privacy_if: 50000,
+        };
+
+        let offer = PrivaiBody::MarketOffer(MarketOfferBody {
+            model_id: h32(1),
+            operator_id: h32(2),
+            pricing_mode: PricingMode::PerToken,
+            price_units: 1,
+            max_context_tokens: 4096,
+            terms_commit: h32(3),
+            small_payments_policy: Some(policy.clone()),
+        });
+
+        // 2. User creates a SpendGrant out-of-band and accepts the offer
+        let grant = SpendGrant {
+            merchant_commit: policy.merchant_commit,
+            service_commit: None,
+            session_scope: h32(0x20),
+            spend_cap: 1000,
+            grant_expiry: 999999999,
+            settlement_window: 999999999,
+            policy_commit: policy.policy_commit(),
+            operator_sig: vec![],
+        };
+
+        let accept = PrivaiBody::MarketAccept(MarketAcceptBody {
+            model_id: h32(1),
+            session_context: c16(0x55),
+            escrow_required: false,
+            accepted_price_units: 1,
+            spend_grant: Some(grant.clone()),
+        });
+
+        // 3. User sends an Inference Request
+        let req = PrivaiBody::InferenceRequest(InferenceRequestBody {
+            session_context: c16(0x55),
+            model_id: h32(1),
+            request_box: vec![0xaa, 0xbb],
+            max_output_tokens: 200,
+        });
+
+        // 4. Provider sends Inference Response with a Receipt
+        let receipt = Receipt {
+            receipt_id: h32(0x99),
+            merchant_commit: policy.merchant_commit,
+            service_commit: None,
+            session_commit: h32(0x20),
+            grant_commit: grant.grant_commit(),
+            purchase_commit: h32(0x30),
+            ticket_nullifier: privai_chain::Nullifier(h32(0x40)),
+            amount: 50,
+            policy_commit: policy.policy_commit(),
+            result_commit: h32(0x50),
+            issued_at: 0,
+            merchant_sig: vec![],
+        };
+
+        let resp = PrivaiBody::InferenceResponse(InferenceResponseBody {
+            session_context: c16(0x55),
+            response_box: vec![0xcc, 0xdd],
+            response_commit: h32(0x50),
+            usage_units: 50,
+            receipt_offer: Some(receipt),
+        });
+
+        // Test serialization to ensure formats are valid for NXMS wire transmission
+        assert!(offer.to_canonical_json_string().is_ok());
+        assert!(accept.to_canonical_json_string().is_ok());
+        assert!(req.to_canonical_json_string().is_ok());
+        assert!(resp.to_canonical_json_string().is_ok());
     }
 }

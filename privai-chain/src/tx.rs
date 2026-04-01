@@ -12,6 +12,7 @@ pub const TX_TYPE_TRANSFER_NOTE: u8 = 0x01;
 pub const TX_TYPE_SETTLEMENT: u8 = 0x02;
 pub const TX_TYPE_MODEL: u8 = 0x03;
 pub const TX_TYPE_STAKE: u8 = 0x04;
+pub const TX_TYPE_MARKETPLACE_BATCH: u8 = 0x05;
 
 #[derive(Debug, Error, Clone, PartialEq, Eq)]
 pub enum TxShapeError {
@@ -195,12 +196,32 @@ impl CanonicalEncode for StakeTx {
     }
 }
 
+use crate::small_payments::SettlementBatchSummary;
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MarketplaceBatchTx {
+    pub core: TxCore,
+    pub summary: SettlementBatchSummary,
+    pub ticket_nullifiers: Vec<Nullifier>,
+    pub operator_sig: Vec<u8>,
+}
+
+impl CanonicalEncode for MarketplaceBatchTx {
+    fn encode(&self, out: &mut Vec<u8>) {
+        self.core.encode(out);
+        self.summary.encode(out);
+        write_vec(out, &self.ticket_nullifiers);
+        write_vec_bytes(out, &vec![self.operator_sig.clone()]);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Transaction {
     TransferNote(TransferNoteTx),
     Settlement(SettlementTx),
     Model(ModelTx),
     Stake(StakeTx),
+    MarketplaceBatch(MarketplaceBatchTx),
 }
 
 impl Transaction {
@@ -210,6 +231,7 @@ impl Transaction {
             Self::Settlement(tx) => &tx.core,
             Self::Model(tx) => &tx.core,
             Self::Stake(tx) => &tx.core,
+            Self::MarketplaceBatch(tx) => &tx.core,
         }
     }
 
@@ -226,7 +248,10 @@ impl Transaction {
     }
 
     pub fn input_nullifiers(&self) -> &[Nullifier] {
-        &self.core().input_nullifiers
+        match self {
+            Self::MarketplaceBatch(tx) => &tx.ticket_nullifiers,
+            _ => &self.core().input_nullifiers,
+        }
     }
 
     pub fn outputs(&self) -> &[OutputNote] {
@@ -247,6 +272,7 @@ impl Transaction {
             Self::Settlement(tx) => tx.core.validate_shape(),
             Self::Model(tx) => tx.core.validate_shape(),
             Self::Stake(tx) => tx.core.validate_shape(),
+            Self::MarketplaceBatch(tx) => tx.core.validate_shape(),
         }
     }
 }
@@ -258,6 +284,7 @@ impl CanonicalEncode for Transaction {
             Self::Settlement(tx) => tx.encode(out),
             Self::Model(tx) => tx.encode(out),
             Self::Stake(tx) => tx.encode(out),
+            Self::MarketplaceBatch(tx) => tx.encode(out),
         }
     }
 }

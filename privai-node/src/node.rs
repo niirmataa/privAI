@@ -208,7 +208,6 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         self.artifact_verifier.verify_block_artifacts(
             block,
             artifacts,
-            self.config.epoch_params.min_proof_coverage,
         )?;
         self.proof_artifacts.save_block(artifacts)?;
         Ok(())

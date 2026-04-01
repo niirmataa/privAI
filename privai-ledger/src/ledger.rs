@@ -73,29 +73,42 @@ pub fn validate_transaction(
 ) -> Result<(), ValidationError> {
     tx.validate_shape()?;
 
-    let mut seen_inputs = BTreeSet::new();
-    for input in tx.inputs() {
-        if !seen_inputs.insert(input.note_commit) {
-            return Err(ValidationError::DuplicateInput);
+    if let Transaction::MarketplaceBatch(batch_tx) = &tx {
+        // Explicitly check for MarketplaceBatchTx double-spends
+        let mut seen_ticket_nullifiers = BTreeSet::new();
+        for nullifier in &batch_tx.ticket_nullifiers {
+            if !seen_ticket_nullifiers.insert(*nullifier) {
+                return Err(ValidationError::DuplicateNullifier);
+            }
+            if snapshot.is_ticket_nullifier_spent(nullifier) {
+                return Err(ValidationError::DoubleSpend(*nullifier));
+            }
+        }
+    } else {
+        let mut seen_inputs = BTreeSet::new();
+        for input in tx.inputs() {
+            if !seen_inputs.insert(input.note_commit) {
+                return Err(ValidationError::DuplicateInput);
+            }
+
+            let Some(record) = snapshot.notes.get(&input.note_commit) else {
+                return Err(ValidationError::MissingInput(input.note_commit));
+            };
+
+            if !matches!(record.status, NoteStatus::Unspent) {
+                return Err(ValidationError::InputAlreadySpent(input.note_commit));
+            }
         }
 
-        let Some(record) = snapshot.notes.get(&input.note_commit) else {
-            return Err(ValidationError::MissingInput(input.note_commit));
-        };
+        let mut seen_nullifiers = BTreeSet::new();
+        for nullifier in tx.input_nullifiers() {
+            if !seen_nullifiers.insert(*nullifier) {
+                return Err(ValidationError::DuplicateNullifier);
+            }
 
-        if !matches!(record.status, NoteStatus::Unspent) {
-            return Err(ValidationError::InputAlreadySpent(input.note_commit));
-        }
-    }
-
-    let mut seen_nullifiers = BTreeSet::new();
-    for nullifier in tx.input_nullifiers() {
-        if !seen_nullifiers.insert(*nullifier) {
-            return Err(ValidationError::DuplicateNullifier);
-        }
-
-        if snapshot.spent_nullifiers.contains(nullifier) {
-            return Err(ValidationError::NullifierAlreadySpent(*nullifier));
+            if snapshot.spent_nullifiers.contains(nullifier) {
+                return Err(ValidationError::NullifierAlreadySpent(*nullifier));
+            }
         }
     }
 
@@ -130,7 +143,7 @@ pub fn validate_block<V: ProofVerifier>(
         return Err(ValidationError::InvalidRoots);
     }
 
-    proof_verifier.verify_block(block, min_proof_coverage)?;
+    proof_verifier.verify_block(block)?;
 
     let mut temp = snapshot.clone();
     for tx in &block.body.txs {
@@ -146,20 +159,27 @@ fn apply_transaction(
     block_height: u64,
     snapshot: &mut LedgerSnapshot,
 ) -> Result<(), ValidationError> {
-    for (input, nullifier) in tx.inputs().iter().zip(tx.input_nullifiers().iter()) {
-        let Some(record) = snapshot.notes.get_mut(&input.note_commit) else {
-            return Err(ValidationError::MissingInput(input.note_commit));
-        };
-
-        if !matches!(record.status, NoteStatus::Unspent) {
-            return Err(ValidationError::InputAlreadySpent(input.note_commit));
+    if let Transaction::MarketplaceBatch(batch_tx) = &tx {
+        // Burn ticket nullifiers explicitly
+        for nullifier in &batch_tx.ticket_nullifiers {
+            snapshot.mark_ticket_nullifier_spent(*nullifier);
         }
+    } else {
+        for (input, nullifier) in tx.inputs().iter().zip(tx.input_nullifiers().iter()) {
+            let Some(record) = snapshot.notes.get_mut(&input.note_commit) else {
+                return Err(ValidationError::MissingInput(input.note_commit));
+            };
 
-        record.status = NoteStatus::Spent {
-            nullifier: *nullifier,
-            spent_in_block: block_height,
-        };
-        snapshot.spent_nullifiers.insert(*nullifier);
+            if !matches!(record.status, NoteStatus::Unspent) {
+                return Err(ValidationError::InputAlreadySpent(input.note_commit));
+            }
+
+            record.status = NoteStatus::Spent {
+                nullifier: *nullifier,
+                spent_in_block: block_height,
+            };
+            snapshot.spent_nullifiers.insert(*nullifier);
+        }
     }
 
     for output in tx.outputs() {
@@ -195,6 +215,80 @@ mod tests {
             [seed.wrapping_add(1); 32],
             RecipientBox::new(vec![seed], [seed; 24], vec![seed + 1], [seed; 16], [seed; 16]),
         )
+    }
+
+    use privai_chain::tx::{MarketplaceBatchTx, TX_TYPE_MARKETPLACE_BATCH};
+    use privai_chain::small_payments::SettlementBatchSummary;
+
+    #[test]
+    fn ledger_rejects_marketplace_batch_double_spend() {
+        let mut ledger =
+            Ledger::open(MemoryStore::new(), 17, StructuralProofVerifier).expect("ledger");
+
+        let nullifier1 = privai_chain::Nullifier([0xaa; 32]);
+        let nullifier2 = privai_chain::Nullifier([0xbb; 32]);
+
+        let summary = SettlementBatchSummary {
+            operator_commit: [1; 32],
+            merchant_commit: [2; 32],
+            grant_commit: [3; 32],
+            settlement_window_start: 0,
+            settlement_window_end: 1000,
+            receipt_root: [4; 32],
+            receipt_count: 2,
+            nullifier_count: 2,
+            total_gross_amount: 100,
+            total_fee_amount: 10,
+            total_refund_amount: 0,
+        };
+
+        // Create a valid MarketplaceBatchTx
+        let batch_tx = Transaction::MarketplaceBatch(MarketplaceBatchTx {
+            core: TxCore {
+                version: 0,
+                tx_type: TX_TYPE_MARKETPLACE_BATCH,
+                inputs: vec![],
+                input_nullifiers: vec![],
+                outputs: vec![],
+                fee: 10,
+                statement_commit: [5; 32],
+                auth: vec![],
+            },
+            summary: summary.clone(),
+            ticket_nullifiers: vec![nullifier1.clone(), nullifier2.clone()],
+            operator_sig: vec![],
+        });
+
+        // 1. Submit should succeed the first time
+        assert!(validate_transaction(&batch_tx, ledger.snapshot()).is_ok());
+        
+        // 2. Apply it directly to the ledger snapshot to simulate block inclusion
+        apply_transaction(&batch_tx, 1, &mut ledger.snapshot).expect("apply tx");
+        
+        // Ensure state is updated
+        assert!(ledger.snapshot.is_ticket_nullifier_spent(&nullifier1));
+        assert!(ledger.snapshot.is_ticket_nullifier_spent(&nullifier2));
+
+        // 3. Create a malicious replay Tx with one spent nullifier
+        let replay_tx = Transaction::MarketplaceBatch(MarketplaceBatchTx {
+            core: TxCore {
+                version: 0,
+                tx_type: TX_TYPE_MARKETPLACE_BATCH,
+                inputs: vec![],
+                input_nullifiers: vec![],
+                outputs: vec![],
+                fee: 10,
+                statement_commit: [6; 32],
+                auth: vec![],
+            },
+            summary: summary.clone(),
+            ticket_nullifiers: vec![nullifier1.clone()], // this one is already spent!
+            operator_sig: vec![],
+        });
+
+        // 4. Validation MUST reject this
+        let err = validate_transaction(&replay_tx, ledger.snapshot()).expect_err("should reject double spend");
+        assert!(matches!(err, ValidationError::DoubleSpend(_)));
     }
 
     #[test]

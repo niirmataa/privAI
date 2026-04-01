@@ -71,10 +71,14 @@ impl WalletStore for FileSystemWalletStore {
     }
 }
 
+use crate::small_payments_rail::RailContext;
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedWalletSnapshot {
     bundles: Vec<PersistedBundleEntry>,
     owned_notes: Vec<PersistedOwnedNoteEntry>,
+    #[serde(default)]
+    rail_context: Option<RailContext>,
 }
 
 impl PersistedWalletSnapshot {
@@ -96,6 +100,7 @@ impl PersistedWalletSnapshot {
                     record: record.clone(),
                 })
                 .collect(),
+            rail_context: snapshot.rail_context.clone(),
         }
     }
 
@@ -111,6 +116,7 @@ impl PersistedWalletSnapshot {
                 .into_iter()
                 .map(|entry| (entry.note_commit, entry.record))
                 .collect(),
+            rail_context: self.rail_context,
         }
     }
 }

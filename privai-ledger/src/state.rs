@@ -41,6 +41,14 @@ impl LedgerSnapshot {
             spent_nullifiers: BTreeSet::new(),
         }
     }
+
+    pub fn is_ticket_nullifier_spent(&self, nullifier: &Nullifier) -> bool {
+        self.spent_nullifiers.contains(nullifier)
+    }
+
+    pub fn mark_ticket_nullifier_spent(&mut self, nullifier: Nullifier) {
+        self.spent_nullifiers.insert(nullifier);
+    }
 }
 
 impl Default for LedgerSnapshot {

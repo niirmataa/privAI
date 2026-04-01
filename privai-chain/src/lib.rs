@@ -5,6 +5,7 @@ pub mod hash;
 pub mod note;
 pub mod params;
 pub mod primitives;
+pub mod small_payments;
 pub mod tx;
 
 pub use canonical::{CanonicalEncode, canonical_bytes};

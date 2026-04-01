@@ -54,6 +54,8 @@ pub enum WalletError {
     AuxWitnessMismatch,
     #[error("recipient box crypto error: {0}")]
     Crypto(String),
+    #[error("rail context is missing or not initialized")]
+    RailContextMissing,
     #[error(transparent)]
     TxShape(#[from] privai_chain::TxShapeError),
     #[error(transparent)]

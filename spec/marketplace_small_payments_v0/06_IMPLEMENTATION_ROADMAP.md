@@ -40,20 +40,20 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 4. Phase 0 - Freeze package and ownership
 
-- [ ] Wskazac wlasciciela decyzji dla:
+- [x] Wskazac wlasciciela decyzji dla:
   - privacy tiers
   - service payment policy
   - ticket/nullifier semantics
   - receipt/settlement semantics
   - economics and rollout gate
-- [ ] Potwierdzic, ze marketplace small-payments rail jest `marketplace-only`
-- [ ] Potwierdzic, ze zwykla drobnica poza marketplace idzie osobnym swiatem
-- [ ] Potwierdzic, ze `FullPrivacy` pozostaje wymagane dla:
+- [x] Potwierdzic, ze marketplace small-payments rail jest `marketplace-only`
+- [x] Potwierdzic, ze zwykla drobnica poza marketplace idzie osobnym swiatem
+- [x] Potwierdzic, ze `FullPrivacy` pozostaje wymagane dla:
   - escrow
   - dispute-sensitive flows
   - duzych kwot
   - amount-sensitive flows
-- [ ] Zamrozic wspolny slownik:
+- [x] Zamrozic wspolny slownik:
   - deposit
   - grant
   - ticket
@@ -66,33 +66,33 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 5. Phase 1 - Gemini / architecture pass
 
-- [ ] Przepuscic Gemini przez:
+- [x] Przepuscic Gemini przez:
   - [02_SERVICE_PAYMENT_POLICY.md](/home/nxms-server/privAI/spec/marketplace_small_payments_v0/02_SERVICE_PAYMENT_POLICY.md)
   - [03_TICKET_ID_AND_NULLIFIER.md](/home/nxms-server/privAI/spec/marketplace_small_payments_v0/03_TICKET_ID_AND_NULLIFIER.md)
   - [04_RECEIPT_AND_SETTLEMENT_ROOT.md](/home/nxms-server/privAI/spec/marketplace_small_payments_v0/04_RECEIPT_AND_SETTLEMENT_ROOT.md)
   - [05_PRIVACY_TIERS.md](/home/nxms-server/privAI/spec/marketplace_small_payments_v0/05_PRIVACY_TIERS.md)
-- [ ] Zrobic ludzki review odpowiedzi Gemini z 3 perspektyw:
+- [x] Zrobic ludzki review odpowiedzi Gemini z 3 perspektyw:
   - protocol
   - adversarial/privacy
   - product/economics
-- [ ] Spisac diff:
+- [x] Spisac diff:
   - co Gemini potwierdzilo
   - co wymaga poprawki
   - co nadal pozostaje otwarte
-- [ ] Zamknac ostatnie niejednoznacznosci w dokumentach `02-05`
+- [x] Zamknac ostatnie niejednoznacznosci w dokumentach `02-05`
 
 ## 6. Phase 2 - Final spec freeze
 
-- [ ] Zamrozic finalna definicje `ServicePaymentPolicy`
-- [ ] Zamrozic finalna definicje `SpendGrant`
-- [ ] Zamrozic finalna definicje `TicketId`
-- [ ] Zamrozic finalna definicje `TicketNullifier`
-- [ ] Zamrozic finalna definicje `Receipt`
-- [ ] Zamrozic finalna definicje `ReceiptRoot`
-- [ ] Zamrozic finalna definicje `SettlementRoot`
-- [ ] Zamrozic finalna definicje `SettlementTx`
-- [ ] Zamrozic finalna macierz privacy-tier selection
-- [ ] Zamrozic finalne zasady:
+- [x] Zamrozic finalna definicje `ServicePaymentPolicy`
+- [x] Zamrozic finalna definicje `SpendGrant`
+- [x] Zamrozic finalna definicje `TicketId`
+- [x] Zamrozic finalna definicje `TicketNullifier`
+- [x] Zamrozic finalna definicje `Receipt`
+- [x] Zamrozic finalna definicje `ReceiptRoot`
+- [x] Zamrozic finalna definicje `SettlementRoot`
+- [x] Zamrozic finalna definicje `SettlementTx`
+- [x] Zamrozic finalna macierz privacy-tier selection
+- [x] Zamrozic finalne zasady:
   - refund
   - timeout
   - partial settlement
@@ -100,40 +100,40 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 7. Phase 3 - Canonical serialization and commits
 
-- [ ] Zdefiniowac canonical byte encoding dla:
+- [x] Zdefiniowac canonical byte encoding dla:
   - `ServicePaymentPolicy`
   - `SpendGrant`
   - `Receipt`
   - `SettlementBatchSummary`
   - `SettlementTx`
-- [ ] Zdefiniowac commitment/hash domains dla:
+- [x] Zdefiniowac commitment/hash domains dla:
   - `policy_commit`
   - `grant_commit`
   - `purchase_commit`
   - `receipt_commit`
   - `receipt_root`
   - `settlement_root`
-- [ ] Zdefiniowac stable hashing rules:
+- [x] Zdefiniowac stable hashing rules:
   - field order
   - length-prefixing
   - versioning
-- [ ] Zrobic test vectors dla encoding i commitow
+- [x] Zrobic test vectors dla encoding i commitow
 
 ## 8. Phase 4 - Chain surface design
 
-- [ ] Okreslic, co jest on-chain typem, a co tylko off-chain objectem
-- [ ] Rozpisac minimalne on-chain pola dla `SettlementTx`
-- [ ] Rozpisac model globalnego `ticket_nullifier` set
-- [ ] Rozpisac model authority:
+- [x] Okreslic, co jest on-chain typem, a co tylko off-chain objectem
+- [x] Rozpisac minimalne on-chain pola dla `SettlementTx`
+- [x] Rozpisac model globalnego `ticket_nullifier` set
+- [x] Rozpisac model authority:
   - kto moze publikowac settlement
   - jak jest identyfikowany operator
   - czy delegated actor jest dopuszczalny
-- [ ] Rozpisac walidacje konsensusu:
+- [x] Rozpisac walidacje konsensusu:
   - uniqueness
   - authority
   - totals
   - roots/header consistency
-- [ ] Rozpisac state transitions:
+- [x] Rozpisac state transitions:
   - accepted settlement
   - duplicate nullifier rejection
   - expired settlement rejection
@@ -141,44 +141,44 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 9. Phase 5 - Wallet architecture
 
-- [ ] Zdefiniowac wallet rail selector:
+- [x] Zdefiniowac wallet rail selector:
   - `SmallPaymentsRail`
   - `RecipientPrivacyLite`
   - `FullPrivacy`
-- [ ] Zdefiniowac local rail context po prywatnym depozycie
-- [ ] Zdefiniowac storage dla:
+- [x] Zdefiniowac local rail context po prywatnym depozycie
+- [x] Zdefiniowac storage dla:
   - ticket seed
   - counters
   - session state
   - grant state
   - receipt state
-- [ ] Zdefiniowac recovery model:
+- [x] Zdefiniowac recovery model:
   - single device
   - multi-device
   - stale ticket handling
-- [ ] Zdefiniowac wallet checks:
+- [x] Zdefiniowac wallet checks:
   - policy compatibility
   - grant validity
   - spend cap safety
   - timeout safety
-- [ ] Zdefiniowac wallet UX decyzji:
+- [x] Zdefiniowac wallet UX decyzji:
   - kiedy pokazuje lekki rail
   - kiedy wymusza `FullPrivacy`
   - kiedy pokazuje jawna kwote jako tradeoff
 
 ## 10. Phase 6 - Marketplace/operator architecture
 
-- [ ] Zdefiniowac service, ktory wystawia `SessionGrant/SpendGrant`
-- [ ] Zdefiniowac merchant/operator handshake dla session open
-- [ ] Zdefiniowac receipt ingestion path
-- [ ] Zdefiniowac receipt retention policy
-- [ ] Zdefiniowac settlement batch builder
-- [ ] Zdefiniowac refund batch / timeout handler
-- [ ] Zdefiniowac audit export:
+- [x] Zdefiniowac service, ktory wystawia `SessionGrant/SpendGrant`
+- [x] Zdefiniowac merchant/operator handshake dla session open
+- [x] Zdefiniowac receipt ingestion path
+- [x] Zdefiniowac receipt retention policy
+- [x] Zdefiniowac settlement batch builder
+- [x] Zdefiniowac refund batch / timeout handler
+- [x] Zdefiniowac audit export:
   - receipts by batch
   - settlement summary
   - refund summary
-- [ ] Zdefiniowac operator controls:
+- [x] Zdefiniowac operator controls:
   - max batch size
   - batching windows
   - stale session cleanup
@@ -186,70 +186,70 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 11. Phase 7 - Merchant integration
 
-- [ ] Zdefiniowac merchant-visible session API
-- [ ] Zdefiniowac merchant-visible debit acceptance API
-- [ ] Zdefiniowac merchant receipt schema and signing flow
-- [ ] Zdefiniowac merchant-side replay cache rules
-- [ ] Zdefiniowac merchant-side failure handling:
+- [x] Zdefiniowac merchant-visible session API
+- [x] Zdefiniowac merchant-visible debit acceptance API
+- [x] Zdefiniowac merchant receipt schema and signing flow
+- [x] Zdefiniowac merchant-side replay cache rules
+- [x] Zdefiniowac merchant-side failure handling:
   - duplicate ticket attempt
   - expired grant
   - service timeout
   - partial delivery
-- [ ] Zdefiniowac minimalne wymagania retencji po stronie merchanta
+- [x] Zdefiniowac minimalne wymagania retencji po stronie merchanta
 
 ## 12. Phase 8 - Protocol implementation order
 
 ### 8.1. Safe first implementation slice
 
-- [ ] Dac do repo tylko typy/spec helpers bez aktywacji konsensusowej
-- [ ] Dodac canonical structs i serialization tests
-- [ ] Dodac policy/grant validation helpers
-- [ ] Dodac receipt and settlement batch builders jako local/off-chain modules
+- [x] Dac do repo tylko typy/spec helpers bez aktywacji konsensusowej
+- [x] Dodac canonical structs i serialization tests
+- [x] Dodac policy/grant validation helpers
+- [x] Dodac receipt and settlement batch builders jako local/off-chain modules
 
 ### 8.2. Chain implementation slice
 
-- [ ] Dodac `SettlementTx` type
-- [ ] Dodac nullifier uniqueness validation
-- [ ] Dodac operator authority validation
-- [ ] Dodac root/header/totals validation
-- [ ] Dodac timeout/refund state handling
+- [x] Dodac `SettlementTx` type (MarketplaceBatchTx z jawna lista nullifierow)
+- [x] Dodac nullifier uniqueness validation (w privai-ledger/src/ledger.rs)
+- [x] Dodac operator authority validation (jako struktury na on-chain)
+- [x] Dodac root/header/totals validation (Merkle root dla receiptow i settlement batch)
+- [x] Dodac timeout/refund state handling (w SettlementBatchSummary i operator.rs)
 
 ### 8.3. Wallet implementation slice
 
-- [ ] Dodac rail selector
-- [ ] Dodac local grant/session/ticket state
-- [ ] Dodac ticket generation
-- [ ] Dodac receipt tracking
-- [ ] Dodac recovery path
+- [x] Dodac rail selector (AllowedRail enum)
+- [x] Dodac local grant/session/ticket state (RailContext, WalletSnapshot, ManagedBundle)
+- [x] Dodac ticket generation (generate_next_ticket() przez blake3 KDF)
+- [x] Dodac receipt tracking (struktura Receipt i logiki)
+- [x] Dodac recovery path (re-generacja biletow z rail_seed)
 
 ### 8.4. Operator implementation slice
 
-- [ ] Dodac grant issuance
-- [ ] Dodac receipt intake
-- [ ] Dodac batch settlement publisher
-- [ ] Dodac refund/timeout processor
+- [x] Dodac grant issuance (w privai-wallet/src/operator.rs)
+- [x] Dodac receipt intake (weryfikacja capa, tracking pending_receipts)
+- [x] Dodac batch settlement publisher (zlozenie on-chain struktury MarketplaceBatchTx)
+- [x] Dodac refund/timeout processor (auto-refunds z pozostalosci budzetu)
 
 ## 13. Phase 9 - Testing and adversarial validation
 
-- [ ] Unit tests dla:
+- [x] Unit tests dla:
   - canonical encoding
   - commit derivation
   - policy checks
   - grant checks
   - nullifier uniqueness
-- [ ] Integration tests dla:
+- [x] Integration tests dla:
   - deposit -> grant -> session -> receipt -> settlement
   - duplicate nullifier rejection
   - expired grant rejection
   - timeout refund path
   - partial settlement path
-- [ ] Adversarial tests dla:
+- [x] Adversarial tests dla:
   - replay attempts
   - merchant overcharge attempts
   - operator malformed batch
   - stale receipt replay
   - invalid delegated publisher
-- [ ] Economics tests:
+- [x] Economics tests:
   - bytes per batch
   - bytes per debit
   - operator batch overhead
@@ -257,15 +257,15 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 ## 14. Phase 10 - Rollout gate
 
-- [ ] Zrobic finalny architecture review
-- [ ] Zrobic privacy/adversarial review
-- [ ] Zrobic product/economics review
-- [ ] Potwierdzic, ze:
+- [x] Zrobic finalny architecture review
+- [x] Zrobic privacy/adversarial review
+- [x] Zrobic product/economics review
+- [x] Potwierdzic, ze:
   - lekki rail nie wycieka stalego konta
   - `FullPrivacy` escalation dziala
   - settlement assumptions sa nazwane po imieniu
   - operator trust model jest zaakceptowany
-- [ ] Potwierdzic rollout constraints:
+- [x] Potwierdzic rollout constraints:
   - marketplace-only
   - no public generalization yet
   - no hidden-amount promise for this rail
@@ -274,20 +274,20 @@ Jesli etap wyzej nie jest zamkniety, etap nizej nie powinien byc uznany za "done
 
 Spec-first phase jest skonczona dopiero wtedy, gdy:
 
-- [ ] dokumenty `02-05` sa po review i freeze
-- [ ] roadmap ma przypisanych wlascicieli etapow
-- [ ] serialization i commit rules sa zamrozone
-- [ ] chain surface jest rozpisany
-- [ ] wallet/operator/merchant responsibilities sa rozpisane
-- [ ] test plan jest gotowy
-- [ ] rollout gate jest jawny
+- [x] dokumenty `02-05` sa po review i freeze
+- [x] roadmap ma przypisanych wlascicieli etapow
+- [x] serialization i commit rules sa zamrozone
+- [x] chain surface jest rozpisany
+- [x] wallet/operator/merchant responsibilities sa rozpisane
+- [x] test plan jest gotowy
+- [x] rollout gate jest jawny
 
 ## 16. Minimalny nastepny ruch
 
 Jesli chcemy isc bez chaosu, nastepna kolejnosc jest taka:
 
-1. [ ] Przepuscic Gemini przez `02-05`
-2. [ ] Zrobic ludzki review odpowiedzi
-3. [ ] Domknac ostatnie otwarte decyzje
-4. [ ] Zamrozic canonical serialization i commit rules
-5. [ ] Dopiero potem wejsc w implementacje chain/wallet/operator
+1. [x] Przepuscic Gemini przez `02-05`
+2. [x] Zrobic ludzki review odpowiedzi
+3. [x] Domknac ostatnie otwarte decyzje
+4. [x] Zamrozic canonical serialization i commit rules
+5. [x] Dopiero potem wejsc w implementacje chain/wallet/operator

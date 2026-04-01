@@ -15,6 +15,8 @@ use privai_chain::{
     SpendPolicy, AEAD_ALG_XCHACHA20_POLY1305, FRODOKEM_640_SHAKE,
 };
 
+use crate::small_payments_rail::{RailContext, LocalTicket};
+
 const WALLET_BUNDLE_ID_DOMAIN_V0: &[u8] = b"privai:wallet-bundle-id:v0";
 const RECIPIENT_BOX_KEY_DOMAIN_V0: &[u8] = b"privai:recipient-box:key:v0";
 
@@ -321,6 +323,23 @@ impl<S: WalletStore> PrivaiWallet<S> {
             nullifier: record.derived_nullifier,
         };
         self.flush()
+    }
+
+    pub fn init_rail_context(&mut self, rail_seed: [u8; 32]) -> Result<(), WalletError> {
+        self.snapshot.rail_context = Some(RailContext::new(rail_seed));
+        self.flush()
+    }
+
+    pub fn generate_next_ticket(&mut self, merchant_commit: Hash32) -> Result<LocalTicket, WalletError> {
+        if let Some(rail_context) = &mut self.snapshot.rail_context {
+            let rail_seed = rail_context.rail_seed; // Extract copy of seed first
+            let pool = rail_context.get_or_create_pool(merchant_commit);
+            let ticket = pool.generate_next_ticket(&rail_seed);
+            self.flush()?;
+            Ok(ticket)
+        } else {
+            Err(WalletError::RailContextMissing)
+        }
     }
 
     fn flush(&mut self) -> Result<(), WalletError> {

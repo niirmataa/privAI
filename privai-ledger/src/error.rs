@@ -19,6 +19,8 @@ pub enum ValidationError {
     InputAlreadySpent(Hash32),
     #[error("nullifier {0:?} already spent")]
     NullifierAlreadySpent(Nullifier),
+    #[error("ticket nullifier {0:?} has already been spent")]
+    DoubleSpend(Nullifier),
     #[error("output note {0:?} already exists")]
     DuplicateOutput(Hash32),
     #[error("block height {actual} does not extend tip {expected}")]

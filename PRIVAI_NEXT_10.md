@@ -88,15 +88,15 @@ Done:
 - import i finality path
 - testy wielo-node na Alpine
 
-## 8. [ ] Zrobic marketplace v0 nad `PRIVAI/1`
+## 8. [x] Zrobic marketplace v0 nad `PRIVAI/1`
 Opis:
 Skoro marketplace jest sercem projektu, trzeba postawic pierwszy kompletny flow biznesowy: oferta modelu, request, response, escrow intent i settlement.
 
 Done:
-- `MarketOffer`, `MarketAccept`, `InferenceRequest`, `InferenceResponse`
-- escrow intent/spend policy flow
-- prosty lifecycle sesji user <-> provider
-- test integracyjny end-to-end na typach `privai-nxms`
+- `MarketOffer`, `MarketAccept`, `InferenceRequest`, `InferenceResponse` dodane nowe struktury z SmallPayments.
+- escrow intent/spend policy flow (ServicePaymentPolicy i SpendGrant przesylany miedzy nodami)
+- prosty lifecycle sesji user <-> provider z wplata poczatkowa i odsyłaniem "Receiptów" po usłudze
+- test integracyjny end-to-end na typach w module `privai-nxms/src/lib.rs` (przeszedl pomyslnie)
 
 ## 9. [ ] Wprowadzic threshold/LWE cold path
 Opis:

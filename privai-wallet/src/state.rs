@@ -5,6 +5,7 @@ use privai_chain::{
     Amount14, BundleId, Hash32, Nullifier, OutputNote, ReceiveBundle, RecipientBoxPlaintext,
 };
 use serde::{Deserialize, Serialize};
+use crate::small_payments_rail::RailContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BundleStatus {
@@ -55,8 +56,9 @@ pub enum BundleMatch {
     HintMatched(BundleId),
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct WalletSnapshot {
     pub bundles: BTreeMap<BundleId, ManagedBundle>,
     pub owned_notes: BTreeMap<Hash32, OwnedNoteRecord>,
+    pub rail_context: Option<RailContext>,
 }
