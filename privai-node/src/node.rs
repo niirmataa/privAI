@@ -1,5 +1,4 @@
 use thiserror::Error;
-use zeroize::Zeroize;
 
 use std::collections::{HashMap, HashSet, BTreeSet};
 

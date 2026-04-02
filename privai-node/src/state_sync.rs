@@ -29,6 +29,7 @@ pub async fn request_blocks(
     to_height: u64,
     my_pk_hash: Hash32,
     node_kem_pk: &[u8],
+    node_kem_sk: &[u8],
     node_sig_pk: &[u8],
     node_sig_sk: &[u8],
 ) -> Result<Option<(Vec<Block>, Vec<QuorumCertificate>)>, SyncError> {
@@ -46,7 +47,7 @@ pub async fn request_blocks(
     };
 
     // Wysyłamy request przez pulę połączeń
-    connection_pool.send_message(peer, &msg, node_kem_pk, node_sig_pk, node_sig_sk, my_id)
+    connection_pool.send_message(peer, &msg, node_kem_pk, node_kem_sk, node_sig_pk, node_sig_sk, my_id)
         .await
         .map_err(SyncError::Net)?;
 
@@ -126,11 +127,12 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
     if let Some(peer) = target_peer {
         let pool = connection_pool.clone();
         let kem_pk = node_kem_pk.to_vec();
+        let kem_sk = node.config().node_kem_sk.clone();
         let sig_pk = node_sig_pk.to_vec();
         let sig_sk = node_sig_sk.to_vec();
         let peer_id = node_peer_id.to_string();
         tokio::spawn(async move {
-            if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &sig_pk, &sig_sk, &peer_id).await {
+            if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &peer_id).await {
                 eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
             }
         });

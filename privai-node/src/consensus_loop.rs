@@ -74,6 +74,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         // Start Tor listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
         let net_config = self.net_config.clone();
         let kem_pk = self.node.config().node_kem_pk.clone();
+        let kem_sk = self.node.config().node_kem_sk.clone();
         let sig_pk = self.node.config().node_sig_pk.clone();
         let sig_sk = self.node.config().node_sig_sk.clone();
         let peer_id = self.net_config.my_peer_id.clone();
@@ -85,6 +86,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 net_config,
                 msg_tx,
                 kem_pk,
+                kem_sk,
                 sig_pk,
                 sig_sk,
                 peer_id,
@@ -103,6 +105,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             self.peer_book.clone(),
             self.net_config.my_peer_id.clone(),
             self.node.config().node_kem_pk.clone(),
+            self.node.config().node_kem_sk.clone(),
             self.node.config().node_sig_pk.clone(),
             self.node.config().node_sig_sk.clone(),
         );
@@ -425,11 +428,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let my_id = self.net_config.my_peer_id.clone();
         let pool = self.connection_pool.clone();
         let kem_pk = self.node.config().node_kem_pk.clone();
+        let kem_sk = self.node.config().node_kem_sk.clone();
         let sig_pk = self.node.config().node_sig_pk.clone();
         let sig_sk = self.node.config().node_sig_sk.clone();
 
         tokio::spawn(async move {
-            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &sig_pk, &sig_sk).await;
+            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk).await;
             let total = results.len();
             let mut failures = 0usize;
 

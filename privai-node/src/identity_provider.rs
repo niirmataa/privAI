@@ -1,7 +1,4 @@
 use std::path::Path;
-
-use zeroize::Zeroize;
-
 use crate::node::NodeError;
 
 /// Reprezentuje tożsamość węzła PQC pobraną prosto z nexum-cli vault'a (magazynu w C).

@@ -38,6 +38,8 @@ pub struct NodeConfig {
     pub consensus_timeout_ms: u64,
     /// Klucz publiczny FrodoKEM węzła (base64) — do handshake P2P.
     pub node_kem_pk: Vec<u8>,
+    /// Klucz prywatny FrodoKEM węzła — do decapsulacji shared secret w handshake.
+    pub node_kem_sk: Vec<u8>,
     /// Klucz publiczny Falcon węzła (base64) — do handshake P2P.
     pub node_sig_pk: Vec<u8>,
     /// Klucz prywatny Falcon węzła — do podpisywania handshake P2P.
@@ -69,6 +71,7 @@ impl NodeConfig {
             }],
             consensus_timeout_ms: DEFAULT_CONSENSUS_TIMEOUT_MS,
             node_kem_pk: vec![0; 32], // placeholder
+            node_kem_sk: vec![0; 32], // placeholder
             node_sig_pk: vec![0; 32], // placeholder
             node_sig_sk: vec![0; 32], // placeholder
         }

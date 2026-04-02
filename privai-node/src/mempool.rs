@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use privai_chain::{Hash32, Transaction, CanonicalEncode};
+use privai_chain::{Hash32, Transaction};
 
 /// Maksymalny rozmiar mempoola (liczba transakcji).
 pub const MAX_MEMPOOL_SIZE: usize = 10_000;

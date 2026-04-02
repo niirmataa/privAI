@@ -15,7 +15,6 @@
 //! - Zeroize na kluczach tajnych (ochrona przed memory dump)
 
 use tokio::sync::mpsc;
-use zeroize::Zeroize;
 
 use nxms_transport::peers::{Peer, PeerBook};
 use nxms_transport::tor_net::{connect_via_tor, read_frame, write_frame, serve};
@@ -56,6 +55,11 @@ pub struct HandshakeMsg {
     pub version: u8,
     /// Klucz publiczny FrodoKEM (base64)
     pub kem_pk_b64: String,
+    /// Ciphertext FrodoKEM encapsulation (base64) — do derivacji shared secret
+    /// Nadawca robi encap(peer_kem_pk) → (kem_ct, shared_secret)
+    /// Odbiorca robi decap(my_kem_sk, kem_ct) → shared_secret
+    #[serde(default)]
+    pub kem_ct_b64: String,
     /// Klucz publiczny Falcon (base64)
     pub sig_pk_b64: String,
     /// ID peera w PeerBook
@@ -130,6 +134,7 @@ pub async fn run_listener(
     config: NetConfig,
     msg_tx: mpsc::Sender<(String, ConsensusMsg)>,
     node_kem_pk: Vec<u8>,
+    _node_kem_sk: Vec<u8>,
     node_sig_pk: Vec<u8>,
     node_sig_sk: Vec<u8>,
     node_peer_id: String,
@@ -293,10 +298,30 @@ pub async fn run_listener(
                 peer_handshake.peer_id
             );
 
-            // --- PQC Handshake: wyślij nasz (podpisany) ---
+            // --- FrodoKEM encap: generuj shared secret z kluczem publicznym peera ---
+            let peer_kem_pk_bytes = match B64.decode(&peer_handshake.kem_pk_b64) {
+                Ok(pk) => pk,
+                Err(e) => {
+                    eprintln!("[net] invalid peer kem_pk_b64: {}", e);
+                    return;
+                }
+            };
+
+            let (kem_ct, _kem_shared_secret) = match nxms_transport::crypto::kem_encaps(&peer_kem_pk_bytes) {
+                Ok((ct, ss)) => (ct, ss),
+                Err(e) => {
+                    eprintln!("[net] kem_encaps failed: {}", e);
+                    return;
+                }
+            };
+
+            eprintln!("[net] KEM encap done, kem_ct={} bytes", kem_ct.len());
+
+            // --- PQC Handshake: wyślij nasz (podpisany + kem_ct) ---
             let mut my_handshake = HandshakeMsg {
                 version: HANDSHAKE_VERSION,
                 kem_pk_b64: B64.encode(&kem_pk),
+                kem_ct_b64: B64.encode(&kem_ct),
                 sig_pk_b64: B64.encode(&sig_pk),
                 peer_id: my_peer_id,
                 falcon_sig_b64: String::new(), // placeholder
@@ -709,6 +734,7 @@ impl ConnectionPool {
         peer: &Peer,
         msg: &T,
         my_kem_pk: &[u8],
+        my_kem_sk: &[u8],
         my_sig_pk: &[u8],
         my_sig_sk: &[u8],
         my_peer_id: &str,
@@ -725,7 +751,7 @@ impl ConnectionPool {
         };
 
         if needs_new {
-            self.establish_connection(peer, my_kem_pk, my_sig_pk, my_sig_sk, my_peer_id)
+            self.establish_connection(peer, my_kem_pk, my_kem_sk, my_sig_pk, my_sig_sk, my_peer_id)
                 .await?;
         }
 
@@ -788,6 +814,7 @@ impl ConnectionPool {
         &self,
         peer: &Peer,
         my_kem_pk: &[u8],
+        my_kem_sk: &[u8],
         my_sig_pk: &[u8],
         my_sig_sk: &[u8],
         my_peer_id: &str,
@@ -831,10 +858,11 @@ impl ConnectionPool {
         use base64::Engine;
         use base64::engine::general_purpose::STANDARD as B64;
 
-        // Krok 1: Podpisz i wyślij nasz HandshakeMsg
+        // Krok 1: Podpisz i wyślij nasz HandshakeMsg (bez kem_ct — nie znamy jeszcze peer_kem_pk)
         let mut my_handshake = HandshakeMsg {
             version: HANDSHAKE_VERSION,
             kem_pk_b64: B64.encode(my_kem_pk),
+            kem_ct_b64: String::new(), // wyślemy po otrzymaniu peer_kem_pk
             sig_pk_b64: B64.encode(my_sig_pk),
             peer_id: my_peer_id.to_string(),
             falcon_sig_b64: String::new(), // placeholder
@@ -929,22 +957,29 @@ impl ConnectionPool {
             peer.id, peer_handshake.peer_id
         );
 
-        // Krok 4: Derivuj shared secret z FrodoKEM (do szyfrowania ramek)
-        // TODO: W v2 użyj prawdziwego FrodoKEM encap/decap
-        // Na razie używamy hash z kem_sk + peer_kem_pk jako shared secret
+        // Krok 4: FrodoKEM decap — derivuj shared secret z ciphertext peera
+        // Peer zrobił encap(my_kem_pk) → kem_ct, my robimy decap(my_kem_sk, kem_ct) → shared_secret
         let shared_secret = {
-            use privai_chain::hash::domain_hash;
-            let mut preimage = Vec::new();
-            preimage.extend_from_slice(my_kem_pk);
-            preimage.extend_from_slice(&peer_kem_pk);
-            let hash = domain_hash("privai:shared-secret:v0", &[&preimage]);
-            hash
+            if peer_handshake.kem_ct_b64.is_empty() {
+                return Err(NetError::Transport(anyhow::anyhow!(
+                    "peer {} did not send kem_ct (old protocol version?)",
+                    peer.id
+                )));
+            }
+            let peer_kem_ct = B64.decode(&peer_handshake.kem_ct_b64)
+                .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_ct: {}", e)))?;
+            let ss = nxms_transport::crypto::kem_decaps(my_kem_sk, &peer_kem_ct)
+                .map_err(|e| NetError::Transport(anyhow::anyhow!("kem_decaps failed: {}", e)))?;
+            // Konwertuj Zeroizing<Vec<u8>> na [u8; 32]
+            let mut result = [0u8; 32];
+            result.copy_from_slice(&ss[..32]);
+            result
         };
 
         // Krok 5: Utwórz BOUNDED kanał MPSC i writer task (Actor pattern)
         // Bounded channel (64) zapobiega OOM na wolnych Tor circuits (backpressure)
         let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMsg>(WRITER_CHANNEL_CAPACITY);
-        let (read_half, write_half) = stream.into_split();
+        let (_read_half, write_half) = stream.into_split();
 
         // Spawn writer task — dedykowany task do pisania do TcpStream
         tokio::spawn(async move {
@@ -1014,6 +1049,7 @@ impl ConnectionPool {
         my_id: &str,
         msg: &T,
         my_kem_pk: &[u8],
+        my_kem_sk: &[u8],
         my_sig_pk: &[u8],
         my_sig_sk: &[u8],
     ) -> Vec<(String, Result<(), NetError>)> {
@@ -1025,12 +1061,13 @@ impl ConnectionPool {
             let peer = peer.clone();
             let msg = msg.clone();
             let kem_pk = my_kem_pk.to_vec();
+            let kem_sk = my_kem_sk.to_vec();
             let sig_pk = my_sig_pk.to_vec();
             let sig_sk = my_sig_sk.to_vec();
             let id = my_id.to_string();
 
             handles.push(tokio::spawn(async move {
-                let result = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &sig_sk, &id).await;
+                let result = pool.send_message(&peer, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &id).await;
                 (peer.id.clone(), result)
             }));
         }
@@ -1059,6 +1096,7 @@ impl ConnectionPool {
         peer_book: PeerBook,
         my_id: String,
         my_kem_pk: Vec<u8>,
+        my_kem_sk: Vec<u8>,
         my_sig_pk: Vec<u8>,
         my_sig_sk: Vec<u8>,
     ) {
@@ -1069,7 +1107,7 @@ impl ConnectionPool {
             let mut ticker = tokio::time::interval(Duration::from_secs(interval));
             loop {
                 ticker.tick().await;
-                pool.maintenance_tick(&peer_book, &my_id, &my_kem_pk, &my_sig_pk, &my_sig_sk)
+                pool.maintenance_tick(&peer_book, &my_id, &my_kem_pk, &my_kem_sk, &my_sig_pk, &my_sig_sk)
                     .await;
             }
         });
@@ -1086,6 +1124,7 @@ impl ConnectionPool {
         peer_book: &PeerBook,
         my_id: &str,
         my_kem_pk: &[u8],
+        my_kem_sk: &[u8],
         my_sig_pk: &[u8],
         my_sig_sk: &[u8],
     ) {
@@ -1165,7 +1204,7 @@ impl ConnectionPool {
                     // (lazy connect: nie łączymy na zapas, tylko gdy potrzebujemy)
                     if self.connections.read().await.contains_key(&peer.id) {
                         eprintln!("[pool] reconnecting to stale peer {}", peer.id);
-                        if self.establish_connection(peer, my_kem_pk, my_sig_pk, my_sig_sk, my_id).await.is_ok() {
+                        if self.establish_connection(peer, my_kem_pk, my_kem_sk, my_sig_pk, my_sig_sk, my_id).await.is_ok() {
                             let mut s = self.stats.write().await;
                             s.total_reconnects += 1;
                         }

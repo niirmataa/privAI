@@ -51,6 +51,7 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     net_config: &NetConfig,
     current_time_ms: u64,
     node_kem_pk: &[u8],
+    node_kem_sk: &[u8],
     node_sig_pk: &[u8],
     node_sig_sk: &[u8],
     node_peer_id: &str,
@@ -62,8 +63,14 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
         msg.hops
     );
 
-    // TODO: Weryfikacja podpisu Falcon na wejściu (Zero Trust)
-    // Na razie sprawdzamy tylko podstawowe walidacje
+    // Zero Trust: weryfikacja podpisu Falcon na wejściu
+    if !crate::mempool::Mempool::verify_tx_signatures(&msg.tx) {
+        eprintln!(
+            "[gossip] REJECTED tx {:?}: invalid Falcon signature (Zero Trust)",
+            &msg.tx_hash[..8]
+        );
+        return;
+    }
 
     // Sprawdź czy Tx już jest w mempoolu (deduplikacja)
     if mempool.contains(&msg.tx_hash) {
@@ -100,6 +107,7 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
             msg.sender_pk_hash,
             msg.hops + 1,
             node_kem_pk,
+            node_kem_sk,
             node_sig_pk,
             node_sig_sk,
             node_peer_id,
@@ -120,6 +128,7 @@ fn propagate_tx(
     sender_pk_hash: Hash32,
     hops: u8,
     node_kem_pk: &[u8],
+    node_kem_sk: &[u8],
     node_sig_pk: &[u8],
     node_sig_sk: &[u8],
     node_peer_id: &str,
@@ -154,12 +163,13 @@ fn propagate_tx(
         let msg = gossip_msg.clone();
         let pool = net_config.connection_pool.clone();
         let kem_pk = node_kem_pk.to_vec();
+        let kem_sk = node_kem_sk.to_vec();
         let sig_pk = node_sig_pk.to_vec();
         let sig_sk = node_sig_sk.to_vec();
         let my_id = node_peer_id.to_string();
 
         tokio::spawn(async move {
-            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &sig_pk, &sig_sk, &my_id).await {
+            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &my_id).await {
                 eprintln!(
                     "[gossip] failed to propagate tx {:?} to {}: {}",
                     &msg.tx_hash[..8],
@@ -187,6 +197,7 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     net_config: &NetConfig,
     current_time_ms: u64,
     node_kem_pk: &[u8],
+    node_kem_sk: &[u8],
     node_sig_pk: &[u8],
     node_sig_sk: &[u8],
     node_peer_id: &str,
@@ -222,6 +233,7 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
         sender_pk_hash,
         0, // hops = 0 (pierwsza propagacja)
         node_kem_pk,
+        node_kem_sk,
         node_sig_pk,
         node_sig_sk,
         node_peer_id,
