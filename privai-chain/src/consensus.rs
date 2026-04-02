@@ -340,6 +340,22 @@ pub fn proof_cert_root(proof_certificates: &[ProofCertificate]) -> Hash32 {
     )
 }
 
+/// Informacje o peerze do wymiany w protokole peer discovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PeerInfo {
+    /// Adres Tor hidden service (np. "abc123.onion:19000")
+    pub address: String,
+    /// Klucz publiczny Falcon (raw bytes)
+    pub falcon_pk: Vec<u8>,
+}
+
+impl CanonicalEncode for PeerInfo {
+    fn encode(&self, out: &mut Vec<u8>) {
+        crate::canonical::write_bytes(out, self.address.as_bytes());
+        crate::canonical::write_bytes(out, &self.falcon_pk);
+    }
+}
+
 /// ConsensusMsg — envelope P2P dla wiadomości konsensusowych wysyłanych między nodami.
 /// Każdy variant jest wysyłany broadcastem do validatorów przez Tor.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -390,6 +406,19 @@ pub enum ConsensusMsg {
         sender_pk_hash: Hash32,
         hops: u8,
     },
+
+    /// Żądanie listy peerów od innego węzła (peer discovery).
+    GetPeers {
+        requester_pk_hash: Hash32,
+    },
+
+    /// Odpowiedź z listą peerów (peer discovery).
+    /// Lista jest podpisana kluczem Falcon nadawcy (ochrona przed Eclipse attack).
+    PeersList {
+        peers: Vec<PeerInfo>,
+        sender_pk_hash: Hash32,
+        falcon_sig: Vec<u8>,
+    },
 }
 
 impl ConsensusMsg {
@@ -404,6 +433,8 @@ impl ConsensusMsg {
             Self::SyncRequest { .. } => "sync_request",
             Self::SyncResponse { .. } => "sync_response",
             Self::Gossip { .. } => "gossip",
+            Self::GetPeers { .. } => "get_peers",
+            Self::PeersList { .. } => "peers_list",
         }
     }
 
@@ -416,7 +447,7 @@ impl ConsensusMsg {
             Self::Ping { height, .. } => *height,
             Self::SyncRequest { from_height, .. } => *from_height,
             Self::SyncResponse { blocks, .. } => blocks.first().map(|b| b.header.height).unwrap_or(0),
-            Self::Gossip { .. } => 0,
+            Self::Gossip { .. } | Self::GetPeers { .. } | Self::PeersList { .. } => 0,
         }
     }
 
@@ -427,7 +458,8 @@ impl ConsensusMsg {
             Self::QuorumCert(qc) => qc.round,
             Self::ViewChange(vc) => vc.new_round,
             Self::Ping { round, .. } => *round,
-            Self::SyncRequest { .. } | Self::SyncResponse { .. } | Self::Gossip { .. } => 0,
+            Self::SyncRequest { .. } | Self::SyncResponse { .. } | Self::Gossip { .. }
+            | Self::GetPeers { .. } | Self::PeersList { .. } => 0,
         }
     }
 }
@@ -479,6 +511,16 @@ impl CanonicalEncode for ConsensusMsg {
                 tx.encode(out);
                 write_fixed(out, sender_pk_hash);
                 write_u8(out, *hops);
+            }
+            Self::GetPeers { requester_pk_hash } => {
+                write_u8(out, 0x40);
+                write_fixed(out, requester_pk_hash);
+            }
+            Self::PeersList { peers, sender_pk_hash, falcon_sig } => {
+                write_u8(out, 0x41);
+                write_vec(out, peers);
+                write_fixed(out, sender_pk_hash);
+                crate::canonical::write_bytes(out, falcon_sig);
             }
         }
     }
@@ -559,6 +601,7 @@ mod tests {
             proposer_pk_hash: [1; 32],
             epoch_seed_hash: [2; 32],
             parent_qc_hash: [3; 32],
+            state_root: [0; 32],
             txs: vec![tx],
             execution_bundle: ExecutionBundle {
                 statement_commits: vec![[11; 32]],
