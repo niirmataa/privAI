@@ -7,7 +7,7 @@ use privai_chain::{
     Vote, VoteType, QuorumCertificate, ViewChange,
     tx::MarketplaceBatchTx
 };
-use privai_ledger::{Ledger, LedgerError, LedgerStore};
+use privai_ledger::{Ledger, LedgerError, LedgerStore, compute_state_root};
 use privai_proof::{
     artifact::BlockProofArtifacts,
     store::{MemoryProofArtifactStore, ProofArtifactStore, ProofArtifactStoreError},
@@ -293,6 +293,13 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         };
         let execution_bundle = build_execution_bundle_from_transactions(&txs, execution_mode)?;
 
+        // Oblicz state_root: symuluj zastosowanie transakcji i oblicz hash wynikowego stanu
+        let mut temp_snapshot = self.ledger().snapshot().clone();
+        for tx in &txs {
+            privai_ledger::apply_transaction_local(tx, self.ledger.snapshot().height + 1, &mut temp_snapshot);
+        }
+        let state_root = compute_state_root(&temp_snapshot);
+
         Ok(Block::from_template(BlockTemplate {
             chain_id: self.config.chain_id,
             height: self.ledger.snapshot().height + 1,
@@ -303,6 +310,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             proposer_pk_hash: self.config.node_pk_hash,
             epoch_seed_hash,
             parent_qc_hash,
+            state_root,
             txs,
             execution_bundle,
             proof_certificates,
@@ -687,6 +695,7 @@ mod tests {
             proposer_pk_hash: [1; 32],
             epoch_seed_hash: [2; 32],
             parent_qc_hash: [3; 32],
+            state_root: [0; 32],
             txs: vec![tx],
             execution_bundle: execution_bundle.clone(),
             proof_certificates: vec![artifact.certificate()],

@@ -115,6 +115,7 @@ pub struct BlockHeader {
     pub nullifier_root: Hash32,
     pub statement_root: Hash32,
     pub proof_cert_root: Hash32,
+    pub state_root: Hash32,
     pub proposer_pk_hash: Hash32,
     pub epoch_seed_hash: Hash32,
     pub parent_qc_hash: Hash32,
@@ -140,6 +141,7 @@ impl CanonicalEncode for BlockHeader {
         write_fixed(out, &self.nullifier_root);
         write_fixed(out, &self.statement_root);
         write_fixed(out, &self.proof_cert_root);
+        write_fixed(out, &self.state_root);
         write_fixed(out, &self.proposer_pk_hash);
         write_fixed(out, &self.epoch_seed_hash);
         write_fixed(out, &self.parent_qc_hash);
@@ -198,6 +200,7 @@ impl Block {
             nullifier_root: nullifier_root(&body.txs),
             statement_root: statement_root(&body),
             proof_cert_root: proof_cert_root(&body.proof_certificates),
+            state_root: template.state_root,
             proposer_pk_hash: template.proposer_pk_hash,
             epoch_seed_hash: template.epoch_seed_hash,
             parent_qc_hash: template.parent_qc_hash,
@@ -230,6 +233,7 @@ pub struct BlockTemplate {
     pub proposer_pk_hash: Hash32,
     pub epoch_seed_hash: Hash32,
     pub parent_qc_hash: Hash32,
+    pub state_root: Hash32,
     pub txs: Vec<Transaction>,
     pub execution_bundle: ExecutionBundle,
     pub proof_certificates: Vec<ProofCertificate>,

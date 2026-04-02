@@ -39,6 +39,8 @@ pub enum ValidationError {
     TooManyTransactions { count: usize, max: usize },
     #[error("transaction fee too low: {fee} < {min_fee}")]
     FeeTooLow { fee: u64, min_fee: u64 },
+    #[error("state root mismatch: expected {expected:?}, got {actual:?}")]
+    StateRootMismatch { expected: Hash32, actual: Hash32 },
     #[error(transparent)]
     Proof(#[from] ProofError),
 }

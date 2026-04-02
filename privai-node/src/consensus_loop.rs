@@ -258,6 +258,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     proposer_pk_hash: block.header.proposer_pk_hash,
                     epoch_seed_hash: block.header.epoch_seed_hash,
                     parent_qc_hash: block.header.parent_qc_hash,
+                    state_root: block.header.state_root,
                     txs: block.body.txs.clone(),
                     execution_bundle: block.body.execution_bundle.clone(),
                     proof_certificates: block.body.proof_certificates.clone(),

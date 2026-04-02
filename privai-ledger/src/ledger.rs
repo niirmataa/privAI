@@ -1,12 +1,56 @@
 use std::collections::BTreeSet;
 
 use privai_chain::{Block, Hash32, Transaction};
+use privai_chain::hash::merkle_root;
 use privai_proof::ProofVerifier;
 
 use crate::error::{LedgerError, ValidationError};
 use crate::mempool::Mempool;
 use crate::state::{LedgerSnapshot, NoteRecord, NoteStatus};
 use crate::store::LedgerStore;
+
+/// Oblicza state_root z LedgerSnapshot — merkle root z (note_commit || status) + nullifiery.
+/// Używane do weryfikacji ExecutionRoot po zastosowaniu transakcji.
+pub fn compute_state_root(snapshot: &LedgerSnapshot) -> Hash32 {
+    let mut leaves: Vec<Hash32> = Vec::new();
+
+    // Note commits + status
+    for (commit, record) in &snapshot.notes {
+        let mut leaf = [0u8; 32];
+        leaf[..16].copy_from_slice(&commit[..16]);
+        match &record.status {
+            NoteStatus::Unspent => leaf[16] = 0x00,
+            NoteStatus::Spent { nullifier, .. } => {
+                leaf[16] = 0x01;
+                leaf[17..].copy_from_slice(&nullifier.0[..15]);
+            }
+        }
+        leaves.push(leaf);
+    }
+
+    // Spent nullifiers
+    for nullifier in &snapshot.spent_nullifiers {
+        leaves.push(nullifier.0);
+    }
+
+    // Spent ticket nullifiers
+    for nullifier in &snapshot.spent_ticket_nullifiers {
+        let mut leaf = [0u8; 32];
+        leaf[..16].copy_from_slice(&nullifier.0[..16]);
+        leaf[16] = 0xFF;
+        leaves.push(leaf);
+    }
+
+    merkle_root(leaves.into_iter())
+}
+
+pub fn apply_transaction_local(
+    tx: &Transaction,
+    block_height: u64,
+    snapshot: &mut LedgerSnapshot,
+) {
+    let _ = apply_transaction(tx, block_height, snapshot);
+}
 
 pub struct Ledger<S: LedgerStore, V: ProofVerifier> {
     store: S,
@@ -67,8 +111,7 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         block: &Block,
         min_proof_coverage: u32,
         epoch_params: &privai_chain::EpochParams,
-    ) -> Result<(), LedgerError> {
-        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage, epoch_params)?;
+    ) -> Result<(), LedgerError> {        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage, epoch_params)?;
 
         for tx in &block.body.txs {
             apply_transaction(tx, block.header.height, &mut self.snapshot)?;
@@ -271,6 +314,15 @@ pub fn validate_block<V: ProofVerifier>(
     for tx in &block.body.txs {
         validate_transaction(tx, &temp, epoch_params.min_fee)?;
         apply_transaction(tx, block.header.height, &mut temp)?;
+    }
+
+    // ExecutionRoot verification: po zastosowaniu transakcji, state_root musi pasować
+    let computed_state_root = compute_state_root(&temp);
+    if computed_state_root != block.header.state_root {
+        return Err(ValidationError::StateRootMismatch {
+            expected: computed_state_root,
+            actual: block.header.state_root,
+        });
     }
 
     Ok(())
