@@ -89,21 +89,27 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
         current_height
     );
 
-    // Zbieramy bloki z block_cache po zakresie height.
-    // block_cache jest keyed by hash — skanujemy po height.
+    // Zbieramy bloki: najpierw z block_cache, potem fallback na ledger.snapshot().blocks
     let mut blocks: Vec<Block> = block_cache
         .values()
         .filter(|b| b.header.height >= from && b.header.height <= to)
         .cloned()
         .collect();
+
+    // Fallback na persistent storage jeśli cache nie ma bloków
+    if blocks.is_empty() {
+        blocks = node.ledger().snapshot().blocks
+            .range(from..=to)
+            .map(|(_, b)| b.clone())
+            .collect();
+    }
+
     blocks.sort_by_key(|b| b.header.height);
 
-    // TODO: W v1 czytaj też z persistent storage — block_cache
-    // zawiera tylko ostatnie bloki widziane w tej sesji.
     if blocks.is_empty() {
         eprintln!(
-            "[sync] no blocks in cache for range {}..{} (cache has {} blocks)",
-            from, to, block_cache.len()
+            "[sync] no blocks in cache or ledger for range {}..{}",
+            from, to
         );
         return;
     }
@@ -115,9 +121,14 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
         blocks.last().map(|b| b.header.height).unwrap_or(0),
     );
 
+    // Zbieramy QCs z ledgera dla tych bloków
+    let qcs: Vec<QuorumCertificate> = blocks.iter()
+        .filter_map(|b| node.ledger().snapshot().qcs.get(&b.header.height).cloned())
+        .collect();
+
     let response = ConsensusMsg::SyncResponse {
         blocks,
-        qcs: Vec::new(), // TODO: QC storage w v1
+        qcs,
         sender_pk_hash: node.config().node_pk_hash,
     };
 

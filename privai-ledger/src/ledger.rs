@@ -31,6 +31,15 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         &self.snapshot
     }
 
+    pub fn snapshot_mut(&mut self) -> &mut LedgerSnapshot {
+        &mut self.snapshot
+    }
+
+    pub fn flush(&mut self) -> Result<(), LedgerError> {
+        self.store.save(&self.snapshot)?;
+        Ok(())
+    }
+
     pub fn update_consensus_safety(&mut self, new_state: crate::state::ConsensusSafetyState) -> Result<(), LedgerError> {
         self.snapshot.consensus_safety = new_state;
         self.store.save(&self.snapshot)?;
@@ -119,11 +128,18 @@ pub fn validate_transaction(
     if let Transaction::MarketplaceBatch(batch_tx) = &tx {
         // Anti-Forging signature check: Operator must sign the batch
         if batch_tx.operator_sig.is_empty() {
-            return Err(ValidationError::InvalidRoots); // Repurposed for invalid signature empty check in v0
+            return Err(ValidationError::InvalidAuth("MarketplaceBatch: empty operator_sig".into()));
         }
-        // Docelowo musimy zmapować batch_tx.summary.operator_commit do prawdziwego 1793-bajtowego klucza PQC
-        // w rejestrze node'a, lub przekazać falcon_pk bezpośrednio. Dla prototypu v0 przyjmujemy,
-        // że struktura jest prawidłowo podpisana w węźle i zweryfikowana z node registry!
+        // Weryfikuj podpis Falcon operatora vs canonical batch bytes
+        // settlement_root jest kanonicznym reprezentacją batcha
+        let batch_msg = batch_tx.summary.settlement_root();
+        // Używamy auth[0].signer_pks[0] jako klucza operatora (jeśli dostępny)
+        let operator_pk = tx.core().auth.first()
+            .and_then(|a| a.signer_pks.first())
+            .ok_or_else(|| ValidationError::InvalidAuth("MarketplaceBatch: no operator pk in auth".into()))?;
+        if nxms_transport::crypto::falcon_verify(operator_pk, &batch_msg, &batch_tx.operator_sig).is_err() {
+            return Err(ValidationError::InvalidAuth("MarketplaceBatch: invalid operator Falcon signature".into()));
+        }
 
         // Explicitly check for MarketplaceBatchTx double-spends
         let mut seen_ticket_nullifiers = BTreeSet::new();

@@ -26,6 +26,7 @@ use privai_chain::QuorumCertificate;
 pub struct ConsensusSafetyState {
     pub current_view: u32,
     pub last_voted_view: u32,
+    pub current_round: u32,
     pub locked_qc: Option<QuorumCertificate>,
 }
 
@@ -37,6 +38,10 @@ pub struct LedgerSnapshot {
     pub blocks: BTreeMap<u64, Block>,
     pub notes: BTreeMap<Hash32, NoteRecord>,
     pub spent_nullifiers: BTreeSet<Nullifier>,
+    /// Osobny zbiór ticket nullifiers — unika kolizji z note nullifiers.
+    pub spent_ticket_nullifiers: BTreeSet<Nullifier>,
+    /// Persystowane QCs po height — potrzebne do state sync.
+    pub qcs: BTreeMap<u64, QuorumCertificate>,
     pub consensus_safety: ConsensusSafetyState,
 }
 
@@ -49,16 +54,18 @@ impl LedgerSnapshot {
             blocks: BTreeMap::new(),
             notes: BTreeMap::new(),
             spent_nullifiers: BTreeSet::new(),
+            spent_ticket_nullifiers: BTreeSet::new(),
+            qcs: BTreeMap::new(),
             consensus_safety: ConsensusSafetyState::default(),
         }
     }
 
     pub fn is_ticket_nullifier_spent(&self, nullifier: &Nullifier) -> bool {
-        self.spent_nullifiers.contains(nullifier)
+        self.spent_ticket_nullifiers.contains(nullifier)
     }
 
     pub fn mark_ticket_nullifier_spent(&mut self, nullifier: Nullifier) {
-        self.spent_nullifiers.insert(nullifier);
+        self.spent_ticket_nullifiers.insert(nullifier);
     }
 }
 

@@ -72,7 +72,12 @@ impl LedgerStore for FileSystemStore {
         fs::create_dir_all(&self.root)?;
         let state_path = self.state_path();
         let bytes = serde_json::to_vec_pretty(snapshot)?;
-        fs::write(state_path, bytes)?;
+
+        // Atomic write: temp + rename (atomic na większości FS w tym samym mount point)
+        // Chroni przed korupcją stanu przy crash mid-write.
+        let tmp_path = state_path.with_extension("tmp");
+        fs::write(&tmp_path, bytes)?;
+        fs::rename(&tmp_path, &state_path)?;
         Ok(())
     }
 }

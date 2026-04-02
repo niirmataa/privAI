@@ -135,6 +135,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         artifact_verifier: P,
     ) -> Result<Self, NodeError> {
         let ledger = Ledger::open(store, config.chain_id, verifier)?;
+        let current_round = ledger.snapshot().consensus_safety.current_round;
         Ok(Self {
             config,
             ledger,
@@ -143,7 +144,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             prevotes: HashMap::new(),
             precommits: HashMap::new(),
             qc_emitted: HashSet::new(),
-            current_round: 0,
+            current_round,
             round_start_time_ms: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -411,16 +412,31 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             return false;
         }
 
-        let threshold = (self.config.validators.len() * 2) / 3 + 1;
-        
+        // Stake-weighted threshold (tak jak w receive_vote)
+        let total_stake: u64 = self.config.validators.iter().map(|v| v.stake_weight).sum();
+        let required_stake = (total_stake * 2) / 3 + 1;
+
         let entry = self.view_changes.entry(vc.new_round).or_insert_with(BTreeSet::new);
         entry.insert(vc.validator_pk.clone());
 
-        if entry.len() >= threshold && self.current_round < vc.new_round {
+        // Oblicz accumulated stake dla view_changes
+        let accumulated_stake: u64 = entry.iter()
+            .filter_map(|pk| self.config.validators.iter().find(|v| v.pk_hash == privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[pk])))
+            .map(|v| v.stake_weight)
+            .sum();
+
+        if accumulated_stake >= required_stake && self.current_round < vc.new_round {
             // Osiagnelismy Quorum na wejscie w nowa runde! Lider "zostal obalony".
             self.current_round = vc.new_round;
             self.round_start_time_ms = current_time_ms; // Reset timera
-            
+
+            // Persystuj current_round na dysk (zapobiega equivocation po restarcie)
+            let mut safety = self.ledger.snapshot().consensus_safety.clone();
+            safety.current_round = vc.new_round;
+            if let Err(e) = self.ledger_mut().update_consensus_safety(safety) {
+                eprintln!("[node] WARNING: failed to persist current_round: {}", e);
+            }
+
             // Wyczysc stare stany, gotowi do nowej rundy.
             self.prevotes.clear();
             self.precommits.clear();
@@ -532,6 +548,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         // Jeśli nie (np. state sync) — importuj teraz.
         if self.ledger.snapshot().tip_hash != block.hash() {
             self.import_block(block)?;
+        }
+
+        // Persystuj QC do ledgera (potrzebne do state sync)
+        self.ledger_mut().snapshot_mut().qcs.insert(block.header.height, qc.clone());
+        if let Err(e) = self.ledger_mut().flush() {
+            eprintln!("[node] WARNING: failed to persist QC: {}", e);
         }
 
         // Wyczyść stany starych głosowań
