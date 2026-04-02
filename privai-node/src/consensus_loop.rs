@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 use nxms_transport::peers::PeerBook;
-use privai_chain::{Block, ConsensusMsg, Hash32, VoteType};
+use privai_chain::{Block, ConsensusMsg, Hash32, VoteType, consensus::PeerInfo};
 
 use crate::net::{self, BanList, NetConfig, NetError, RateLimiter};
 use crate::node::{NodeError, PrivaiNode};
@@ -442,6 +442,75 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         sender_pk_hash,
                         hops: hops + 1,
                     });
+                }
+            }
+
+            ConsensusMsg::GetPeers { requester_pk_hash } => {
+                eprintln!(
+                    "[consensus] GetPeers request from {:?}",
+                    &requester_pk_hash[..8]
+                );
+
+                // Zbierz informacje o znanych peerach z PeerBook
+                let peers: Vec<PeerInfo> = self.peer_book.peers.iter()
+                    .filter(|peer| peer.id != self.net_config.my_peer_id)
+                    .filter_map(|peer| {
+                        use base64::Engine;
+                        use base64::engine::general_purpose::STANDARD as B64;
+                        if let Ok(falcon_pk) = B64.decode(&peer.sig_pk_b64) {
+                            Some(PeerInfo {
+                                address: format!("{}:{}", peer.host, peer.port),
+                                falcon_pk,
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                // Podpisz listę peerów kluczem Falcon (ochrona przed Eclipse attack)
+                let peers_bytes = serde_json::to_vec(&peers).unwrap_or_default();
+                let falcon_sig = if let Some(sk) = self.node.falcon_sk() {
+                    nxms_transport::crypto::falcon_sign_ct_prepared(sk, &peers_bytes).unwrap_or_default()
+                } else {
+                    Vec::new()
+                };
+
+                let response = ConsensusMsg::PeersList {
+                    peers,
+                    sender_pk_hash: self.node.config().node_pk_hash,
+                    falcon_sig,
+                };
+
+                // Wyślij odpowiedź bezpośrednio do requestera
+                self.broadcast_msg(response);
+            }
+
+            ConsensusMsg::PeersList { peers, sender_pk_hash, falcon_sig } => {
+                eprintln!(
+                    "[consensus] received PeersList from {:?} with {} peers",
+                    &sender_pk_hash[..8],
+                    peers.len()
+                );
+
+                // Weryfikacja podpisu Falcon na liście peerów
+                let peers_bytes = serde_json::to_vec(&peers).unwrap_or_default();
+                if falcon_sig.is_empty() {
+                    eprintln!("[consensus] REJECTED PeersList: missing Falcon signature");
+                    return;
+                }
+                if nxms_transport::crypto::falcon_verify(&sender_pk_hash, &peers_bytes, &falcon_sig).is_err() {
+                    eprintln!("[consensus] REJECTED PeersList: invalid Falcon signature");
+                    return;
+                }
+
+                // TODO: Dodaj nowych peerów do PeerBook (z weryfikacją)
+                eprintln!(
+                    "[consensus] PeersList verified — {} peers available",
+                    peers.len()
+                );
+                for peer in &peers {
+                    eprintln!("  - peer: {}", peer.address);
                 }
             }
         }
