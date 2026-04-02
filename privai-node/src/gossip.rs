@@ -42,9 +42,9 @@ pub struct GossipTxMsg {
 pub const MAX_GOSSIP_HOPS: u8 = 5;
 
 /// Obsługuje przychodzącą wiadomość Gossip z peera.
-/// Weryfikuje Tx, dodaje do mempoola, propaguje dalej.
+/// Weryfikuje Tx, dodaje do mempoola (antyspam), bridge do ledger.mempool, propaguje dalej.
 pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
-    _node: &PrivaiNode<S, V, A, P>,
+    node: &mut PrivaiNode<S, V, A, P>,
     mempool: &mut Mempool,
     msg: GossipTxMsg,
     peer_book: &PeerBook,
@@ -96,6 +96,15 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
         &msg.tx_hash[..8],
         mempool.len()
     );
+
+    // Bridge do ledger.mempool — proposer czyta z ledger.candidate_transactions()
+    if let Err(e) = node.submit_transaction(msg.tx.clone(), current_time_ms) {
+        eprintln!(
+            "[gossip] ledger rejected tx {:?}: {} (still in node-mempool)",
+            &msg.tx_hash[..8], e
+        );
+        // Nie return — tx jest w node-mempool jako antyspam layer
+    }
 
     // Propaguj dalej jeśli nie przekroczyliśmy limitu hops
     if msg.hops < MAX_GOSSIP_HOPS {
@@ -188,9 +197,9 @@ fn propagate_tx(
     }
 }
 
-/// Wysyła nową transakcję do mempoola i gossipuje do sieci.
+/// Wysyła nową transakcję do mempoola (antyspam), bridge do ledger.mempool i gossipuje do sieci.
 pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
-    _node: &PrivaiNode<S, V, A, P>,
+    node: &mut PrivaiNode<S, V, A, P>,
     mempool: &mut Mempool,
     tx: Transaction,
     peer_book: &PeerBook,
@@ -216,6 +225,12 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     if !mempool.insert(entry) {
         eprintln!("[gossip] local tx rejected by mempool: {:?}", &tx_hash[..8]);
         return false;
+    }
+
+    // Bridge do ledger.mempool
+    if let Err(e) = node.submit_transaction(tx.clone(), current_time_ms) {
+        eprintln!("[gossip] ledger rejected local tx {:?}: {}", &tx_hash[..8], e);
+        // Nie return — tx jest w node-mempool
     }
 
     eprintln!(

@@ -53,9 +53,9 @@ pub struct PrivaiNode<
     proof_artifacts: A,
     artifact_verifier: P,
     
-    // Stake-weighted vote tracking: block_hash -> (set of voter pk_hashes, accumulated stake)
-    prevotes: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64)>,
-    precommits: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64)>,
+    // Stake-weighted vote tracking: block_hash -> (set of voter pk_hashes, accumulated stake, signatures)
+    prevotes: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64, Vec<Vec<u8>>)>,
+    precommits: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64, Vec<Vec<u8>>)>,
     /// QC already emitted for (block_hash, vote_type) — prevents duplicate broadcasts
     qc_emitted: HashSet<(Hash32, u8)>,
 
@@ -470,9 +470,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         match vote.vote_type {
             VoteType::Prevote => {
                 let entry = self.prevotes.entry(vote.block_hash)
-                    .or_insert_with(|| (BTreeSet::new(), 0));
+                    .or_insert_with(|| (BTreeSet::new(), 0, Vec::new()));
                 if entry.0.insert(vote.validator_pk.clone()) {
                     entry.1 += voter_stake; // dodaj stake tylko jeśli nowy głos
+                    entry.2.push(vote.falcon_sig.clone()); // zbierz podpis
                 }
 
                 if entry.1 >= required_stake {
@@ -483,15 +484,16 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Prevote,
                         signers: entry.0.iter().cloned().collect(),
-                        signatures: vec![],
+                        signatures: entry.2.clone(),
                     });
                 }
             }
             VoteType::Precommit => {
                 let entry = self.precommits.entry(vote.block_hash)
-                    .or_insert_with(|| (BTreeSet::new(), 0));
+                    .or_insert_with(|| (BTreeSet::new(), 0, Vec::new()));
                 if entry.0.insert(vote.validator_pk.clone()) {
                     entry.1 += voter_stake;
+                    entry.2.push(vote.falcon_sig.clone()); // zbierz podpis
                 }
 
                 if entry.1 >= required_stake {
@@ -502,7 +504,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Precommit,
                         signers: entry.0.iter().cloned().collect(),
-                        signatures: vec![],
+                        signatures: entry.2.clone(),
                     });
                 }
             }

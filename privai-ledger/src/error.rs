@@ -31,6 +31,8 @@ pub enum ValidationError {
     InvalidRoots,
     #[error("covered tx index {0} is outside the block body")]
     InvalidCoveredIndex(u32),
+    #[error("invalid auth: {0}")]
+    InvalidAuth(String),
     #[error(transparent)]
     Proof(#[from] ProofError),
 }

@@ -118,6 +118,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             self.node.config().consensus_timeout_ms
         );
 
+        // Na starcie — sprawdź czy jesteśmy proposerem rundy 0
+        self.try_propose();
+
         loop {
             tokio::select! {
                 // Incoming message z Tor listenera
@@ -324,6 +327,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     qc.vote_type
                 );
 
+                // Weryfikacja QC — sprawdź signers, stake, podpisy
+                if let Err(e) = self.verify_qc(&qc) {
+                    eprintln!("[consensus] REJECTED QC: {}", e);
+                    return;
+                }
+
                 // Zapisz QC do cache (potrzebny do state sync)
                 self.qc_cache.insert(qc.block_hash, qc.clone());
 
@@ -359,6 +368,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         "[consensus] VIEW CHANGE to round {} (quorum reached)",
                         self.node.current_round
                     );
+                    // Po awansie rundy — sprawdź czy jesteśmy proposerem
+                    self.try_propose();
                 }
             }
 
@@ -405,6 +416,84 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         }
     }
 
+    /// Sprawdza czy jesteśmy proposerem dla bieżącej rundy i inicjuje propozycję.
+    /// Wywoływane po ViewChange i na starcie rundy.
+    fn try_propose(&mut self) {
+        let round = self.node.current_round;
+        let snapshot = self.node.ledger().snapshot();
+        let height = snapshot.height + 1;
+        let epoch = snapshot.consensus_safety.current_view as u64; // epoch z current_view
+        let epoch_seed_hash = privai_chain::hash::domain_hash(
+            "privai:epoch-seed:v0",
+            &[&epoch.to_le_bytes(), &self.node.config().chain_id.to_le_bytes()],
+        );
+        let parent_qc_hash = if height > 1 {
+            // Hash ostatniego bloku jako parent
+            snapshot.tip_hash
+        } else {
+            [0u8; 32] // genesis
+        };
+        let timestamp_ms = current_time_ms();
+
+        // Sprawdź czy jesteśmy proposerem
+        let expected_proposer = match self.node.next_proposer(&epoch_seed_hash, round) {
+            Some(p) => p,
+            None => return, // brak walidatorów
+        };
+
+        if expected_proposer != self.node.config().node_pk_hash {
+            // Nie jesteśmy proposerem — czekamy
+            return;
+        }
+
+        eprintln!(
+            "[consensus] I am PROPOSER for height={} round={} — building block",
+            height, round
+        );
+
+        // Zbuduj blok
+        let block = match self.node.propose_block(
+            epoch,
+            round,
+            timestamp_ms,
+            epoch_seed_hash,
+            parent_qc_hash,
+            Vec::new(),  // proof_certificates — zbierane później
+            Vec::new(),  // extra_receipts
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("[consensus] propose_block failed: {}", e);
+                return;
+            }
+        };
+
+        // Podpisz blok kluczem Falcon
+        let mut proposer_sig = vec![];
+        if let Some(sk) = self.node.falcon_sk() {
+            if let Ok(sig) = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &block.hash()) {
+                proposer_sig = sig;
+            }
+        }
+
+        if proposer_sig.is_empty() {
+            eprintln!("[consensus] WARNING: no Falcon key — sending unsigned proposal");
+        }
+
+        // Cache bloku
+        let block_hash = block.hash();
+        self.block_cache.insert(block_hash, block.clone());
+
+        eprintln!(
+            "[consensus] broadcasting PROPOSAL height={} round={} hash={:?}",
+            height,
+            round,
+            &block_hash[..8]
+        );
+
+        self.broadcast_msg(ConsensusMsg::Proposal { block, proposer_sig });
+    }
+
     /// Sprawdza timeout i wysyła ViewChange jeśli potrzeba.
     fn check_and_handle_timeout(&mut self) {
         let now = current_time_ms();
@@ -414,7 +503,59 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 vc.new_round
             );
             self.broadcast_msg(ConsensusMsg::ViewChange(vc));
+            // Po ViewChange — sprawdź czy jesteśmy proposerem nowej rundy
+            self.try_propose();
         }
+    }
+
+    /// Weryfikuje QuorumCertificate: sprawdza signers, stake, podpisy Falcon.
+    fn verify_qc(&self, qc: &privai_chain::QuorumCertificate) -> Result<(), String> {
+        let validators = &self.node.config().validators;
+        let total_stake: u64 = validators.iter().map(|v| v.stake_weight).sum();
+        let required_stake = (total_stake * 2) / 3 + 1;
+
+        // 1. Sprawdź liczbę signers vs signatures
+        if qc.signers.len() != qc.signatures.len() {
+            return Err(format!(
+                "signers/signatures count mismatch: {} vs {}",
+                qc.signers.len(), qc.signatures.len()
+            ));
+        }
+
+        // 2. Sprawdź każdy signer i podpis
+        let mut accumulated_stake: u64 = 0;
+        for (signer_pk, sig) in qc.signers.iter().zip(qc.signatures.iter()) {
+            // 2a. Sprawdź czy signer jest znanym validatorem
+            let voter_pk_hash = privai_chain::hash::domain_hash(
+                "privai:falcon-pk:v0",
+                &[signer_pk],
+            );
+            let voter_stake = validators
+                .iter()
+                .find(|v| v.pk_hash == voter_pk_hash)
+                .map(|v| v.stake_weight)
+                .ok_or_else(|| format!("unknown validator {:?}", &voter_pk_hash[..8]))?;
+
+            // 2b. Weryfikuj podpis Falcon
+            if sig.is_empty() {
+                return Err(format!("empty signature for signer {:?}", &voter_pk_hash[..8]));
+            }
+            if nxms_transport::crypto::falcon_verify(signer_pk, &qc.block_hash, sig).is_err() {
+                return Err(format!("invalid Falcon signature for signer {:?}", &voter_pk_hash[..8]));
+            }
+
+            accumulated_stake += voter_stake;
+        }
+
+        // 3. Sprawdź próg stake
+        if accumulated_stake < required_stake {
+            return Err(format!(
+                "insufficient stake: {} < {} (required)",
+                accumulated_stake, required_stake
+            ));
+        }
+
+        Ok(())
     }
 
     /// Broadcastuje wiadomość do wszystkich peerów — FIRE AND FORGET.

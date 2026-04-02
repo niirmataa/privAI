@@ -87,6 +87,35 @@ pub fn validate_transaction(
 ) -> Result<(), ValidationError> {
     tx.validate_shape()?;
 
+    // Weryfikacja podpisów Falcon na TxCore.auth (Zero Trust)
+    // Każdy InputAuth musi mieć ważne podpisy — inaczej atakujący może sfałszować Tx.
+    let tx_hash = tx.tx_id();
+    for (i, auth) in tx.core().auth.iter().enumerate() {
+        if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
+            return Err(ValidationError::InvalidAuth(format!(
+                "auth[{}]: missing signer_pks or signatures", i
+            )));
+        }
+        if auth.signer_pks.len() != auth.signatures.len() {
+            return Err(ValidationError::InvalidAuth(format!(
+                "auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
+                i, auth.signer_pks.len(), auth.signatures.len()
+            )));
+        }
+        for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+            if pk.is_empty() || sig.is_empty() {
+                return Err(ValidationError::InvalidAuth(format!(
+                    "auth[{}][{}]: empty pk or sig", i, j
+                )));
+            }
+            if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
+                return Err(ValidationError::InvalidAuth(format!(
+                    "auth[{}][{}]: invalid Falcon signature", i, j
+                )));
+            }
+        }
+    }
+
     if let Transaction::MarketplaceBatch(batch_tx) = &tx {
         // Anti-Forging signature check: Operator must sign the batch
         if batch_tx.operator_sig.is_empty() {
