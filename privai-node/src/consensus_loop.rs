@@ -509,7 +509,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     /// Weryfikuje QuorumCertificate: sprawdza signers, stake, podpisy Falcon.
+    /// Używa rayon do równoległej weryfikacji podpisów (Falcon jest CPU-bound).
     fn verify_qc(&self, qc: &privai_chain::QuorumCertificate) -> Result<(), String> {
+        use rayon::prelude::*;
+
         let validators = &self.node.config().validators;
         let total_stake: u64 = validators.iter().map(|v| v.stake_weight).sum();
         let required_stake = (total_stake * 2) / 3 + 1;
@@ -522,32 +525,40 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             ));
         }
 
-        // 2. Sprawdź każdy signer i podpis
+        // 2. Równoległa weryfikacja każdego signera + podpisu
+        let results: Vec<Result<u64, String>> = qc.signers.par_iter()
+            .zip(qc.signatures.par_iter())
+            .map(|(signer_pk, sig)| {
+                // 2a. Sprawdź czy signer jest znanym validatorem
+                let voter_pk_hash = privai_chain::hash::domain_hash(
+                    "privai:falcon-pk:v0",
+                    &[signer_pk],
+                );
+                let voter_stake = validators
+                    .iter()
+                    .find(|v| v.pk_hash == voter_pk_hash)
+                    .map(|v| v.stake_weight)
+                    .ok_or_else(|| format!("unknown validator {:?}", &voter_pk_hash[..8]))?;
+
+                // 2b. Weryfikuj podpis Falcon
+                if sig.is_empty() {
+                    return Err(format!("empty signature for signer {:?}", &voter_pk_hash[..8]));
+                }
+                if nxms_transport::crypto::falcon_verify(signer_pk, &qc.block_hash, sig).is_err() {
+                    return Err(format!("invalid Falcon signature for signer {:?}", &voter_pk_hash[..8]));
+                }
+
+                Ok(voter_stake)
+            })
+            .collect();
+
+        // 3. Sprawdź wyniki i zsumuj stake
         let mut accumulated_stake: u64 = 0;
-        for (signer_pk, sig) in qc.signers.iter().zip(qc.signatures.iter()) {
-            // 2a. Sprawdź czy signer jest znanym validatorem
-            let voter_pk_hash = privai_chain::hash::domain_hash(
-                "privai:falcon-pk:v0",
-                &[signer_pk],
-            );
-            let voter_stake = validators
-                .iter()
-                .find(|v| v.pk_hash == voter_pk_hash)
-                .map(|v| v.stake_weight)
-                .ok_or_else(|| format!("unknown validator {:?}", &voter_pk_hash[..8]))?;
-
-            // 2b. Weryfikuj podpis Falcon
-            if sig.is_empty() {
-                return Err(format!("empty signature for signer {:?}", &voter_pk_hash[..8]));
-            }
-            if nxms_transport::crypto::falcon_verify(signer_pk, &qc.block_hash, sig).is_err() {
-                return Err(format!("invalid Falcon signature for signer {:?}", &voter_pk_hash[..8]));
-            }
-
-            accumulated_stake += voter_stake;
+        for result in results {
+            accumulated_stake += result?;
         }
 
-        // 3. Sprawdź próg stake
+        // 4. Sprawdź próg stake
         if accumulated_stake < required_stake {
             return Err(format!(
                 "insufficient stake: {} < {} (required)",
