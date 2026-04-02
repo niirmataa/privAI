@@ -76,12 +76,15 @@ impl MarketplaceOperator {
 
     /// PHASE 8.4: Batch Settlement Publisher
     /// Tworzy ostateczny `MarketplaceBatchTx` (On-Chain Settlement) na podstawie uzbieranych receiptów.
+    /// 
+    /// Jeśli `operator_sig_sk` jest Some, batch jest podpisywany kluczem Falcon.
     pub fn publish_settlement_batch(
         &mut self,
         merchant_commit: Hash32,
         grant_commit: Hash32,
         window_start: u64,
         window_end: u64,
+        operator_sig_sk: Option<&[u8]>,
     ) -> Result<MarketplaceBatchTx, String> {
         let receipts = self
             .pending_receipts
@@ -133,12 +136,20 @@ impl MarketplaceOperator {
             auth: vec![],
         };
 
-        let tx = MarketplaceBatchTx {
+        let mut tx = MarketplaceBatchTx {
             core,
             summary,
             ticket_nullifiers,
-            operator_sig: vec![], // Operator signs the whole struct externally
+            operator_sig: vec![],
         };
+
+        // Podpisz settlement_root kluczem Falcon jeśli dostępny
+        if let Some(sig_sk) = operator_sig_sk {
+            let msg = tx.summary.settlement_root();
+            let sig = nxms_transport::crypto::falcon_sign_ct_prepared(sig_sk, &msg)
+                .map_err(|e| format!("falcon_sign_ct_prepared: {}", e))?;
+            tx.operator_sig = sig;
+        }
 
         Ok(tx)
     }
@@ -214,8 +225,8 @@ mod tests {
         };
         assert!(operator.intake_receipt(receipt2).is_ok());
 
-        // 6. Publikacja Settlement Batch
-        let batch_tx = operator.publish_settlement_batch(merchant_commit, grant.grant_commit(), 0, 1000).unwrap();
+        // 6. Publikacja Settlement Batch (bez podpisu — test nie wymaga kluczy Falcon)
+        let batch_tx = operator.publish_settlement_batch(merchant_commit, grant.grant_commit(), 0, 1000, None).unwrap();
 
         // 7. Weryfikacja SettlementTx 
         assert_eq!(batch_tx.ticket_nullifiers.len(), 2);
