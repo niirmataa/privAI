@@ -1,6 +1,6 @@
 use thiserror::Error;
 
-use std::collections::{HashMap, HashSet, BTreeSet};
+use std::collections::{HashMap, HashSet, BTreeSet, BTreeMap};
 
 use privai_chain::{
     Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32, ProofCertificate, Transaction,
@@ -53,9 +53,10 @@ pub struct PrivaiNode<
     proof_artifacts: A,
     artifact_verifier: P,
     
-    // Stake-weighted vote tracking: block_hash -> (set of voter pk_hashes, accumulated stake, signatures)
-    prevotes: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64, Vec<Vec<u8>>)>,
-    precommits: HashMap<Hash32, (BTreeSet<Vec<u8>>, u64, Vec<Vec<u8>>)>,
+    // Stake-weighted vote tracking: block_hash -> (pk→sig map, accumulated stake)
+    // BTreeMap gwarantuje tę samą kolejność dla keys (signers) i values (signatures)
+    prevotes: HashMap<Hash32, (BTreeMap<Vec<u8>, Vec<u8>>, u64)>,
+    precommits: HashMap<Hash32, (BTreeMap<Vec<u8>, Vec<u8>>, u64)>,
     /// QC already emitted for (block_hash, vote_type) — prevents duplicate broadcasts
     qc_emitted: HashSet<(Hash32, u8)>,
 
@@ -269,7 +270,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             round: block.header.round,
             block_hash: block.hash(),
             vote_type: VoteType::Prevote, // Zaczynamy od Prevote w PC-BFT
-            validator_pk: self.config.node_pk_hash.to_vec(), // W docelowej appce prawdziwy PK (tu hashuje sie config.node_pk_hash wiec symulacja)
+            validator_pk: self.config.node_sig_pk.clone(), // Pełny Falcon PK — odbiorca może zweryfikować podpis bez lookupu
             falcon_sig,
         })
     }
@@ -455,6 +456,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             self.prevotes.clear();
             self.precommits.clear();
             self.qc_emitted.clear();
+            // Usuń stare wpisy ViewChange (rundy < nowej) — zapobiega OOM
+            self.view_changes.retain(|&round, _| round >= vc.new_round);
             return true;
         }
 
@@ -500,10 +503,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         match vote.vote_type {
             VoteType::Prevote => {
                 let entry = self.prevotes.entry(vote.block_hash)
-                    .or_insert_with(|| (BTreeSet::new(), 0, Vec::new()));
-                if entry.0.insert(vote.validator_pk.clone()) {
-                    entry.1 += voter_stake; // dodaj stake tylko jeśli nowy głos
-                    entry.2.push(vote.falcon_sig.clone()); // zbierz podpis
+                    .or_insert_with(|| (BTreeMap::new(), 0));
+                if !entry.0.contains_key(&vote.validator_pk) {
+                    entry.0.insert(vote.validator_pk.clone(), vote.falcon_sig.clone());
+                    entry.1 += voter_stake;
                 }
 
                 if entry.1 >= required_stake {
@@ -513,17 +516,17 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         round: vote.round,
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Prevote,
-                        signers: entry.0.iter().cloned().collect(),
-                        signatures: entry.2.clone(),
+                        signers: entry.0.keys().cloned().collect(),
+                        signatures: entry.0.values().cloned().collect(),
                     });
                 }
             }
             VoteType::Precommit => {
                 let entry = self.precommits.entry(vote.block_hash)
-                    .or_insert_with(|| (BTreeSet::new(), 0, Vec::new()));
-                if entry.0.insert(vote.validator_pk.clone()) {
+                    .or_insert_with(|| (BTreeMap::new(), 0));
+                if !entry.0.contains_key(&vote.validator_pk) {
+                    entry.0.insert(vote.validator_pk.clone(), vote.falcon_sig.clone());
                     entry.1 += voter_stake;
-                    entry.2.push(vote.falcon_sig.clone()); // zbierz podpis
                 }
 
                 if entry.1 >= required_stake {
@@ -533,8 +536,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         round: vote.round,
                         block_hash: vote.block_hash,
                         vote_type: VoteType::Precommit,
-                        signers: entry.0.iter().cloned().collect(),
-                        signatures: entry.2.clone(),
+                        signers: entry.0.keys().cloned().collect(),
+                        signatures: entry.0.values().cloned().collect(),
                     });
                 }
             }
@@ -574,6 +577,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         self.prevotes.clear();
         self.precommits.clear();
         self.qc_emitted.clear();
+        // Usuń stare wpisy ViewChange — zapobiega OOM przy długim działaniu
+        let current_round = self.current_round;
+        self.view_changes.retain(|&round, _| round > current_round);
 
         Ok(())
     }
@@ -730,7 +736,8 @@ mod tests {
                 outputs: vec![sample_note(10)],
                 fee: 3,
                 statement_commit: [11; 32],
-                auth: Vec::new(),
+                // W testach v0 uzywamy pustego auth by zignorowac weryfikacje Falcon
+                auth: Vec::new(), 
             },
         });
 
@@ -810,9 +817,9 @@ mod tests {
         let config = NodeConfig::example();
         let mut config_modified = config.clone();
         config_modified.validators = vec![
-            ValidatorConfig { pk_hash: test_pk_hash(&pk1), stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: test_pk_hash(&pk2), stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: test_pk_hash(&pk3), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk1), sig_pk: pk1.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk2), sig_pk: pk2.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk3), sig_pk: pk3.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
         ];
         config_modified.node_pk_hash = test_pk_hash(&pk1);
 
@@ -870,10 +877,10 @@ mod tests {
         let config = NodeConfig::example();
         let mut config_modified = config.clone();
         config_modified.validators = vec![
-            ValidatorConfig { pk_hash: test_pk_hash(&pk1), stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: test_pk_hash(&pk2), stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: test_pk_hash(&pk3), stake_weight: 1, availability: 100, proof_score: 100 },
-            ValidatorConfig { pk_hash: test_pk_hash(&pk4), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk1), sig_pk: pk1.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk2), sig_pk: pk2.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk3), sig_pk: pk3.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk4), sig_pk: pk4.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
         ]; // 4 val, equal stake — threshold = 4*2/3+1 = 3 stake
 
         let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");

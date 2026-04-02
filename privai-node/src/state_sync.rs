@@ -204,13 +204,13 @@ pub fn handle_sync_response<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSt
                 &expected_prev_hash[..8],
                 &block.header.prev_block_hash[..8]
             );
-            continue;
+            break;  // prev_hash mismatch — kolejne bloki też będą złe
         }
 
         // Walidacja roots
         if !block.roots_match() {
             eprintln!("[sync] REJECTED block at height={}: roots mismatch", block.header.height);
-            continue;
+            break;  // roots mismatch — zatrzymaj sync
         }
 
         // Import bloku

@@ -102,10 +102,10 @@ impl RocksDBStore {
         let path = path.as_ref();
         
         let mut cf_opts = Options::default();
-        cf_opts.set_max_write_buffer_number(16);
-        cf_opts.set_write_buffer_size(256 * 1024 * 1024); // 256MB
-        cf_opts.set_target_file_size_base(64 * 1024 * 1024); // 64MB
-        cf_opts.set_max_bytes_for_level_base(512 * 1024 * 1024); // 512MB
+        cf_opts.set_max_write_buffer_number(4);           // było 16 → 4
+        cf_opts.set_write_buffer_size(16 * 1024 * 1024);  // 256MB → 16MB
+        cf_opts.set_target_file_size_base(16 * 1024 * 1024); // 64MB → 16MB
+        cf_opts.set_max_bytes_for_level_base(64 * 1024 * 1024); // 512MB → 64MB
         
         let cfs = vec![
             ColumnFamilyDescriptor::new(CF_LEDGER_STATE, cf_opts.clone()),

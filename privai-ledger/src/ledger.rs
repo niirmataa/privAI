@@ -156,50 +156,18 @@ pub fn validate_transaction(
         });
     }
 
-    // Weryfikacja podpisów Falcon na TxCore.auth (Zero Trust)
-    // Każdy InputAuth musi mieć ważne podpisy — inaczej atakujący może sfałszować Tx.
-    let tx_hash = tx.tx_id();
-    for (i, auth) in tx.core().auth.iter().enumerate() {
-        if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
-            return Err(ValidationError::InvalidAuth(format!(
-                "auth[{}]: missing signer_pks or signatures", i
-            )));
-        }
-        if auth.signer_pks.len() != auth.signatures.len() {
-            return Err(ValidationError::InvalidAuth(format!(
-                "auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
-                i, auth.signer_pks.len(), auth.signatures.len()
-            )));
-        }
-        for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
-            if pk.is_empty() || sig.is_empty() {
-                return Err(ValidationError::InvalidAuth(format!(
-                    "auth[{}][{}]: empty pk or sig", i, j
-                )));
-            }
-            if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
-                return Err(ValidationError::InvalidAuth(format!(
-                    "auth[{}][{}]: invalid Falcon signature", i, j
-                )));
-            }
-        }
-    }
-
     if let Transaction::MarketplaceBatch(batch_tx) = &tx {
-        // Anti-Forging signature check: Operator must sign the batch
-        if batch_tx.operator_sig.is_empty() {
-            return Err(ValidationError::InvalidAuth("MarketplaceBatch: empty operator_sig".into()));
-        }
-        // Weryfikuj podpis Falcon operatora vs canonical batch bytes
-        // settlement_root jest kanonicznym reprezentacją batcha
-        let batch_msg = batch_tx.summary.settlement_root();
-        // Używamy auth[0].signer_pks[0] jako klucza operatora (jeśli dostępny)
+        // Anti-Forging: operator MUSI podpisać settlement_root kluczem Falcon.
+        // Bez podpisu batch jest odrzucany (Zero Trust).
         let operator_pk = tx.core().auth.first()
             .and_then(|a| a.signer_pks.first())
-            .ok_or_else(|| ValidationError::InvalidAuth("MarketplaceBatch: no operator pk in auth".into()))?;
-        if nxms_transport::crypto::falcon_verify(operator_pk, &batch_msg, &batch_tx.operator_sig).is_err() {
-            return Err(ValidationError::InvalidAuth("MarketplaceBatch: invalid operator Falcon signature".into()));
+            .ok_or(ValidationError::MissingOperatorSignature)?;
+        if batch_tx.operator_sig.is_empty() {
+            return Err(ValidationError::MissingOperatorSignature);
         }
+        let batch_msg = batch_tx.summary.settlement_root();
+        nxms_transport::crypto::falcon_verify(operator_pk, &batch_msg, &batch_tx.operator_sig)
+            .map_err(|_| ValidationError::InvalidOperatorSignature)?;
 
         // Explicitly check for MarketplaceBatchTx double-spends
         let mut seen_ticket_nullifiers = BTreeSet::new();
@@ -212,6 +180,37 @@ pub fn validate_transaction(
             }
         }
     } else {
+        // Weryfikacja podpisów Falcon na TxCore.auth (Zero Trust)
+        // v0: brak wymuszenia auth dla prototypu. Docelowo każdy TX musi mieć ważny auth.
+        if !tx.core().auth.is_empty() {
+            let tx_hash = tx.tx_id();
+            for (i, auth) in tx.core().auth.iter().enumerate() {
+                if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
+                    return Err(ValidationError::InvalidAuth(format!(
+                        "auth[{}]: missing signer_pks or signatures", i
+                    )));
+                }
+                if auth.signer_pks.len() != auth.signatures.len() {
+                    return Err(ValidationError::InvalidAuth(format!(
+                        "auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
+                        i, auth.signer_pks.len(), auth.signatures.len()
+                    )));
+                }
+                for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+                    if pk.is_empty() || sig.is_empty() {
+                        return Err(ValidationError::InvalidAuth(format!(
+                            "auth[{}][{}]: empty pk or sig", i, j
+                        )));
+                    }
+                    if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
+                        return Err(ValidationError::InvalidAuth(format!(
+                            "auth[{}][{}]: invalid Falcon signature", i, j
+                        )));
+                    }
+                }
+            }
+        }
+
         let mut seen_inputs = BTreeSet::new();
         for input in tx.inputs() {
             if !seen_inputs.insert(input.note_commit) {
@@ -257,9 +256,9 @@ pub fn validate_block<V: ProofVerifier>(
 ) -> Result<(), ValidationError> {
     // chain_id validation
     if block.header.chain_id != snapshot.chain_id {
-        return Err(ValidationError::InvalidBlockHeight {
-            expected: snapshot.chain_id as u64,
-            actual: block.header.chain_id as u64,
+        return Err(ValidationError::InvalidChainId {
+            expected: snapshot.chain_id,
+            actual: block.header.chain_id,
         });
     }
 
@@ -280,8 +279,9 @@ pub fn validate_block<V: ProofVerifier>(
         });
     }
 
-    // Max block size (approximate via serde_json)
-    let block_size = serde_json::to_vec(block).map(|b| b.len()).unwrap_or(0);
+    // Max block size (canonical bytes — spójne z wire format)
+    use privai_chain::CanonicalEncode;
+    let block_size = block.to_canonical_bytes().len();
     if block_size > epoch_params.max_block_bytes as usize {
         return Err(ValidationError::BlockTooLarge {
             size: block_size,
@@ -401,6 +401,20 @@ mod tests {
     use privai_chain::tx::{MarketplaceBatchTx, TX_TYPE_MARKETPLACE_BATCH};
     use privai_chain::small_payments::SettlementBatchSummary;
 
+    fn test_epoch_params() -> privai_chain::EpochParams {
+        privai_chain::EpochParams {
+            epoch_number: 0,
+            start_height: 0,
+            end_height: 1_000_000,
+            min_validator_stake: 0,
+            min_prover_bond: 0,
+            min_fee: 0,
+            max_block_bytes: 10_000_000,
+            max_block_statements: 100_000,
+            min_proof_coverage: 1,
+        }
+    }
+
     #[test]
     fn ledger_rejects_marketplace_batch_double_spend() {
         let mut ledger =
@@ -425,7 +439,7 @@ mod tests {
             total_refund_amount: 0,
         };
         
-        // Create a valid MarketplaceBatchTx
+        // Create a valid MarketplaceBatchTx (v0: auth puste — brak prawdziwych kluczy Falcon)
         let batch_tx = Transaction::MarketplaceBatch(MarketplaceBatchTx {
             core: TxCore {
                 version: 0,
@@ -435,11 +449,11 @@ mod tests {
                 outputs: vec![],
                 fee: 10,
                 statement_commit: [5; 32],
-                auth: vec![],
+                auth: Vec::new(), // v0: puste auth
             },
             summary: summary.clone(),
             ticket_nullifiers: vec![nullifier1.clone(), nullifier2.clone()],
-            operator_sig: vec![0xff], // just not empty
+            operator_sig: Vec::new(), // v0: puste
         });
 
         // 1. Submit should succeed the first time
@@ -462,11 +476,11 @@ mod tests {
                 outputs: vec![],
                 fee: 10,
                 statement_commit: [6; 32],
-                auth: vec![],
+                auth: Vec::new(), // v0: puste auth
             },
             summary: summary.clone(),
             ticket_nullifiers: vec![nullifier1.clone()], // this one is already spent!
-            operator_sig: vec![0xff],
+            operator_sig: Vec::new(), // v0: puste
         });
 
         // 4. Validation MUST reject this
@@ -514,6 +528,11 @@ mod tests {
         };
         let statement_root = merkle_root(execution_bundle.statement_commits.iter().copied());
 
+        // Oblicz state_root przed tworzeniem bloku
+        let mut temp_snapshot = ledger.snapshot().clone();
+        crate::ledger::apply_transaction_local(&spend_tx, 1, &mut temp_snapshot);
+        let state_root = crate::ledger::compute_state_root(&temp_snapshot);
+
         let block = Block::from_template(BlockTemplate {
             chain_id: 17,
             height: 1,
@@ -524,6 +543,7 @@ mod tests {
             proposer_pk_hash: [1; 32],
             epoch_seed_hash: [2; 32],
             parent_qc_hash: [3; 32],
+            state_root,
             txs: vec![spend_tx.clone()],
             execution_bundle: execution_bundle.clone(),
             proof_certificates: vec![ProofCertificate {
@@ -537,7 +557,7 @@ mod tests {
             extra_receipts: Vec::new(),
         });
 
-        ledger.apply_block(&block, 1).expect("apply block");
+        ledger.apply_block(&block, 1, &test_epoch_params()).expect("apply block");
 
         assert!(matches!(
             ledger.snapshot.notes.get(&funding_note.note_commit).unwrap().status,

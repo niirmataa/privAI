@@ -7,6 +7,9 @@ use privai_chain::{DEFAULT_CHAIN_ID, EpochParams, Hash32};
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorConfig {
     pub pk_hash: Hash32,
+    /// Pełny klucz publiczny Falcon (1793B) — do weryfikacji podpisów.
+    /// Lookup po pk_hash pozwala odzyskać PK z hash.
+    pub sig_pk: Vec<u8>,
     pub stake_weight: u64,
     pub availability: u32,
     pub proof_score: u32,
@@ -66,6 +69,7 @@ impl NodeConfig {
             max_block_txs: 256,
             validators: vec![ValidatorConfig {
                 pk_hash: [7; 32],
+                sig_pk: vec![0; 32], // placeholder — docelowo pełny Falcon PK (1793B)
                 stake_weight: 100,
                 availability: 1,
                 proof_score: 1,

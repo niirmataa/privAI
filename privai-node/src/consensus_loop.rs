@@ -182,8 +182,19 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     eprintln!("[consensus] REJECTED proposal: missing proposer signature (mandatory)");
                     return;
                 }
+                // Lookup pełnego PK z registry (proposer_pk_hash → sig_pk)
+                let proposer_pk = match self.node.config().validators.iter()
+                    .find(|v| v.pk_hash == block.header.proposer_pk_hash)
+                    .map(|v| &v.sig_pk)
+                {
+                    Some(pk) => pk,
+                    None => {
+                        eprintln!("[consensus] REJECTED proposal: unknown proposer pk_hash");
+                        return;
+                    }
+                };
                 if nxms_transport::crypto::falcon_verify(
-                    &block.header.proposer_pk_hash,
+                    proposer_pk,
                     &block.hash(),
                     &proposer_sig,
                 )
@@ -499,7 +510,18 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     eprintln!("[consensus] REJECTED PeersList: missing Falcon signature");
                     return;
                 }
-                if nxms_transport::crypto::falcon_verify(&sender_pk_hash, &peers_bytes, &falcon_sig).is_err() {
+                // Lookup pełnego PK z registry (sender_pk_hash → sig_pk)
+                let sender_pk = match self.node.config().validators.iter()
+                    .find(|v| v.pk_hash == sender_pk_hash)
+                    .map(|v| &v.sig_pk)
+                {
+                    Some(pk) => pk,
+                    None => {
+                        eprintln!("[consensus] REJECTED PeersList: unknown sender pk_hash");
+                        return;
+                    }
+                };
+                if nxms_transport::crypto::falcon_verify(sender_pk, &peers_bytes, &falcon_sig).is_err() {
                     eprintln!("[consensus] REJECTED PeersList: invalid Falcon signature");
                     return;
                 }

@@ -52,6 +52,149 @@ fn make_funding_note(
 }
 
 #[test]
+fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
+    use privai_chain::{BlockTemplate, VoteType, hash::domain_hash};
+    use privai_node::config::ValidatorConfig;
+    use nxms_transport::crypto::{falcon_keygen, falcon_sign_ct_prepared};
+
+    // 1. Setup 3 validatorów z kluczami Falcon
+    let (sk1, pk1) = falcon_keygen().expect("keygen 1");
+    let (sk2, pk2) = falcon_keygen().expect("keygen 2");
+    let (sk3, pk3) = falcon_keygen().expect("keygen 3");
+
+    fn pk_hash(pk: &[u8]) -> privai_chain::Hash32 {
+        domain_hash("privai:falcon-pk:v0", &[pk])
+    }
+
+    let val1 = ValidatorConfig {
+        pk_hash: pk_hash(&pk1),
+        sig_pk: pk1.clone(),
+        stake_weight: 10,
+        availability: 1,
+        proof_score: 1,
+    };
+    let val2 = ValidatorConfig {
+        pk_hash: pk_hash(&pk2),
+        sig_pk: pk2.clone(),
+        stake_weight: 10,
+        availability: 1,
+        proof_score: 1,
+    };
+    let val3 = ValidatorConfig {
+        pk_hash: pk_hash(&pk3),
+        sig_pk: pk3.clone(),
+        stake_weight: 10,
+        availability: 1,
+        proof_score: 1,
+    };
+
+    let mut config = NodeConfig::example();
+    config.validators = vec![val1.clone(), val2.clone(), val3.clone()];
+    // Ustawiamy node 1 jako nasz local node
+    config.node_pk_hash = val1.pk_hash;
+    config.node_sig_pk = pk1.clone();
+    
+    // Create 3 nodes in memory
+    let mut node1 = PrivaiNode::open(config.clone(), MemoryStore::new()).expect("node1");
+    node1 = node1.with_falcon_key(sk1.to_vec());
+    
+    let mut config2 = config.clone();
+    config2.node_pk_hash = val2.pk_hash;
+    config2.node_sig_pk = pk2.clone();
+    let mut node2 = PrivaiNode::open(config2, MemoryStore::new()).expect("node2");
+    node2 = node2.with_falcon_key(sk2.to_vec());
+
+    let mut config3 = config.clone();
+    config3.node_pk_hash = val3.pk_hash;
+    config3.node_sig_pk = pk3.clone();
+    let mut node3 = PrivaiNode::open(config3, MemoryStore::new()).expect("node3");
+    node3 = node3.with_falcon_key(sk3.to_vec());
+
+    // 2. Node 1 proponuje blok
+    let block = node1.propose_block(
+        0, 0, 1000, [0; 32], [0; 32], vec![], vec![]
+    ).expect("propose");
+
+    let template = BlockTemplate {
+        chain_id: block.header.chain_id,
+        height: block.header.height,
+        epoch: block.header.epoch,
+        round: block.header.round,
+        timestamp_ms: block.header.timestamp_ms,
+        prev_block_hash: block.header.prev_block_hash,
+        proposer_pk_hash: block.header.proposer_pk_hash,
+        epoch_seed_hash: block.header.epoch_seed_hash,
+        parent_qc_hash: block.header.parent_qc_hash,
+        state_root: block.header.state_root,
+        txs: block.body.txs.clone(),
+        execution_bundle: block.body.execution_bundle.clone(),
+        proof_certificates: block.body.proof_certificates.clone(),
+        extra_receipts: block.body.extra_receipts.clone(),
+    };
+
+    // 3. Wszyscy głosują PREVOTE (tworzą głos)
+    let vote1_prevote = node1.create_vote_for_proposal(&template).expect("vote1");
+    let vote2_prevote = node2.create_vote_for_proposal(&template).expect("vote2");
+    let vote3_prevote = node3.create_vote_for_proposal(&template).expect("vote3");
+
+    assert_eq!(vote1_prevote.vote_type, VoteType::Prevote);
+
+    // Node 1 zbiera PREVOTE i powinien wygenerować QC gdy osiągnie threshold (2/3 stake = 21, czyli 3 nody po 10 stake = 30 -> 2.01 nodes, więc 3 nody wymagane bo > 2)
+    // Zobaczmy: total stake = 30. (30 * 2) / 3 + 1 = 21. Więc wystarczą 3 głosy po 10 = 30. Ale zaraz, 2 * 10 = 20 < 21. Więc potrzeba 3 głosy.
+    assert!(node1.receive_vote(vote1_prevote).is_none());
+    assert!(node1.receive_vote(vote2_prevote).is_none());
+    
+    let prevote_qc = node1.receive_vote(vote3_prevote).expect("should emit Prevote QC");
+    assert_eq!(prevote_qc.vote_type, VoteType::Prevote);
+    
+    // 4. Nody otrzymują Prevote QC, i wysyłają PRECOMMIT
+    let vote1_precommit = privai_chain::Vote {
+        height: block.header.height,
+        round: block.header.round,
+        block_hash: block.hash(),
+        vote_type: VoteType::Precommit,
+        validator_pk: pk1.clone(),
+        falcon_sig: falcon_sign_ct_prepared(&sk1, &block.hash()).expect("sign"),
+    };
+    
+    let vote2_precommit = privai_chain::Vote {
+        height: block.header.height,
+        round: block.header.round,
+        block_hash: block.hash(),
+        vote_type: VoteType::Precommit,
+        validator_pk: pk2.clone(),
+        falcon_sig: falcon_sign_ct_prepared(&sk2, &block.hash()).expect("sign"),
+    };
+    
+    let vote3_precommit = privai_chain::Vote {
+        height: block.header.height,
+        round: block.header.round,
+        block_hash: block.hash(),
+        vote_type: VoteType::Precommit,
+        validator_pk: pk3.clone(),
+        falcon_sig: falcon_sign_ct_prepared(&sk3, &block.hash()).expect("sign"),
+    };
+
+    // Node 1 zbiera PRECOMMIT i generuje Final QC
+    assert!(node1.receive_vote(vote1_precommit).is_none());
+    assert!(node1.receive_vote(vote2_precommit).is_none());
+    
+    let precommit_qc = node1.receive_vote(vote3_precommit).expect("should emit Precommit QC");
+    assert_eq!(precommit_qc.vote_type, VoteType::Precommit);
+
+    // 5. Finalizacja bloku
+    node1.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
+    node2.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
+    node3.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
+
+    // Weryfikacja: block height powinien wzrosnąć
+    assert_eq!(node1.ledger().snapshot().height, 1);
+    assert_eq!(node2.ledger().snapshot().height, 1);
+    assert_eq!(node3.ledger().snapshot().height, 1);
+    assert_eq!(node1.ledger().snapshot().tip_hash, block.hash());
+}
+
+#[test]
 fn wallet_transfer_proof_and_block_flow_roundtrip() {
     let config = NodeConfig::example();
 

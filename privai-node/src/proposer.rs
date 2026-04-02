@@ -94,12 +94,14 @@ mod tests {
         let validators = vec![
             ValidatorConfig {
                 pk_hash: [1; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 10,
                 availability: 1,
                 proof_score: 1,
             },
             ValidatorConfig {
                 pk_hash: [2; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 90,
                 availability: 1,
                 proof_score: 1,
@@ -144,12 +146,14 @@ mod tests {
         let validators = vec![
             ValidatorConfig {
                 pk_hash: [1; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 50,
                 availability: 1,
                 proof_score: 1,
             },
             ValidatorConfig {
                 pk_hash: [2; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 50,
                 availability: 1,
                 proof_score: 1,
@@ -173,12 +177,14 @@ mod tests {
         let validators = vec![
             ValidatorConfig {
                 pk_hash: [1; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 50,
                 availability: 1,
                 proof_score: 1,
             },
             ValidatorConfig {
                 pk_hash: [2; 32],
+                sig_pk: Vec::new(),
                 stake_weight: 50,
                 availability: 1,
                 proof_score: 1,

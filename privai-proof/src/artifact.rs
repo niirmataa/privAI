@@ -437,6 +437,7 @@ mod tests {
             proposer_pk_hash: [1; 32],
             epoch_seed_hash: [2; 32],
             parent_qc_hash: [3; 32],
+            state_root: [0; 32],
             txs: vec![privai_chain::Transaction::TransferNote(tx)],
             execution_bundle: execution_bundle.clone(),
             proof_certificates: vec![artifact.certificate()],

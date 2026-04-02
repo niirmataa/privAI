@@ -415,7 +415,8 @@ pub async fn run_listener(
 enum WriterMsg {
     /// Wyślij zaszyfrowaną ramkę
     Send(Vec<u8>),
-    /// Zamknij writer task
+    /// Zamknij writer task (będzie używany przy graceful shutdown)
+    #[allow(dead_code)]
     Shutdown,
 }
 
@@ -536,6 +537,7 @@ fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetEr
 }
 
 /// Odszyfrowuje ramkę AES-256-GCM z shared secret (FrodoKEM).
+#[allow(dead_code)] // Używane przy odczycie frame w connection read loop
 fn decrypt_frame(encrypted: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::xchacha20poly1305_decrypt;
 

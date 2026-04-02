@@ -25,6 +25,8 @@ pub enum ValidationError {
     DuplicateOutput(Hash32),
     #[error("block height {actual} does not extend tip {expected}")]
     InvalidBlockHeight { expected: u64, actual: u64 },
+    #[error("chain_id mismatch: expected {expected}, got {actual}")]
+    InvalidChainId { expected: u32, actual: u32 },
     #[error("block prev hash does not match local tip")]
     InvalidParent,
     #[error("block roots do not match body")]
@@ -41,6 +43,12 @@ pub enum ValidationError {
     FeeTooLow { fee: u64, min_fee: u64 },
     #[error("state root mismatch: expected {expected:?}, got {actual:?}")]
     StateRootMismatch { expected: Hash32, actual: Hash32 },
+    #[error("missing operator signature on MarketplaceBatchTx")]
+    MissingOperatorSignature,
+    #[error("invalid operator signature on MarketplaceBatchTx")]
+    InvalidOperatorSignature,
+    #[error("missing auth for transaction (Zero Trust requires Falcon signature)")]
+    MissingAuth,
     #[error(transparent)]
     Proof(#[from] ProofError),
 }
