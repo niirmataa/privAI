@@ -1,4 +1,5 @@
 use thiserror::Error;
+use zeroize::Zeroize;
 
 use std::collections::{HashMap, HashSet, BTreeSet};
 
@@ -65,7 +66,8 @@ pub struct PrivaiNode<
     view_changes: HashMap<u32, BTreeSet<Vec<u8>>>,
 
     // Do generowania odpornych sygnatur (Non-Custodial / Anti-Forging)
-    falcon_sk: Option<Vec<u8>>,
+    // Zeroizing chroni klucz tajny przed odczytem z dumpów pamięci
+    falcon_sk: Option<zeroize::Zeroizing<Vec<u8>>>,
 }
 
 impl<S: LedgerStore> PrivaiNode<S, StructuralProofVerifier, MemoryProofArtifactStore, SidecarProofVerifier> {
@@ -153,7 +155,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     pub fn with_falcon_key(mut self, secret_key: Vec<u8>) -> Self {
-        self.falcon_sk = Some(secret_key);
+        self.falcon_sk = Some(zeroize::Zeroizing::new(secret_key));
         self
     }
 
@@ -196,7 +198,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     }
 
     pub fn falcon_sk(&self) -> Option<&[u8]> {
-        self.falcon_sk.as_deref()
+        self.falcon_sk.as_deref().map(|v| &**v)
     }
 
     pub fn ledger(&self) -> &Ledger<S, V> {

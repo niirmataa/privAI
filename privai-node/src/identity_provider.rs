@@ -1,11 +1,13 @@
 use std::path::Path;
 
+use zeroize::Zeroize;
+
 use crate::node::NodeError;
 
 /// Reprezentuje tożsamość węzła PQC pobraną prosto z nexum-cli vault'a (magazynu w C).
 pub struct PQCIdentity {
     pub falcon_pk: Vec<u8>,   // Załadowane z nexum-cli / vault (T_FALCON_PK)
-    pub falcon_sk: Vec<u8>,   // Klucz tajny dla podpisywania Consensus Vote
+    pub falcon_sk: zeroize::Zeroizing<Vec<u8>>,   // Klucz tajny dla podpisywania Consensus Vote — Zeroize chroni przed memory dump
     pub frodo_prekeys: Vec<Vec<u8>>, // Pula prekey'ów KEM do asynchronicznych DM
 }
 
@@ -57,7 +59,7 @@ impl PQCIdentity {
 
         Ok(Self {
             falcon_pk,
-            falcon_sk,
+            falcon_sk: zeroize::Zeroizing::new(falcon_sk),
             frodo_prekeys,
         })
     }

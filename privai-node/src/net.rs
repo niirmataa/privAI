@@ -5,15 +5,17 @@
 //! - wysyła ConsensusMsg do peerów przez SOCKS5h proxy
 //! - odbiera ConsensusMsg od innych validatorów
 //!
-//! ConnectionPool v2 — Actor pattern per peer + encrypted frames
+//! ConnectionPool v3 — Actor pattern per peer + encrypted frames + backpressure
 //!
 //! Architektura:
 //! - Każdy peer ma dedykowany writer task (wzorzec Actor)
-//! - Wiadomości wrzucane do MPSC channel, writer je serializuje
+//! - Wiadomości wrzucane do BOUNDED MPSC channel (backpressure)
 //! - Frame encryption: AES-256-GCM z FrodoKEM shared secret
 //! - Timeout na całe połączenie (nie tylko na kroki handshake)
+//! - Zeroize na kluczach tajnych (ochrona przed memory dump)
 
 use tokio::sync::mpsc;
+use zeroize::Zeroize;
 
 use nxms_transport::peers::{Peer, PeerBook};
 use nxms_transport::tor_net::{connect_via_tor, read_frame, write_frame, serve};
@@ -126,7 +128,7 @@ pub enum NetError {
 /// 7. Czytaj ConsensusMsg w pętli
 pub async fn run_listener(
     config: NetConfig,
-    msg_tx: mpsc::UnboundedSender<(String, ConsensusMsg)>,
+    msg_tx: mpsc::Sender<(String, ConsensusMsg)>,
     node_kem_pk: Vec<u8>,
     node_sig_pk: Vec<u8>,
     node_sig_sk: Vec<u8>,
@@ -163,7 +165,7 @@ pub async fn run_listener(
             Ok(p) => p,
             Err(_) => {
                 eprintln!("[net] too many incoming connections, rejecting {}", source);
-                drop(stream);
+                 drop(stream);
                 continue;
             }
         };
@@ -347,7 +349,7 @@ pub async fn run_listener(
                         match serde_json::from_slice::<ConsensusMsg>(&data) {
                             Ok(msg) => {
                                 let peer_hint = peer_handshake.peer_id.clone();
-                                if tx.send((peer_hint, msg)).is_err() {
+                                if tx.send((peer_hint, msg)).await.is_err() {
                                     break; // channel zamknięty
                                 }
                             }
@@ -392,10 +394,15 @@ enum WriterMsg {
     Shutdown,
 }
 
+/// Maksymalna głębokość kolejki writer task (backpressure).
+/// Jeśli kanał się zapełni, send_message zwróci błąd.
+const WRITER_CHANNEL_CAPACITY: usize = 64;
+
 /// Metadane pojedynczego połączenia w puli (Actor pattern + encrypted frames).
 pub struct ConnectionMeta {
     /// Kanał do writer task (Actor pattern — zamiast Arc<Mutex<TcpStream>>)
-    writer_tx: mpsc::UnboundedSender<WriterMsg>,
+    /// Bounded channel (backpressure) — chroni przed OOM na wolnych Tor circuits
+    writer_tx: mpsc::Sender<WriterMsg>,
     /// Kiedy połączenie zostało nawiązane (Tor circuit build)
     established_at: Instant,
     /// Kiedy ostatnio wysłaliśmy lub otrzymaliśmy dane
@@ -411,11 +418,12 @@ pub struct ConnectionMeta {
     /// Klucz publiczny Falcon peera (po handshake)
     peer_sig_pk: Option<Vec<u8>>,
     /// Shared secret z FrodoKEM do szyfrowania ramek (AES-256-GCM)
-    shared_secret: Option<[u8; 32]>,
+    /// Zeroizing chroni przed odczytem z dumpów pamięci
+    shared_secret: Option<zeroize::Zeroizing<[u8; 32]>>,
 }
 
 impl ConnectionMeta {
-    fn new(writer_tx: mpsc::UnboundedSender<WriterMsg>) -> Self {
+    fn new(writer_tx: mpsc::Sender<WriterMsg>) -> Self {
         let now = Instant::now();
         Self {
             writer_tx,
@@ -434,7 +442,7 @@ impl ConnectionMeta {
     fn set_peer_keys(&mut self, kem_pk: Vec<u8>, sig_pk: Vec<u8>, shared_secret: [u8; 32]) {
         self.peer_kem_pk = Some(kem_pk);
         self.peer_sig_pk = Some(sig_pk);
-        self.shared_secret = Some(shared_secret);
+        self.shared_secret = Some(zeroize::Zeroizing::new(shared_secret));
         self.handshake_done = true;
     }
 
@@ -695,6 +703,7 @@ impl ConnectionPool {
 
     /// Wysyła zaszyfrowaną wiadomość przez kanał MPSC (Actor pattern).
     /// Wiadomość jest szyfrowana AES-256-GCM z shared secret (FrodoKEM).
+    /// Timeout na send (10s) — chroni przed blokowaniem na pełnym kanale.
     pub async fn send_message<T: Serialize>(
         &self,
         peer: &Peer,
@@ -724,7 +733,7 @@ impl ConnectionPool {
         let (writer_tx, shared_secret) = {
             let conns = self.connections.read().await;
             match conns.get(&peer.id) {
-                Some(meta) => (meta.writer_tx.clone(), meta.shared_secret),
+                Some(meta) => (meta.writer_tx.clone(), meta.shared_secret.clone()),
                 None => {
                     return Err(NetError::Transport(anyhow::anyhow!(
                         "Connection not found after establish for peer {}",
@@ -742,9 +751,14 @@ impl ConnectionPool {
         };
 
         // Wyślij przez kanał MPSC (Actor pattern — brak contention na Mutex)
-        writer_tx.send(WriterMsg::Send(encrypted_data)).map_err(|_| {
-            NetError::Transport(anyhow::anyhow!("Writer task closed for peer {}", peer.id))
-        })?;
+        // Timeout 10s na send — chroni przed blokowaniem na pełnym kanale (bounded channel)
+        tokio::time::timeout(
+            Duration::from_secs(10),
+            writer_tx.send(WriterMsg::Send(encrypted_data)),
+        )
+        .await
+        .map_err(|_| NetError::Transport(anyhow::anyhow!("Writer send timeout for peer {}", peer.id)))?
+        .map_err(|_| NetError::Transport(anyhow::anyhow!("Writer task closed for peer {}", peer.id)))?;
 
         // Aktualizuj metadane
         {
@@ -927,8 +941,9 @@ impl ConnectionPool {
             hash
         };
 
-        // Krok 5: Utwórz kanał MPSC i writer task (Actor pattern)
-        let (writer_tx, mut writer_rx) = mpsc::unbounded_channel::<WriterMsg>();
+        // Krok 5: Utwórz BOUNDED kanał MPSC i writer task (Actor pattern)
+        // Bounded channel (64) zapobiega OOM na wolnych Tor circuits (backpressure)
+        let (writer_tx, mut writer_rx) = mpsc::channel::<WriterMsg>(WRITER_CHANNEL_CAPACITY);
         let (read_half, write_half) = stream.into_split();
 
         // Spawn writer task — dedykowany task do pisania do TcpStream
@@ -950,9 +965,6 @@ impl ConnectionPool {
             }
             eprintln!("[writer] task exiting");
         });
-
-        // Użyj read_half jako stream do czytania
-        let mut stream = read_half;
 
         // Krok 6: Zapisz połączenie z kluczami i kanałem
         let mut meta = ConnectionMeta::new(writer_tx);

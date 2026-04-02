@@ -68,8 +68,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     /// 2. Uruchamia timeout checker (co 1s)
     /// 3. Dispatchuje przychodzące ConsensusMsg
     pub async fn run(&mut self) -> Result<(), ConsensusLoopError> {
-        // Channel na incoming messages
-        let (msg_tx, mut msg_rx) = mpsc::unbounded_channel::<(String, ConsensusMsg)>();
+        // Channel na incoming messages — BOUNDED (256) zapobiega OOM przy floodzie
+        let (msg_tx, mut msg_rx) = mpsc::channel::<(String, ConsensusMsg)>(256);
 
         // Start Tor listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
         let net_config = self.net_config.clone();
@@ -416,6 +416,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     /// Broadcastuje wiadomość do wszystkich peerów — FIRE AND FORGET.
     /// Nie blokuje pętli konsensusu — spawnowanie w tle.
+    ///
+    /// Jeśli broadcast do >1/3 peerów zawiódł, loguje ostrzeżenie o możliwej
+    /// izolacji sieciowej (Tor circuit failure). Węzeł powinien rozważyć
+    /// przejście w tryb ViewChange jeśli sytuacja się powtórzy.
     fn broadcast_msg(&self, msg: ConsensusMsg) {
         let peer_book = self.peer_book.clone();
         let my_id = self.net_config.my_peer_id.clone();
@@ -426,10 +430,23 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
         tokio::spawn(async move {
             let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &sig_pk, &sig_sk).await;
-            for (peer_id, result) in results {
+            let total = results.len();
+            let mut failures = 0usize;
+
+            for (peer_id, result) in &results {
                 if let Err(e) = result {
+                    failures += 1;
                     eprintln!("[consensus] broadcast to {} failed: {}", peer_id, e);
                 }
+            }
+
+            // Jeśli >1/3 peerów niedostępnych — możliwe odcięcie od sieci (Tor circuit failure)
+            if total > 0 && failures > total / 3 {
+                eprintln!(
+                    "[consensus] WARNING: {}/{} broadcasts failed — possible network isolation (Tor circuit failure). \
+                    Node may need ViewChange if this persists.",
+                    failures, total
+                );
             }
         });
     }

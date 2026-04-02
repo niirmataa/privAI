@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 
-use privai_chain::{Hash32, Transaction};
+use privai_chain::{Hash32, Transaction, CanonicalEncode};
 
 /// Maksymalny rozmiar mempoola (liczba transakcji).
 pub const MAX_MEMPOOL_SIZE: usize = 10_000;
@@ -148,6 +148,61 @@ impl Mempool {
     /// Sprawdza czy transakcja jest w mempoolu.
     pub fn contains(&self, tx_hash: &Hash32) -> bool {
         self.by_hash.contains(tx_hash)
+    }
+
+    /// Weryfikuje podpisy Falcon w transakcji (anti-spam, CPU-intensive).
+    ///
+    /// Każdy InputAuth zawiera listę signer_pks i signatures.
+    /// Każdy podpis jest weryfikowany kluczem publicznym nadawcy.
+    ///
+    /// UWAGA: Ta operacja jest kosztowna CPU — powinna być wywoływana
+    /// POZA głównym wątkiem konsensusu (np. w dedykowanym tokio::spawn).
+    ///
+    /// Zwraca true jeśli wszystkie podpisy są ważne, false jeśli którykolwiek jest niepoprawny.
+    pub fn verify_tx_signatures(tx: &Transaction) -> bool {
+        let core = tx.core();
+        let tx_hash = tx.tx_id();
+
+        for (i, auth) in core.auth.iter().enumerate() {
+            if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
+                eprintln!(
+                    "[mempool] tx {:?} auth[{}]: missing signer_pks or signatures",
+                    &tx_hash[..8], i
+                );
+                return false;
+            }
+
+            if auth.signer_pks.len() != auth.signatures.len() {
+                eprintln!(
+                    "[mempool] tx {:?} auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
+                    &tx_hash[..8], i, auth.signer_pks.len(), auth.signatures.len()
+                );
+                return false;
+            }
+
+            // Weryfikuj każdy podpis Falcon
+            for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+                if pk.is_empty() || sig.is_empty() {
+                    eprintln!(
+                        "[mempool] tx {:?} auth[{}][{}]: empty pk or sig",
+                        &tx_hash[..8], i, j
+                    );
+                    return false;
+                }
+
+                // Używamy tx_hash jako wiadomości do weryfikacji
+                // (zgodnie z konwencją: podpis = falcon_sign(sk, tx_hash))
+                if let Err(e) = nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig) {
+                    eprintln!(
+                        "[mempool] tx {:?} auth[{}][{}]: falcon_verify failed: {}",
+                        &tx_hash[..8], i, j, e
+                    );
+                    return false;
+                }
+            }
+        }
+
+        true
     }
 }
 
