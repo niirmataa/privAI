@@ -1,7 +1,7 @@
 [package]
 name = "privai-chain"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 license = "MIT"
 description = "Core chain primitives, canonical formats, and consensus objects for privAI"
 

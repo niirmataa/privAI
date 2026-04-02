@@ -918,4 +918,57 @@ mod tests {
         let result = node.finalize_block_with_qc(&block, &qc);
         assert!(matches!(result, Err(NodeError::QcHashMismatch { .. })));
     }
+
+    #[test]
+    fn qc_signers_and_signatures_are_aligned() {
+        use nxms_transport::crypto::{falcon_keygen, falcon_sign_ct_prepared};
+
+        // Utwórz 3 walidatorów z różnymi PK
+        let (sk1, pk1) = falcon_keygen().expect("keygen 1");
+        let (sk2, pk2) = falcon_keygen().expect("keygen 2");
+        let (sk3, pk3) = falcon_keygen().expect("keygen 3");
+
+        fn test_pk_hash(pk: &[u8]) -> Hash32 {
+            privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[pk])
+        }
+
+        let config = NodeConfig::example();
+        let mut config_modified = config.clone();
+        config_modified.validators = vec![
+            ValidatorConfig { pk_hash: test_pk_hash(&pk1), sig_pk: pk1.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk2), sig_pk: pk2.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+            ValidatorConfig { pk_hash: test_pk_hash(&pk3), sig_pk: pk3.clone(), stake_weight: 1, availability: 100, proof_score: 100 },
+        ];
+
+        let mut node = PrivaiNode::open(config_modified, MemoryStore::new()).expect("node");
+
+        let hash = [0xAA; 32];
+
+        // Wyślij głosy w ODWROTNEJ kolejności sortowania PK (pk3, pk1, pk2)
+        // BTreeMap posortuje je automatycznie (pk1, pk2, pk3)
+        let sig3 = falcon_sign_ct_prepared(&sk3, &hash).expect("sign 3");
+        let sig1 = falcon_sign_ct_prepared(&sk1, &hash).expect("sign 1");
+        let sig2 = falcon_sign_ct_prepared(&sk2, &hash).expect("sign 2");
+
+        let vote3 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Prevote, validator_pk: pk3.clone(), falcon_sig: sig3 };
+        let vote1 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Prevote, validator_pk: pk1.clone(), falcon_sig: sig1 };
+        let vote2 = Vote { height: 1, round: 1, block_hash: hash, vote_type: VoteType::Prevote, validator_pk: pk2.clone(), falcon_sig: sig2 };
+
+        assert!(node.receive_vote(vote3).is_none());
+        assert!(node.receive_vote(vote1).is_none());
+        let qc = node.receive_vote(vote2).expect("should emit QC");
+
+        // Weryfikacja: signers[i] i signatures[i] muszą pasować do tego samego walidatora
+        assert_eq!(qc.signers.len(), 3);
+        assert_eq!(qc.signatures.len(), 3);
+
+        for (i, (signer, sig)) in qc.signers.iter().zip(qc.signatures.iter()).enumerate() {
+            // Każdy signer musi być prawdziwym PK (nie hash)
+            assert!(signer.len() > 32, "signers[{}] should be full Falcon PK, not hash", i);
+
+            // Sprawdź czy podpis weryfikuje się z tym właśnie signerem
+            let verify_result = nxms_transport::crypto::falcon_verify(signer, &hash, sig);
+            assert!(verify_result.is_ok(), "signers[{}] and signatures[{}] mismatch: sig doesn't verify against signer", i, i);
+        }
+    }
 }
