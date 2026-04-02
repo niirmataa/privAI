@@ -20,6 +20,8 @@ pub enum WalletError {
     DuplicateBundle(BundleId),
     #[error("bundle {0:?} is not known to wallet")]
     UnknownBundle(BundleId),
+    #[error("bundle {0:?} has already been used")]
+    BundleAlreadyUsed(BundleId),
     #[error("note {0:?} is already tracked by wallet")]
     DuplicateNote(Hash32),
     #[error("note {0:?} is not known to wallet")]
