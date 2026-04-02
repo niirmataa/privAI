@@ -6,7 +6,7 @@ pub mod state;
 pub mod store;
 pub mod wallet;
 
-pub use builder::{BuiltTransferNote, TransferOutputPlan};
+pub use builder::{BuiltLiteTransferNote, BuiltTransferNote, LiteTransferOutputPlan, TransferOutputPlan};
 pub use error::{WalletError, WalletStoreError};
 pub use state::{
     BundleMatch, BundleStatus, ManagedBundle, OwnedNoteRecord, OwnedNoteStatus, SpendMaterial,

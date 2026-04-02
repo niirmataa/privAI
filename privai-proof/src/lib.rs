@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub use transfer::{
-    TransferBuildError, TransferInputWitness, TransferOutputWitness, TransferProvingData,
-    TransferPublicInputs, TransferStatement, TransferWitness,
+    LiteTransferStatement, TransferBuildError, TransferInputWitness, TransferOutputWitness,
+    TransferProvingData, TransferPublicInputs, TransferStatement, TransferWitness,
 };
 pub use batch::{
     build_execution_bundle_from_transactions, build_execution_bundle_from_transfer_proofs,

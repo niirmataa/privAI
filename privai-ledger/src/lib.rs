@@ -8,4 +8,4 @@ pub use error::{LedgerError, MempoolError, StoreError, ValidationError};
 pub use ledger::{Ledger, compute_state_root, apply_transaction_local};
 pub use mempool::{Mempool, PendingTx};
 pub use state::{LedgerSnapshot, NoteRecord, NoteStatus};
-pub use store::{FileSystemStore, LedgerStore, MemoryStore};
+pub use store::{FileSystemStore, LedgerStore, MemoryStore, RocksDBStore, CF_BLOCKS, CF_LEDGER_STATE, CF_NOTES, CF_NULLIFIERS, CF_QCS, CF_TICKET_NULLIFIERS};

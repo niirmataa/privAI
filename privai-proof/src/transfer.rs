@@ -1,11 +1,13 @@
 use blake3::Hasher;
 use privai_chain::{
-    Amount14, CanonicalEncode, Hash32, Nullifier, RecipientBoxPlaintext, TransferNoteTx,
+    Amount14, CanonicalEncode, Hash32, LiteTransferTx, Nullifier, RecipientBoxPlaintext,
+    TransferNoteTx,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 const TRANSFER_STATEMENT_DOMAIN_V0: &[u8] = b"privai:proof:transfer-statement:v0";
+const LITE_TRANSFER_STATEMENT_DOMAIN_V0: &[u8] = b"privai:proof:lite-transfer-statement:v0";
 const TRANSFER_PUBLIC_INPUTS_DOMAIN_V0: &[u8] = b"privai:proof:transfer-public-inputs:v0";
 const TRANSFER_WITNESS_DOMAIN_V0: &[u8] = b"privai:proof:transfer-witness:v0";
 const PROOF_JOB_ID_DOMAIN_V0: &[u8] = b"privai:proof:job-id:v0";
@@ -30,6 +32,41 @@ impl TransferStatement {
 
     pub fn commitment(&self) -> Hash32 {
         hash_with_domain(TRANSFER_STATEMENT_DOMAIN_V0, &[&self.to_canonical_bytes()])
+    }
+
+    pub fn to_canonical_bytes(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_hash_vec(&mut out, &self.input_note_commits);
+        write_nullifier_vec(&mut out, &self.input_nullifiers);
+        write_hash_vec(&mut out, &self.output_note_commits);
+        write_u64(&mut out, self.fee);
+        out
+    }
+}
+
+/// Statement for LiteTransfer (RPL) transactions.
+/// Structurally identical to TransferStatement but uses a distinct domain tag
+/// so that lite and full-privacy statement commitments are never confused.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteTransferStatement {
+    pub input_note_commits: Vec<Hash32>,
+    pub input_nullifiers: Vec<Nullifier>,
+    pub output_note_commits: Vec<Hash32>,
+    pub fee: u64,
+}
+
+impl LiteTransferStatement {
+    pub fn from_tx(tx: &LiteTransferTx) -> Self {
+        Self {
+            input_note_commits: tx.core.inputs.iter().map(|input| input.note_commit).collect(),
+            input_nullifiers: tx.core.input_nullifiers.clone(),
+            output_note_commits: tx.core.outputs.iter().map(|output| output.note_commit).collect(),
+            fee: tx.core.fee,
+        }
+    }
+
+    pub fn commitment(&self) -> Hash32 {
+        hash_with_domain(LITE_TRANSFER_STATEMENT_DOMAIN_V0, &[&self.to_canonical_bytes()])
     }
 
     pub fn to_canonical_bytes(&self) -> Vec<u8> {

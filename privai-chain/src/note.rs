@@ -365,6 +365,20 @@ impl LiteOutputNote {
         out
     }
 
+    pub fn payload_commit_from_parts(
+        version: u8,
+        spend_policy_commit: &Hash32,
+        amount: u64,
+        aux_commit: &Hash32,
+    ) -> Hash32 {
+        let mut out = Vec::new();
+        write_u8(&mut out, version);
+        write_fixed(&mut out, spend_policy_commit);
+        write_u64(&mut out, amount);
+        write_fixed(&mut out, aux_commit);
+        domain_hash(LITE_NOTE_PAYLOAD_DOMAIN, &[&out])
+    }
+
     pub fn payload_commit(&self) -> Hash32 {
         domain_hash(LITE_NOTE_PAYLOAD_DOMAIN, &[&self.payload_bytes()])
     }

@@ -30,7 +30,7 @@ pub use primitives::{
     LweCiphertextError, Nullifier,
 };
 pub use tx::{
-    InputAuth, InputRef, LiteTransferTx, MarketplaceBatchTx, ModelAction, ModelTx,
+    InputAuth, InputRef, LiteTxCore, LiteTransferTx, MarketplaceBatchTx, ModelAction, ModelTx,
     SettlementPhase, SettlementTx, StakeAction, StakeTx, Transaction, TransferNoteTx, TxCore,
     TX_TYPE_LITE_TRANSFER, TX_TYPE_MARKETPLACE_BATCH, TX_TYPE_MODEL, TX_TYPE_SETTLEMENT,
     TX_TYPE_STAKE, TX_TYPE_TRANSFER_NOTE, TxShapeError,

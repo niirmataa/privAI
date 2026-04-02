@@ -64,6 +64,8 @@ pub enum StoreError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Serde(#[from] serde_json::Error),
+    #[error("rocksdb error: {0}")]
+    RocksDB(String),
 }
 
 #[derive(Debug, Error)]

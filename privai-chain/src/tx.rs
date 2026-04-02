@@ -5,7 +5,7 @@ use crate::canonical::{
     CanonicalEncode, write_fixed, write_i64, write_u8, write_u64, write_vec, write_vec_bytes,
 };
 use crate::hash::{STATEMENT_DOMAIN, TX_DOMAIN, domain_hash};
-use crate::note::OutputNote;
+use crate::note::{LiteOutputNote, OutputNote};
 use crate::primitives::{ContextId, Hash32, Nullifier};
 
 pub const TX_TYPE_TRANSFER_NOTE: u8 = 0x01;
@@ -82,6 +82,44 @@ impl TxCore {
 }
 
 impl CanonicalEncode for TxCore {
+    fn encode(&self, out: &mut Vec<u8>) {
+        write_u8(out, self.version);
+        write_u8(out, self.tx_type);
+        write_vec(out, &self.inputs);
+        write_vec(out, &self.input_nullifiers);
+        write_vec(out, &self.outputs);
+        write_u64(out, self.fee);
+        write_fixed(out, &self.statement_commit);
+        write_vec(out, &self.auth);
+    }
+}
+
+/// TxCore variant for LiteTransfer: outputs are LiteOutputNote (explicit amounts, no LWE ciphertext).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LiteTxCore {
+    pub version: u8,
+    pub tx_type: u8,
+    pub inputs: Vec<InputRef>,
+    pub input_nullifiers: Vec<Nullifier>,
+    pub outputs: Vec<LiteOutputNote>,
+    pub fee: u64,
+    pub statement_commit: Hash32,
+    pub auth: Vec<InputAuth>,
+}
+
+impl LiteTxCore {
+    pub fn validate_shape(&self) -> Result<(), TxShapeError> {
+        if self.inputs.len() != self.input_nullifiers.len() {
+            return Err(TxShapeError::MismatchedInputsAndNullifiers);
+        }
+        if self.auth.len() > self.inputs.len() {
+            return Err(TxShapeError::TooManyAuthEntries);
+        }
+        Ok(())
+    }
+}
+
+impl CanonicalEncode for LiteTxCore {
     fn encode(&self, out: &mut Vec<u8>) {
         write_u8(out, self.version);
         write_u8(out, self.tx_type);
@@ -218,7 +256,7 @@ impl CanonicalEncode for MarketplaceBatchTx {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LiteTransferTx {
-    pub core: TxCore,
+    pub core: LiteTxCore,
 }
 
 impl LiteTransferTx {
@@ -248,6 +286,8 @@ pub enum Transaction {
 }
 
 impl Transaction {
+    /// Returns a reference to the inner TxCore for non-lite transactions.
+    /// Use `lite_core()` for `LiteTransfer` variants.
     pub fn core(&self) -> &TxCore {
         match self {
             Self::TransferNote(tx) => &tx.core,
@@ -255,7 +295,15 @@ impl Transaction {
             Self::Model(tx) => &tx.core,
             Self::Stake(tx) => &tx.core,
             Self::MarketplaceBatch(tx) => &tx.core,
-            Self::LiteTransfer(tx) => &tx.core,
+            Self::LiteTransfer(_) => unreachable!("LiteTransfer uses LiteTxCore; access via lite_core()"),
+        }
+    }
+
+    /// Returns the LiteTxCore for a LiteTransfer transaction, or None otherwise.
+    pub fn lite_core(&self) -> Option<&LiteTxCore> {
+        match self {
+            Self::LiteTransfer(tx) => Some(&tx.core),
+            _ => None,
         }
     }
 
@@ -264,30 +312,55 @@ impl Transaction {
     }
 
     pub fn tx_type(&self) -> u8 {
-        self.core().tx_type
+        match self {
+            Self::LiteTransfer(tx) => tx.core.tx_type,
+            _ => self.core().tx_type,
+        }
     }
 
     pub fn inputs(&self) -> &[InputRef] {
-        &self.core().inputs
+        match self {
+            Self::LiteTransfer(tx) => &tx.core.inputs,
+            _ => &self.core().inputs,
+        }
     }
 
     pub fn input_nullifiers(&self) -> &[Nullifier] {
         match self {
             Self::MarketplaceBatch(tx) => &tx.ticket_nullifiers,
+            Self::LiteTransfer(tx) => &tx.core.input_nullifiers,
             _ => &self.core().input_nullifiers,
         }
     }
 
+    /// Returns OutputNote outputs. Empty for LiteTransfer; use `lite_outputs()` instead.
     pub fn outputs(&self) -> &[OutputNote] {
-        &self.core().outputs
+        match self {
+            Self::LiteTransfer(_) => &[],
+            _ => &self.core().outputs,
+        }
+    }
+
+    /// Returns LiteOutputNote outputs for LiteTransfer. Empty for all other transaction types.
+    pub fn lite_outputs(&self) -> &[LiteOutputNote] {
+        match self {
+            Self::LiteTransfer(tx) => &tx.core.outputs,
+            _ => &[],
+        }
     }
 
     pub fn fee(&self) -> u64 {
-        self.core().fee
+        match self {
+            Self::LiteTransfer(tx) => tx.core.fee,
+            _ => self.core().fee,
+        }
     }
 
     pub fn statement_commit(&self) -> Hash32 {
-        self.core().statement_commit
+        match self {
+            Self::LiteTransfer(tx) => tx.core.statement_commit,
+            _ => self.core().statement_commit,
+        }
     }
 
     pub fn validate_shape(&self) -> Result<(), TxShapeError> {

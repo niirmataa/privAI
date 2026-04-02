@@ -34,6 +34,8 @@ pub enum WalletError {
     TransferArithmeticOverflow,
     #[error("transfer does not balance exactly: available {available}, required {required}")]
     TransferImbalance { available: u64, required: u64 },
+    #[error("lite transfer output amount {0} exceeds Amount14 range (max 16383)")]
+    LiteOutputAmountTooLarge(u64),
     #[error("opened recipient box note payload commitment does not match output note")]
     NotePayloadCommitMismatch,
     #[error("output note commitment no longer matches its contents")]
