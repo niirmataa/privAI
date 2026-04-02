@@ -75,6 +75,10 @@ use crate::small_payments_rail::RailContext;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PersistedWalletSnapshot {
+    #[serde(default)]
+    master_seed_hash: Option<Hash32>,
+    #[serde(default)]
+    next_bundle_index: u64,
     bundles: Vec<PersistedBundleEntry>,
     owned_notes: Vec<PersistedOwnedNoteEntry>,
     #[serde(default)]
@@ -84,6 +88,8 @@ struct PersistedWalletSnapshot {
 impl PersistedWalletSnapshot {
     fn from_snapshot(snapshot: &WalletSnapshot) -> Self {
         Self {
+            master_seed_hash: snapshot.master_seed_hash,
+            next_bundle_index: snapshot.next_bundle_index,
             bundles: snapshot
                 .bundles
                 .iter()
@@ -106,6 +112,8 @@ impl PersistedWalletSnapshot {
 
     fn into_snapshot(self) -> WalletSnapshot {
         WalletSnapshot {
+            master_seed_hash: self.master_seed_hash,
+            next_bundle_index: self.next_bundle_index,
             bundles: self
                 .bundles
                 .into_iter()

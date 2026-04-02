@@ -6,6 +6,7 @@
 //! See: PRIVAI_V0_FORMATS.md
 
 use crate::error::WalletError;
+use crate::keys::WalletKeys;
 use crate::state::{
     BundleMatch, BundleStatus, ManagedBundle, OwnedNoteRecord, OwnedNoteStatus, SpendMaterial,
     WalletSnapshot,
@@ -30,13 +31,45 @@ const RECIPIENT_BOX_KEY_DOMAIN_V0: &[u8] = b"privai:recipient-box:key:v0";
 pub struct PrivaiWallet<S: WalletStore> {
     store: S,
     snapshot: WalletSnapshot,
+    /// Master seed keys — jeśli None, używany jest legacy mode (Keys::generate).
+    wallet_keys: Option<WalletKeys>,
 }
 
 impl<S: WalletStore> PrivaiWallet<S> {
+    /// Otwórz portfel z istniejącego store (legacy mode — brak master seed).
     pub fn open(mut store: S) -> Result<Self, WalletError> {
         let snapshot = store.load()?.unwrap_or_default();
         store.save(&snapshot)?;
-        Ok(Self { store, snapshot })
+        Ok(Self { store, snapshot, wallet_keys: None })
+    }
+
+    /// Otwórz portfel z master seed (v1 — deterministic key derivation).
+    /// 
+    /// Jeśli store jest pusty, seed jest używany do derive wszystkich kluczy.
+    /// Jeśli store ma istniejący seed_hash, jest weryfikowany.
+    pub fn from_master_seed(mut store: S, seed: [u8; 32]) -> Result<Self, WalletError> {
+        let snapshot = store.load()?.unwrap_or_default();
+        let wallet_keys = WalletKeys::from_master_seed(&seed);
+
+        // Weryfikacja: jeśli snapshot ma seed_hash, sprawdź czy pasuje
+        if let Some(existing_hash) = snapshot.master_seed_hash {
+            let new_hash = wallet_keys.master_seed_hash();
+            if existing_hash != new_hash {
+                return Err(WalletError::MasterSeedMismatch);
+            }
+        }
+
+        store.save(&snapshot)?;
+        Ok(Self { store, snapshot, wallet_keys: Some(wallet_keys) })
+    }
+
+    /// Generuj nowy portfel z losowym master seed.
+    pub fn generate(mut store: S) -> Result<Self, WalletError> {
+        let wallet_keys = WalletKeys::generate().map_err(|e| WalletError::Crypto(e))?;
+        let mut snapshot = store.load()?.unwrap_or_default();
+        snapshot.master_seed_hash = Some(wallet_keys.master_seed_hash());
+        store.save(&snapshot)?;
+        Ok(Self { store, snapshot, wallet_keys: Some(wallet_keys) })
     }
 
     pub fn snapshot(&self) -> &WalletSnapshot {
@@ -94,7 +127,17 @@ impl<S: WalletStore> PrivaiWallet<S> {
         flags: u8,
         route_hint: Option<Vec<u8>>,
     ) -> Result<ReceiveBundle, WalletError> {
-        let keys = Keys::generate().map_err(|err| WalletError::Crypto(err.to_string()))?;
+        // v1: użyj WalletKeys jeśli dostępny (deterministic key derivation)
+        // v0: fallback do Keys::generate() (legacy mode)
+        let keys = if let Some(ref wallet_keys) = self.wallet_keys {
+            let index = self.snapshot.next_bundle_index;
+            self.snapshot.next_bundle_index += 1;
+            wallet_keys.derive_bundle_keys(index)
+                .map_err(|e| WalletError::Crypto(e))?
+        } else {
+            Keys::generate().map_err(|err| WalletError::Crypto(err.to_string()))?
+        };
+
         let one_time_falcon_pk = keys
             .sig_pk()
             .map_err(|err| WalletError::Crypto(err.to_string()))?;
@@ -142,6 +185,58 @@ impl<S: WalletStore> PrivaiWallet<S> {
             .ok_or(WalletError::UnknownBundle(bundle_id))?;
         managed.status = status;
         self.flush()
+    }
+
+    /// Uzupełnij pulę bundli do target (v1 — deterministic key derivation).
+    /// 
+    /// Generuje nowe bundle z WalletKeys::derive_bundle_keys(next_bundle_index).
+    /// Każdy bundle ma status Fresh i local_keys.
+    pub fn replenish_bundles(
+        &mut self,
+        target: usize,
+        expires_at: u64,
+        route_hint: Option<Vec<u8>>,
+    ) -> Result<usize, WalletError> {
+        let fresh_count = self.snapshot.bundles.values()
+            .filter(|b| b.status == BundleStatus::Fresh)
+            .count();
+
+        if fresh_count >= target {
+            return Ok(0); // już mamy wystarczająco
+        }
+
+        let needed = target - fresh_count;
+        let mut created = 0;
+
+        for _ in 0..needed {
+            if self.wallet_keys.is_none() {
+                // Legacy mode — nie możemy derive nowych bundli bez WalletKeys
+                break;
+            }
+            self.create_local_bundle(expires_at, 0, route_hint.clone())?;
+            created += 1;
+        }
+
+        Ok(created)
+    }
+
+    /// Oznacz wygasłe bundle jako Revoked.
+    /// 
+    /// Sprawdza `bundle.expires_at < now_ms` dla każdego Fresh/Offered bundle.
+    pub fn revoke_expired(&mut self, now_ms: u64) -> Result<usize, WalletError> {
+        let mut revoked = 0;
+        for managed in self.snapshot.bundles.values_mut() {
+            if (managed.status == BundleStatus::Fresh || managed.status == BundleStatus::Offered)
+                && managed.bundle.expires_at < now_ms
+            {
+                managed.status = BundleStatus::Revoked;
+                revoked += 1;
+            }
+        }
+        if revoked > 0 {
+            self.flush()?;
+        }
+        Ok(revoked)
     }
 
     pub fn scan_output(&self, output: &OutputNote) -> BundleMatch {

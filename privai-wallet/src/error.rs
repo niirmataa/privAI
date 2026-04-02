@@ -58,6 +58,8 @@ pub enum WalletError {
     AuxWitnessMismatch,
     #[error("recipient box crypto error: {0}")]
     Crypto(String),
+    #[error("master seed hash mismatch — wrong seed for this wallet")]
+    MasterSeedMismatch,
     #[error("rail context is missing or not initialized")]
     RailContextMissing,
     #[error(transparent)]

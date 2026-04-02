@@ -58,6 +58,11 @@ pub enum BundleMatch {
 
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 pub struct WalletSnapshot {
+    /// Master seed hash — weryfikacja czy seed pasuje do tego portfela.
+    /// None = legacy mode (v0, brak master seed).
+    pub master_seed_hash: Option<Hash32>,
+    /// Kolejny index bundla do derive (v1 — deterministic key derivation).
+    pub next_bundle_index: u64,
     pub bundles: BTreeMap<BundleId, ManagedBundle>,
     pub owned_notes: BTreeMap<Hash32, OwnedNoteRecord>,
     pub rail_context: Option<RailContext>,
