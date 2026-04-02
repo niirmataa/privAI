@@ -1,3 +1,9 @@
+//! Transaction Builder for privAI.
+//! Role: Constructing valid, balanced TransferNoteTx and SettlementTx.
+//! Privacy Tiers: RecipientPrivacyLite (Explicit Amt), FullPrivacy (LWE Encrypted Amt).
+//! Constraint: Total Input Value == Total Output Value + Fee.
+//! Escalation Rule: Auto-escalate to FullPrivacy for Escrow and high-value transfers.
+
 use crate::error::WalletError;
 use crate::state::{OwnedNoteStatus, SpendMaterial};
 use crate::store::WalletStore;

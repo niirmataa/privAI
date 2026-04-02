@@ -1,3 +1,10 @@
+//! privAI Ledger Implementation.
+//! Role: Core state machine for PC-BFT consensus.
+//! Architecture: UTXO/Note-based.
+//! Validation Policy: Zero Trust. All Falcon signatures and ZK-proofs must be verified.
+//! Scaling Hint: Use `rayon` for parallel signature verification in `validate_block`.
+//! See: spec/marketplace_small_payments_v0/04_RECEIPT_AND_SETTLEMENT_ROOT.md
+
 use std::collections::BTreeSet;
 
 use privai_chain::{Block, Hash32, Transaction};

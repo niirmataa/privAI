@@ -414,6 +414,36 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     sender_pk_hash,
                 );
             }
+
+            ConsensusMsg::Gossip { tx, sender_pk_hash, hops } => {
+                eprintln!(
+                    "[consensus] received gossip tx from {:?} hops={}",
+                    &sender_pk_hash[..8],
+                    hops
+                );
+
+                // Weryfikacja podpisu Falcon PRZED dodaniem do mempoola (Zero Trust)
+                if !self.node.verify_tx_signatures(&tx) {
+                    eprintln!("[consensus] REJECTED gossip tx: invalid Falcon signature");
+                    return;
+                }
+
+                // Dodaj do mempoola
+                if let Err(e) = self.node.submit_transaction(tx.clone(), current_time_ms()) {
+                    eprintln!("[consensus] rejected gossip tx: {}", e);
+                    return;
+                }
+
+                // Propaguj dalej jeśli hops < MAX_GOSSIP_HOPS
+                const MAX_GOSSIP_HOPS: u8 = 5;
+                if hops < MAX_GOSSIP_HOPS {
+                    self.broadcast_msg(ConsensusMsg::Gossip {
+                        tx,
+                        sender_pk_hash,
+                        hops: hops + 1,
+                    });
+                }
+            }
         }
     }
 

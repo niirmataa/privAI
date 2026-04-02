@@ -1,3 +1,10 @@
+//! privAI Wallet Core.
+//! Role: Managing private keys, ReceiveBundles, and Note discovery.
+//! Privacy Tier Logic: Implements Stealth Addresses via `RecipientBox` (KEM/AEAD).
+//! Key Management: Post-Quantum Falcon (Signing) and FrodoKEM (Encapsulation).
+//! Scanning Hint: Matches `RecipientBox.hint` against `snapshot.bundles` for fast filtering.
+//! See: PRIVAI_V0_FORMATS.md
+
 use crate::error::WalletError;
 use crate::state::{
     BundleMatch, BundleStatus, ManagedBundle, OwnedNoteRecord, OwnedNoteStatus, SpendMaterial,

@@ -233,6 +233,12 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         Ok(self.ledger.submit_transaction(tx, received_at_ms)?)
     }
 
+    /// Weryfikuje podpisy Falcon w transakcji (Zero Trust).
+    /// Wrapper na Mempool::verify_tx_signatures dla użycia w consensus_loop.
+    pub fn verify_tx_signatures(&self, tx: &Transaction) -> bool {
+        crate::mempool::Mempool::verify_tx_signatures(tx)
+    }
+
     pub fn create_vote_for_proposal(&mut self, proposal: &BlockTemplate) -> Result<Vote, NodeError> {
         let mut safety = self.ledger_mut().snapshot().consensus_safety.clone();
         

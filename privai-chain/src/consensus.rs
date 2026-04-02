@@ -382,6 +382,14 @@ pub enum ConsensusMsg {
         qcs: Vec<QuorumCertificate>,
         sender_pk_hash: Hash32,
     },
+
+    /// Propagacja transakcji między nodami (gossip).
+    /// Weryfikacja podpisu Falcon odbywa się PRZED dodaniem do mempoola.
+    Gossip {
+        tx: Transaction,
+        sender_pk_hash: Hash32,
+        hops: u8,
+    },
 }
 
 impl ConsensusMsg {
@@ -395,6 +403,7 @@ impl ConsensusMsg {
             Self::Ping { .. } => "ping",
             Self::SyncRequest { .. } => "sync_request",
             Self::SyncResponse { .. } => "sync_response",
+            Self::Gossip { .. } => "gossip",
         }
     }
 
@@ -407,6 +416,7 @@ impl ConsensusMsg {
             Self::Ping { height, .. } => *height,
             Self::SyncRequest { from_height, .. } => *from_height,
             Self::SyncResponse { blocks, .. } => blocks.first().map(|b| b.header.height).unwrap_or(0),
+            Self::Gossip { .. } => 0,
         }
     }
 
@@ -417,7 +427,7 @@ impl ConsensusMsg {
             Self::QuorumCert(qc) => qc.round,
             Self::ViewChange(vc) => vc.new_round,
             Self::Ping { round, .. } => *round,
-            Self::SyncRequest { .. } | Self::SyncResponse { .. } => 0,
+            Self::SyncRequest { .. } | Self::SyncResponse { .. } | Self::Gossip { .. } => 0,
         }
     }
 }
@@ -463,6 +473,12 @@ impl CanonicalEncode for ConsensusMsg {
                 write_vec(out, blocks);
                 write_vec(out, qcs);
                 write_fixed(out, sender_pk_hash);
+            }
+            Self::Gossip { tx, sender_pk_hash, hops } => {
+                write_u8(out, 0x30);
+                tx.encode(out);
+                write_fixed(out, sender_pk_hash);
+                write_u8(out, *hops);
             }
         }
     }
