@@ -269,6 +269,13 @@ impl<S: WalletStore> PrivaiWallet<S> {
             built_outputs.push(note);
         }
 
+        let statement = LiteTransferStatement {
+            input_note_commits: vec![spend.note_commit],
+            input_nullifiers: vec![spend.nullifier],
+            output_note_commits: built_outputs.iter().map(|n| n.note_commit).collect(),
+            fee,
+        };
+
         let tx = LiteTransferTx {
             core: LiteTxCore {
                 version: PRIVAI_V0,
@@ -279,7 +286,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
                 input_nullifiers: vec![spend.nullifier],
                 outputs: built_outputs,
                 fee,
-                statement_commit: [0u8; 32],
+                statement_commit: statement.commitment(),
                 auth,
             },
         };
@@ -453,6 +460,11 @@ mod tests {
         assert_eq!(built.tx.core.fee, 3);
         assert_eq!(built.tx.core.outputs[0].amount, 50);
         assert_eq!(built.tx.core.outputs[1].amount, 24);
+
+        // statement_commit must be a real deterministic commitment, not zeros
+        assert_ne!(built.tx.core.statement_commit, [0u8; 32]);
+        let expected_statement = LiteTransferStatement::from_tx(&built.tx);
+        assert_eq!(built.tx.core.statement_commit, expected_statement.commitment());
     }
 
     #[test]
