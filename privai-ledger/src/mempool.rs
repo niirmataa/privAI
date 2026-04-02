@@ -33,7 +33,7 @@ impl Mempool {
         received_at_ms: u64,
         snapshot: &LedgerSnapshot,
     ) -> Result<Hash32, MempoolError> {
-        validate_transaction(&tx, snapshot)?;
+        validate_transaction(&tx, snapshot, 0)?;
         let tx_id = tx.tx_id();
 
         for input in tx.inputs() {

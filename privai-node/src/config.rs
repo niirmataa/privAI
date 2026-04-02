@@ -58,6 +58,7 @@ impl NodeConfig {
                 end_height: 10_000,
                 min_validator_stake: 1_000,
                 min_prover_bond: 100,
+                min_fee: 1,
                 max_block_bytes: 1_000_000,
                 max_block_statements: 2_048,
                 min_proof_coverage: 1,

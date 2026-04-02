@@ -312,7 +312,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     pub fn import_block(&mut self, block: &Block) -> Result<(), NodeError> {
         self.ledger
-            .apply_block(block, self.config.epoch_params.min_proof_coverage)?;
+            .apply_block(block, self.config.epoch_params.min_proof_coverage, &self.config.epoch_params)?;
         Ok(())
     }
 

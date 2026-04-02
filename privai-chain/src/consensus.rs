@@ -13,6 +13,7 @@ pub struct EpochParams {
     pub end_height: u64,
     pub min_validator_stake: u64,
     pub min_prover_bond: u64,
+    pub min_fee: u64,
     pub max_block_bytes: u32,
     pub max_block_statements: u32,
     pub min_proof_coverage: u32,
@@ -25,6 +26,7 @@ impl CanonicalEncode for EpochParams {
         write_u64(out, self.end_height);
         write_u64(out, self.min_validator_stake);
         write_u64(out, self.min_prover_bond);
+        write_u64(out, self.min_fee);
         write_u32(out, self.max_block_bytes);
         write_u32(out, self.max_block_statements);
         write_u32(out, self.min_proof_coverage);

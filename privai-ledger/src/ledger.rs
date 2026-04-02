@@ -66,8 +66,9 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         &mut self,
         block: &Block,
         min_proof_coverage: u32,
+        epoch_params: &privai_chain::EpochParams,
     ) -> Result<(), LedgerError> {
-        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage)?;
+        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage, epoch_params)?;
 
         for tx in &block.body.txs {
             apply_transaction(tx, block.header.height, &mut self.snapshot)?;
@@ -93,8 +94,17 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
 pub fn validate_transaction(
     tx: &Transaction,
     snapshot: &LedgerSnapshot,
+    min_fee: u64,
 ) -> Result<(), ValidationError> {
     tx.validate_shape()?;
+
+    // Minimum fee enforcement
+    if tx.core().fee < min_fee {
+        return Err(ValidationError::FeeTooLow {
+            fee: tx.core().fee,
+            min_fee,
+        });
+    }
 
     // Weryfikacja podpisów Falcon na TxCore.auth (Zero Trust)
     // Każdy InputAuth musi mieć ważne podpisy — inaczej atakujący może sfałszować Tx.
@@ -193,8 +203,42 @@ pub fn validate_block<V: ProofVerifier>(
     snapshot: &LedgerSnapshot,
     proof_verifier: &V,
     min_proof_coverage: u32,
+    epoch_params: &privai_chain::EpochParams,
 ) -> Result<(), ValidationError> {
+    // chain_id validation
+    if block.header.chain_id != snapshot.chain_id {
+        return Err(ValidationError::InvalidBlockHeight {
+            expected: snapshot.chain_id as u64,
+            actual: block.header.chain_id as u64,
+        });
+    }
+
+    // Epoch transition: block must be within current epoch bounds
     let expected_height = snapshot.height + 1;
+    if expected_height > epoch_params.end_height {
+        return Err(ValidationError::InvalidBlockHeight {
+            expected: epoch_params.end_height,
+            actual: expected_height,
+        });
+    }
+
+    // Max transactions per block
+    if block.body.txs.len() > epoch_params.max_block_statements as usize {
+        return Err(ValidationError::TooManyTransactions {
+            count: block.body.txs.len(),
+            max: epoch_params.max_block_statements as usize,
+        });
+    }
+
+    // Max block size (approximate via serde_json)
+    let block_size = serde_json::to_vec(block).map(|b| b.len()).unwrap_or(0);
+    if block_size > epoch_params.max_block_bytes as usize {
+        return Err(ValidationError::BlockTooLarge {
+            size: block_size,
+            max: epoch_params.max_block_bytes as usize,
+        });
+    }
+
     if block.header.height != expected_height {
         return Err(ValidationError::InvalidBlockHeight {
             expected: expected_height,
@@ -225,7 +269,7 @@ pub fn validate_block<V: ProofVerifier>(
 
     let mut temp = snapshot.clone();
     for tx in &block.body.txs {
-        validate_transaction(tx, &temp)?;
+        validate_transaction(tx, &temp, epoch_params.min_fee)?;
         apply_transaction(tx, block.header.height, &mut temp)?;
     }
 
@@ -340,7 +384,7 @@ mod tests {
         });
 
         // 1. Submit should succeed the first time
-        assert!(validate_transaction(&batch_tx, ledger.snapshot()).is_ok());
+        assert!(validate_transaction(&batch_tx, ledger.snapshot(), 0).is_ok());
         
         // 2. Apply it directly to the ledger snapshot to simulate block inclusion
         apply_transaction(&batch_tx, 1, &mut ledger.snapshot).expect("apply tx");
@@ -367,7 +411,7 @@ mod tests {
         });
 
         // 4. Validation MUST reject this
-        let err = validate_transaction(&replay_tx, ledger.snapshot()).expect_err("should reject double spend");
+        let err = validate_transaction(&replay_tx, ledger.snapshot(), 0).expect_err("should reject double spend");
         assert!(matches!(err, ValidationError::DoubleSpend(_)));
     }
 

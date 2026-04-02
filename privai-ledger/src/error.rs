@@ -33,6 +33,12 @@ pub enum ValidationError {
     InvalidCoveredIndex(u32),
     #[error("invalid auth: {0}")]
     InvalidAuth(String),
+    #[error("block too large: {size} bytes exceeds max {max} bytes")]
+    BlockTooLarge { size: usize, max: usize },
+    #[error("too many transactions: {count} exceeds max {max}")]
+    TooManyTransactions { count: usize, max: usize },
+    #[error("transaction fee too low: {fee} < {min_fee}")]
+    FeeTooLow { fee: u64, min_fee: u64 },
     #[error(transparent)]
     Proof(#[from] ProofError),
 }
