@@ -26,6 +26,8 @@ pub struct ReceiveBundle {
     pub one_time_falcon_pk: Vec<u8>,
     pub one_time_frodo_pk: Vec<u8>,
     pub route_hint: Option<Vec<u8>>,
+    /// W v1 nullifier_key jest wyprowadzany z Nullifier Root odbiorcy
+    pub nullifier_key: Hash32,
 }
 
 impl ReceiveBundle {
@@ -36,6 +38,7 @@ impl ReceiveBundle {
         one_time_falcon_pk: Vec<u8>,
         one_time_frodo_pk: Vec<u8>,
         route_hint: Option<Vec<u8>>,
+        nullifier_key: Hash32,
     ) -> Self {
         Self {
             version: PRIVAI_V0,
@@ -45,6 +48,7 @@ impl ReceiveBundle {
             one_time_falcon_pk,
             one_time_frodo_pk,
             route_hint,
+            nullifier_key,
         }
     }
 
@@ -62,6 +66,7 @@ impl CanonicalEncode for ReceiveBundle {
         write_bytes(out, &self.one_time_falcon_pk);
         write_bytes(out, &self.one_time_frodo_pk);
         write_option_bytes(out, self.route_hint.as_deref());
+        write_fixed(out, &self.nullifier_key);
     }
 }
 

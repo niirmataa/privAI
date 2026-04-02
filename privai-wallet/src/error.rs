@@ -60,6 +60,12 @@ pub enum WalletError {
     Crypto(String),
     #[error("master seed hash mismatch — wrong seed for this wallet")]
     MasterSeedMismatch,
+    /// Krok 6: Weryfikacja NK derivation z KEM shared_secret.
+    /// Zwracany gdy odbiorca wykryje że NK w RecipientBoxPlaintext
+    /// nie pasuje do derive_nullifier_key_from_kem(shared_secret, bundle_id).
+    /// Wskazuje na próbę manipulacji NK przez nadawcę (attack vector: false NK → wrong nullifier).
+    #[error("nullifier key in RecipientBoxPlaintext does not match KEM-derived expected value")]
+    InvalidNullifierKeyDerivation,
     #[error("rail context is missing or not initialized")]
     RailContextMissing,
     #[error(transparent)]

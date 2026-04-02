@@ -47,7 +47,7 @@ fn build_note_for_bundle(bundle: &ReceiveBundle) -> OutputNote {
     let aux_witness =
         AuxWitness::from_canonical_bytes(&opened.aux_opening).expect("aux decode");
     let aux_commit = derive_aux_commit(&aux_witness);
-    let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(bundle, &opened)
+    let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(bundle, &opened)
         .expect("seal recipient box");
 
     OutputNote::new(spend_policy.commitment(), ct_amt, aux_commit, recipient_box)

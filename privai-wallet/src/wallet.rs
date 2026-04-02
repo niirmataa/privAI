@@ -28,6 +28,11 @@ use crate::small_payments_rail::{RailContext, LocalTicket};
 const WALLET_BUNDLE_ID_DOMAIN_V0: &[u8] = b"privai:wallet-bundle-id:v0";
 const RECIPIENT_BOX_KEY_DOMAIN_V0: &[u8] = b"privai:recipient-box:key:v0";
 
+/// Krok 6: Domena KDF do derivacji nullifier_key z KEM shared_secret.
+/// NK = BLAKE3(domain, shared_secret, bundle_id) — bound do ephemeral KEM.
+/// Zapobiega nadawcy wyborowi malicious NK (attack: fake NK → wrong nullifier → unspendable note).
+const NULLIFIER_KEY_FROM_KEM_DOMAIN: &[u8] = b"privai:wallet:nk-from-kem:v0";
+
 pub struct PrivaiWallet<S: WalletStore> {
     store: S,
     snapshot: WalletSnapshot,
@@ -102,6 +107,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
         one_time_falcon_pk: Vec<u8>,
         one_time_frodo_pk: Vec<u8>,
         route_hint: Option<Vec<u8>>,
+        nullifier_key: Hash32,
     ) -> Result<ReceiveBundle, WalletError> {
         let bundle_id = derive_bundle_id(
             expires_at,
@@ -116,6 +122,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
             one_time_falcon_pk,
             one_time_frodo_pk,
             route_hint,
+            nullifier_key,
         );
         self.import_bundle(bundle.clone())?;
         Ok(bundle)
@@ -127,15 +134,27 @@ impl<S: WalletStore> PrivaiWallet<S> {
         flags: u8,
         route_hint: Option<Vec<u8>>,
     ) -> Result<ReceiveBundle, WalletError> {
+        let index = self.snapshot.next_bundle_index;
+        self.snapshot.next_bundle_index += 1;
+
         // v1: użyj WalletKeys jeśli dostępny (deterministic key derivation)
         // v0: fallback do Keys::generate() (legacy mode)
         let keys = if let Some(ref wallet_keys) = self.wallet_keys {
-            let index = self.snapshot.next_bundle_index;
-            self.snapshot.next_bundle_index += 1;
             wallet_keys.derive_bundle_keys(index)
                 .map_err(|e| WalletError::Crypto(e))?
         } else {
             Keys::generate().map_err(|err| WalletError::Crypto(err.to_string()))?
+        };
+
+        // Krok 6: Odbiorca wstawia gotowy nullifier_key do swojego ReceiveBundle
+        // Wyprowadzamy go deterministycznie z indeksu tego bundla (w ten sam sposób co klucze)
+        let nullifier_key = if let Some(ref wallet_keys) = self.wallet_keys {
+            wallet_keys.derive_nullifier_key(index)
+        } else {
+            // v0 fallback: fake nk for legacy wallets without seed
+            let mut fake_nk = [0u8; 32];
+            fake_nk[0] = 0xFF;
+            fake_nk
         };
 
         let one_time_falcon_pk = keys
@@ -158,6 +177,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
             one_time_falcon_pk,
             one_time_frodo_pk,
             route_hint,
+            nullifier_key,
         );
         let bundle_commit = bundle.commitment();
         self.snapshot.bundles.insert(
@@ -356,41 +376,70 @@ impl<S: WalletStore> PrivaiWallet<S> {
         .map_err(|err| WalletError::Crypto(err.to_string()))?;
 
         let opened = RecipientBoxPlaintext::from_canonical_bytes(&plaintext)?;
+
+        // Krok 6: Weryfikuj nullifier_key derivation z KEM shared_secret.
+        // Jeśli NK w plaintext nie pasuje do derive_nullifier_key_from_kem(shared_secret, bundle_id),
+        // nota może być niespendowalna lub pochodzi z manipulowanego sealingu.
+        let expected_nk = derive_nullifier_key_from_kem(&shared_secret, &managed.bundle.bundle_id);
+        if opened.nullifier_key != expected_nk {
+            return Err(WalletError::InvalidNullifierKeyDerivation);
+        }
+
         self.verify_opened_note(note, &opened)?;
         Ok(opened)
     }
 
+    /// Zaszyfruj RecipientBoxPlaintext dla odbiorcy (KEM encaps + AEAD).
+    ///
+    /// Krok 6: Zwraca (RecipientBox, derived_nullifier_key).
+    /// nullifier_key jest DERIVED z KEM shared_secret — nadawca nie może go wybrać.
+    /// Caller NIE powinien ustawiać nullifier_key w `opened` — będzie nadpisany.
+    ///
+    /// TODO(privai:v2): Rozważ NK = BLAKE3(domain, shared_secret, note_commit) dla
+    /// unikalności per nota (obecnie: per KEM encaps — praktycznie unikalny, ale
+    /// teoretycznie można derive bez note_commit przy wielokrotnym seal na ten sam bundle).
     pub fn seal_recipient_box(
         bundle: &ReceiveBundle,
         opened: &RecipientBoxPlaintext,
-    ) -> Result<RecipientBox, WalletError> {
+    ) -> Result<(RecipientBox, Hash32), WalletError> {
         let (kem_ct, shared_secret) =
             kem_encaps(&bundle.one_time_frodo_pk).map_err(|err| WalletError::Crypto(err.to_string()))?;
         let nonce = random_xchacha20poly1305_nonce();
-        let recipient_box = RecipientBox::new(
+        let recipient_box_stub = RecipientBox::new(
             kem_ct,
             nonce,
             Vec::new(),
             [0u8; XCHACHA20POLY1305_TAG_LEN],
             bundle.bundle_id,
         );
-        let key = derive_recipient_box_key(&shared_secret, &recipient_box);
-        let aad = recipient_box_aad(&recipient_box);
+
+        // Krok 6: Derive nullifier_key z KEM shared_secret + bundle_id.
+        // NK jest bound do ephemeral KEM — każdy seal ma inny shared_secret → inny NK.
+        // Odbiorca weryfikuje NK po KEM decaps w open_recipient_box().
+        let derived_nk = derive_nullifier_key_from_kem(&shared_secret, &bundle.bundle_id);
+
+        // Override caller-provided nullifier_key z KEM-derived value.
+        // Caller-provided NK jest ignorowany (może być [0u8; 32] lub cokolwiek).
+        let mut opened_final = opened.clone();
+        opened_final.nullifier_key = derived_nk;
+
+        let key = derive_recipient_box_key(&shared_secret, &recipient_box_stub);
+        let aad = recipient_box_aad(&recipient_box_stub);
         let (ciphertext, tag) = xchacha20poly1305_encrypt(
             &key,
             &nonce,
-            &opened.to_canonical_bytes(),
+            &opened_final.to_canonical_bytes(),
             &aad,
         )
         .map_err(|err| WalletError::Crypto(err.to_string()))?;
 
-        Ok(RecipientBox::new(
-            recipient_box.kem_ct,
+        Ok((RecipientBox::new(
+            recipient_box_stub.kem_ct,
             nonce,
             ciphertext,
             tag,
             bundle.bundle_id,
-        ))
+        ), derived_nk))
     }
 
     pub fn verify_opened_note(
@@ -492,6 +541,25 @@ impl<S: WalletStore> PrivaiWallet<S> {
     }
 }
 
+/// Krok 6: Derive nullifier_key z KEM shared_secret i bundle_id.
+///
+/// NK = BLAKE3(domain, |shared_secret|, shared_secret, |bundle_id|, bundle_id)
+/// Używa len-prefixed hashing (spójnie z resztą wallet.rs).
+///
+/// Właściwości:
+/// - Deterministyczny: ten sam shared_secret + bundle_id → ten sam NK
+/// - Unikalny: shared_secret jest efemeryczny (FrodoKEM encaps) → inny per seal
+/// - Nie do manipulacji: nadawca nie może wybrać NK bez KEM private key odbiorcy
+pub(crate) fn derive_nullifier_key_from_kem(shared_secret: &[u8], bundle_id: &BundleId) -> Hash32 {
+    let mut hasher = blake3::Hasher::new();
+    update_len_prefixed(&mut hasher, NULLIFIER_KEY_FROM_KEM_DOMAIN);
+    update_len_prefixed(&mut hasher, shared_secret);
+    update_len_prefixed(&mut hasher, &bundle_id[..]);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(hasher.finalize().as_bytes());
+    out
+}
+
 fn derive_bundle_id(
     expires_at: u64,
     one_time_falcon_pk: &[u8],
@@ -556,6 +624,7 @@ mod tests {
             vec![1, 2, 3],
             vec![4, 5, 6],
             Some(vec![7, 8]),
+            [0x42; 32],
         )
     }
 
@@ -670,7 +739,8 @@ mod tests {
         );
         let mut opened = opened;
         opened.note_payload_commit = note_payload_commit;
-        let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
+        // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
+        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
             .expect("seal box");
         let note = OutputNote::new(
             spend_policy.commitment(),
@@ -738,7 +808,8 @@ mod tests {
         );
         let mut opened = opened;
         opened.note_payload_commit = note_payload_commit;
-        let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
+        // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
+        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
             .expect("seal box");
         let note = OutputNote::new(
             spend_policy.commitment(),
@@ -795,7 +866,8 @@ mod tests {
         opened_bad.note_payload_commit = [0xAA; 32]; // zły commit
 
         // Seal z opened_bad (z ZŁYM note_payload_commit)
-        let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
+        // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
+        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
             .expect("seal box");
 
         let spend_policy = SpendPolicy::Single {
@@ -807,17 +879,21 @@ mod tests {
         let ct_amt = LweCiphertext::default();
 
         // Note z POPRAWNYM note_payload_commit (different from opened_bad.note_payload_commit)
-        let good_note_payload_commit = OutputNote::payload_commit_from_parts(
+        let _good_note_payload_commit = OutputNote::payload_commit_from_parts(
             PRIVAI_V0,
             &spend_policy.commitment(),
             &ct_amt,
             &aux_commit,
         );
+        // Utwórz recipient_box_bad z użyciem seal_recipient_box i opened_bad
+        let (recipient_box_bad, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
+            .expect("seal box bad");
+
         let note = OutputNote::new(
             spend_policy.commitment(),
             ct_amt,
             aux_commit,
-            recipient_box, // ciphertext z opened_bad (z ZŁYM note_payload_commit)
+            recipient_box_bad, // ciphertext z opened_bad (z ZŁYM note_payload_commit)
         );
 
         // record_opened_note(note, opened_good) - opened_good jest ignorowany
@@ -831,11 +907,11 @@ mod tests {
     fn create_bundle_is_deterministic_for_same_inputs() {
         let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let bundle_a = wallet
-            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]))
+            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]), [0xAA; 32])
             .expect("bundle a");
         let mut wallet_b = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let bundle_b = wallet_b
-            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]))
+            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]), [0xAA; 32])
             .expect("bundle b");
 
         assert_eq!(bundle_a.bundle_id, bundle_b.bundle_id);

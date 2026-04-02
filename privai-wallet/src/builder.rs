@@ -26,7 +26,6 @@ pub struct TransferOutputPlan {
     pub amount: privai_chain::Amount14,
     pub ct_amt: LweCiphertext,
     pub witness_seed: Hash32,
-    pub nullifier_key: Hash32,
     pub spend_policy: SpendPolicy,
     pub noise_class: u8,
     pub sender_memo: Option<Vec<u8>>,
@@ -45,7 +44,6 @@ pub struct LiteTransferOutputPlan {
     pub bundle: ReceiveBundle,
     pub amount: u64,
     pub witness_seed: Hash32,
-    pub nullifier_key: Hash32,
     pub spend_policy: SpendPolicy,
     pub noise_class: u8,
     pub sender_memo: Option<Vec<u8>>,
@@ -123,12 +121,16 @@ impl<S: WalletStore> PrivaiWallet<S> {
                 note_payload_commit,
                 amount: output.amount,
                 witness_seed: output.witness_seed,
-                nullifier_key: output.nullifier_key,
+                nullifier_key: output.bundle.nullifier_key, // Krok 6: z bundla
                 spend_policy_opening: output.spend_policy.to_canonical_bytes(),
                 aux_opening: aux_witness.to_canonical_bytes(),
                 sender_memo: output.sender_memo,
             };
-            let recipient_box = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            // Krok 6: seal_recipient_box derives NK from KEM shared_secret and returns it.
+            // Update recipient_opening with the actual derived NK so proof witness is consistent.
+            let (recipient_box, derived_nk) = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            let mut recipient_opening = recipient_opening;
+            recipient_opening.nullifier_key = derived_nk;
             let note = OutputNote::new(
                 spend_policy_commit,
                 output.ct_amt,
@@ -254,12 +256,13 @@ impl<S: WalletStore> PrivaiWallet<S> {
                 note_payload_commit,
                 amount: amount14,
                 witness_seed: output.witness_seed,
-                nullifier_key: output.nullifier_key,
+                nullifier_key: output.bundle.nullifier_key, // Krok 6: z bundla
                 spend_policy_opening: output.spend_policy.to_canonical_bytes(),
                 aux_opening: aux_witness.to_canonical_bytes(),
                 sender_memo: output.sender_memo,
             };
-            let recipient_box = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            // Krok 6: NK is derived internally by seal_recipient_box; not stored in LiteTransfer proof.
+            let (recipient_box, _derived_nk) = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
             let note = LiteOutputNote::new(
                 output.amount,
                 spend_policy_commit,
@@ -316,7 +319,6 @@ mod tests {
             amount: Amount14::new(amount).expect("amount"),
             ct_amt: LweCiphertext::default(),
             witness_seed: [0x41; 32],
-            nullifier_key: [0x42; 32],
             spend_policy: SpendPolicy::Single {
                 falcon_pk_hash: [0x51; 32],
             },
@@ -360,7 +362,7 @@ mod tests {
             aux_opening: aux_witness.to_canonical_bytes(),
             sender_memo: Some(vec![9]),
         };
-        let recipient_box = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&input_bundle, &opened)
+        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&input_bundle, &opened)
             .expect("seal input box");
         let input_note = OutputNote::new(
             spend_policy.commitment(),
@@ -430,7 +432,6 @@ mod tests {
             bundle,
             amount,
             witness_seed: [0x61; 32],
-            nullifier_key: [0x62; 32],
             spend_policy: SpendPolicy::Single {
                 falcon_pk_hash: [0x71; 32],
             },
