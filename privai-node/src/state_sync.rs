@@ -193,7 +193,20 @@ pub fn handle_sync_response<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSt
     let mut sorted_blocks = blocks;
     sorted_blocks.sort_by_key(|b| b.header.height);
 
+    let mut expected_prev_hash = node.ledger().snapshot().tip_hash;
+
     for block in sorted_blocks {
+        // Weryfikacja chain continuity: prev_hash musi pasować do poprzedniego bloku
+        if block.header.prev_block_hash != expected_prev_hash {
+            eprintln!(
+                "[sync] REJECTED block at height={}: prev_hash mismatch (expected {:?}, got {:?})",
+                block.header.height,
+                &expected_prev_hash[..8],
+                &block.header.prev_block_hash[..8]
+            );
+            continue;
+        }
+
         // Walidacja roots
         if !block.roots_match() {
             eprintln!("[sync] REJECTED block at height={}: roots mismatch", block.header.height);
@@ -201,6 +214,7 @@ pub fn handle_sync_response<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSt
         }
 
         // Import bloku
+        expected_prev_hash = block.hash();
         if let Err(e) = node.import_block(&block) {
             eprintln!(
                 "[sync] failed to import block at height={}: {}",
