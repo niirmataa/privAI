@@ -3,9 +3,11 @@ pub mod consensus_loop;
 pub mod gossip;
 pub mod identity_provider;
 pub mod mempool;
+mod session_impl;
 pub mod net;
 pub mod node;
 pub mod proposer;
+pub mod session_transport;
 pub mod state_sync;
 
 pub use config::{NodeConfig, ValidatorConfig, DEFAULT_CONSENSUS_TIMEOUT_MS};
@@ -14,4 +16,5 @@ pub use gossip::{GossipTxMsg, GOSSIP_FANOUT, MAX_GOSSIP_HOPS};
 pub use mempool::{Mempool, MempoolEntry, MAX_MEMPOOL_SIZE, MAX_TX_AGE_MS};
 pub use net::{NetConfig, NetError};
 pub use node::{NodeError, PrivaiNode};
+pub use session_transport::ValidatorSessionTransport;
 pub use state_sync::{SyncError, MAX_SYNC_BATCH};

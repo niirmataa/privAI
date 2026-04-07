@@ -15,9 +15,10 @@ use nxms_transport::peers::PeerBook;
 use privai_chain::{Hash32, Transaction};
 use privai_chain::hash::domain_hash;
 
+use crate::config::NodeConfig;
 use crate::mempool::{Mempool, MempoolEntry};
-use crate::net::NetConfig;
 use crate::node::PrivaiNode;
+use crate::session_transport::ValidatorSessionTransport;
 use privai_ledger::LedgerStore;
 use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
@@ -48,13 +49,9 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     mempool: &mut Mempool,
     msg: GossipTxMsg,
     peer_book: &PeerBook,
-    net_config: &NetConfig,
+    session_transport: &ValidatorSessionTransport,
     current_time_ms: u64,
-    node_kem_pk: &[u8],
-    node_kem_sk: &[u8],
-    node_sig_pk: &[u8],
-    node_sig_sk: &[u8],
-    node_peer_id: &str,
+    node_config: &NodeConfig,
 ) {
     eprintln!(
         "[gossip] received tx {:?} from {:?} (hops={})",
@@ -110,16 +107,12 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     if msg.hops < MAX_GOSSIP_HOPS {
         propagate_tx(
             peer_book,
-            net_config,
+            session_transport,
             &msg.tx,
             msg.tx_hash,
             msg.sender_pk_hash,
             msg.hops + 1,
-            node_kem_pk,
-            node_kem_sk,
-            node_sig_pk,
-            node_sig_sk,
-            node_peer_id,
+            node_config,
         );
     }
 }
@@ -131,18 +124,14 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
 /// 2. Przy kolejnych: szybki zapis do istniejącego tunelu
 fn propagate_tx(
     peer_book: &PeerBook,
-    net_config: &NetConfig,
+    session_transport: &ValidatorSessionTransport,
     tx: &Transaction,
     tx_hash: Hash32,
     sender_pk_hash: Hash32,
     hops: u8,
-    node_kem_pk: &[u8],
-    node_kem_sk: &[u8],
-    node_sig_pk: &[u8],
-    node_sig_sk: &[u8],
-    node_peer_id: &str,
+    node_config: &NodeConfig,
 ) {
-    let my_id = &net_config.my_peer_id;
+    let my_id = session_transport.my_peer_id();
     let peers = peer_book.others(my_id);
 
     if peers.is_empty() {
@@ -170,15 +159,14 @@ fn propagate_tx(
     for peer in selected {
         let peer = peer.clone();
         let msg = gossip_msg.clone();
-        let pool = net_config.connection_pool.clone();
-        let kem_pk = node_kem_pk.to_vec();
-        let kem_sk = node_kem_sk.to_vec();
-        let sig_pk = node_sig_pk.to_vec();
-        let sig_sk = node_sig_sk.to_vec();
-        let my_id = node_peer_id.to_string();
+        let session_transport = session_transport.clone();
+        let node_config = node_config.clone();
 
         tokio::spawn(async move {
-            if let Err(e) = pool.send_message(&peer, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &my_id).await {
+            if let Err(e) = session_transport
+                .send_message(&peer, &msg, &node_config)
+                .await
+            {
                 eprintln!(
                     "[gossip] failed to propagate tx {:?} to {}: {}",
                     &msg.tx_hash[..8],
@@ -203,13 +191,9 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     mempool: &mut Mempool,
     tx: Transaction,
     peer_book: &PeerBook,
-    net_config: &NetConfig,
+    session_transport: &ValidatorSessionTransport,
     current_time_ms: u64,
-    node_kem_pk: &[u8],
-    node_kem_sk: &[u8],
-    node_sig_pk: &[u8],
-    node_sig_sk: &[u8],
-    node_peer_id: &str,
+    node_config: &NodeConfig,
 ) -> bool {
     let tx_hash = tx.tx_id();
 
@@ -242,16 +226,12 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
     // Gossip do sieci
     propagate_tx(
         peer_book,
-        net_config,
+        session_transport,
         &tx,
         tx_hash,
         sender_pk_hash,
         0, // hops = 0 (pierwsza propagacja)
-        node_kem_pk,
-        node_kem_sk,
-        node_sig_pk,
-        node_sig_sk,
-        node_peer_id,
+        node_config,
     );
 
     true

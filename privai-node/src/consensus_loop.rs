@@ -14,8 +14,9 @@ use tokio::time::{interval, Duration};
 use nxms_transport::peers::PeerBook;
 use privai_chain::{Block, ConsensusMsg, Hash32, VoteType, consensus::PeerInfo};
 
-use crate::net::{self, BanList, NetConfig, NetError, RateLimiter};
+use crate::{NetConfig, NetError};
 use crate::node::{NodeError, PrivaiNode};
+use crate::session_transport::ValidatorSessionTransport;
 use privai_ledger::LedgerStore;
 use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
@@ -28,13 +29,8 @@ where
     P: BlockArtifactVerifier,
 {
     pub node: PrivaiNode<S, V, A, P>,
-    pub net_config: NetConfig,
     pub peer_book: PeerBook,
-    pub connection_pool: net::ConnectionPool,
-    /// Ban list — blokuje złośliwe peerów.
-    pub ban_list: BanList,
-    /// Rate limiter — zapobiega floodowi incoming connections.
-    pub rate_limiter: RateLimiter,
+    pub session_transport: ValidatorSessionTransport,
     /// Cache bloków po hashu — potrzebny do finalizacji po otrzymaniu QC.
     block_cache: HashMap<Hash32, Block>,
     /// Cache QC po block_hash — potrzebny do state sync.
@@ -49,14 +45,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         net_config: NetConfig,
         peer_book: PeerBook,
     ) -> Self {
-        let connection_pool = net::ConnectionPool::new(net_config.tor_socks_url.clone());
+        let session_transport = ValidatorSessionTransport::new(net_config.clone());
         Self {
             node,
-            net_config,
             peer_book,
-            connection_pool,
-            ban_list: BanList::new(),
-            rate_limiter: RateLimiter::new(),
+            session_transport,
             block_cache: HashMap::new(),
             qc_cache: HashMap::new(),
         }
@@ -72,42 +65,14 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let (msg_tx, mut msg_rx) = mpsc::channel::<(String, ConsensusMsg)>(256);
 
         // Start Tor listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
-        let net_config = self.net_config.clone();
-        let kem_pk = self.node.config().node_kem_pk.clone();
-        let kem_sk = self.node.config().node_kem_sk.clone();
-        let sig_pk = self.node.config().node_sig_pk.clone();
-        let sig_sk = self.node.config().node_sig_sk.clone();
-        let peer_id = self.net_config.my_peer_id.clone();
-        let peer_book = self.peer_book.clone();
-        let ban_list = self.ban_list.clone();
-        let rate_limiter = self.rate_limiter.clone();
-        let listener_handle = tokio::spawn(async move {
-            if let Err(e) = net::run_listener(
-                net_config,
-                msg_tx,
-                kem_pk,
-                kem_sk,
-                sig_pk,
-                sig_sk,
-                peer_id,
-                peer_book,
-                ban_list,
-                rate_limiter,
-            )
-            .await
-            {
-                eprintln!("[consensus] listener error: {}", e);
-            }
-        });
+        let listener_handle = self
+            .session_transport
+            .spawn_listener(msg_tx, self.node.config(), self.peer_book.clone());
 
         // Uruchamia pool maintenance — sprawdza health connections co 30s
-        self.connection_pool.spawn_maintenance(
+        self.session_transport.spawn_maintenance(
             self.peer_book.clone(),
-            self.net_config.my_peer_id.clone(),
-            self.node.config().node_kem_pk.clone(),
-            self.node.config().node_kem_sk.clone(),
-            self.node.config().node_sig_pk.clone(),
-            self.node.config().node_sig_sk.clone(),
+            self.node.config(),
         );
 
         // Timeout checker — co 1 sekundę sprawdzamy czy nie przekroczyliśmy limitu
@@ -407,13 +372,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     from_height,
                     to_height,
                     requester_pk_hash,
-                    &self.net_config,
                     &self.peer_book,
-                    &self.connection_pool,
-                    &self.node.config().node_kem_pk,
-                    &self.node.config().node_sig_pk,
-                    &self.node.config().node_sig_sk,
-                    &self.net_config.my_peer_id,
+                    &self.session_transport,
+                    self.node.config(),
                 );
             }
 
@@ -464,7 +425,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
                 // Zbierz informacje o znanych peerach z PeerBook
                 let peers: Vec<PeerInfo> = self.peer_book.peers.iter()
-                    .filter(|peer| peer.id != self.net_config.my_peer_id)
+                            .filter(|peer| peer.id != self.session_transport.my_peer_id())
                     .filter_map(|peer| {
                         use base64::Engine;
                         use base64::engine::general_purpose::STANDARD as B64;
@@ -699,15 +660,13 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     /// przejście w tryb ViewChange jeśli sytuacja się powtórzy.
     fn broadcast_msg(&self, msg: ConsensusMsg) {
         let peer_book = self.peer_book.clone();
-        let my_id = self.net_config.my_peer_id.clone();
-        let pool = self.connection_pool.clone();
-        let kem_pk = self.node.config().node_kem_pk.clone();
-        let kem_sk = self.node.config().node_kem_sk.clone();
-        let sig_pk = self.node.config().node_sig_pk.clone();
-        let sig_sk = self.node.config().node_sig_sk.clone();
+        let session_transport = self.session_transport.clone();
+        let node_config = self.node.config().clone();
 
         tokio::spawn(async move {
-            let results = pool.broadcast_message(&peer_book, &my_id, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk).await;
+            let results = session_transport
+                .broadcast_message(&peer_book, &msg, &node_config)
+                .await;
             let total = results.len();
             let mut failures = 0usize;
 

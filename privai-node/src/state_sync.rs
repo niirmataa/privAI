@@ -8,8 +8,10 @@
 use nxms_transport::peers::PeerBook;
 use privai_chain::{Block, ConsensusMsg, Hash32, QuorumCertificate, VoteType};
 
-use crate::net::{self, NetConfig, NetError};
+use crate::config::NodeConfig;
+use crate::NetError;
 use crate::node::{NodeError, PrivaiNode};
+use crate::session_transport::ValidatorSessionTransport;
 use privai_ledger::LedgerStore;
 use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
@@ -24,14 +26,11 @@ pub const MAX_SYNC_BATCH: u64 = 10;
 pub async fn request_blocks(
     peer_book: &PeerBook,
     my_id: &str,
-    connection_pool: &net::ConnectionPool,
+    session_transport: &ValidatorSessionTransport,
     from_height: u64,
     to_height: u64,
     my_pk_hash: Hash32,
-    node_kem_pk: &[u8],
-    node_kem_sk: &[u8],
-    node_sig_pk: &[u8],
-    node_sig_sk: &[u8],
+    node_config: &NodeConfig,
 ) -> Result<Option<(Vec<Block>, Vec<QuorumCertificate>)>, SyncError> {
     // Wybieramy pierwszego dostępnego peera (oprócz siebie)
     let peer = peer_book
@@ -47,7 +46,8 @@ pub async fn request_blocks(
     };
 
     // Wysyłamy request przez pulę połączeń
-    connection_pool.send_message(peer, &msg, node_kem_pk, node_kem_sk, node_sig_pk, node_sig_sk, my_id)
+    session_transport
+        .send_message(peer, &msg, node_config)
         .await
         .map_err(SyncError::Net)?;
 
@@ -64,13 +64,9 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
     from_height: u64,
     to_height: u64,
     requester_pk_hash: Hash32,
-    _net_config: &NetConfig,
     peer_book: &PeerBook,
-    connection_pool: &net::ConnectionPool,
-    node_kem_pk: &[u8],
-    node_sig_pk: &[u8],
-    node_sig_sk: &[u8],
-    node_peer_id: &str,
+    session_transport: &ValidatorSessionTransport,
+    node_config: &NodeConfig,
 ) {
     let current_height = node.ledger().snapshot().height;
     let from = from_height.min(current_height);
@@ -136,14 +132,13 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
     let target_peer = find_peer_by_pk_hash(peer_book, &requester_pk_hash);
 
     if let Some(peer) = target_peer {
-        let pool = connection_pool.clone();
-        let kem_pk = node_kem_pk.to_vec();
-        let kem_sk = node.config().node_kem_sk.clone();
-        let sig_pk = node_sig_pk.to_vec();
-        let sig_sk = node_sig_sk.to_vec();
-        let peer_id = node_peer_id.to_string();
+        let session_transport = session_transport.clone();
+        let node_config = node_config.clone();
         tokio::spawn(async move {
-            if let Err(e) = pool.send_message(&peer, &response, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &peer_id).await {
+            if let Err(e) = session_transport
+                .send_message(&peer, &response, &node_config)
+                .await
+            {
                 eprintln!("[sync] failed to send SyncResponse to requester: {}", e);
             }
         });
