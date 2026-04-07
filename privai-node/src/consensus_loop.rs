@@ -1,9 +1,9 @@
-//! Główna pętla konsensusu PC-BFT.
+//! Consensus orchestration — główna pętla PC-BFT.
 //!
-//! Łączy:
-//! - Tor listener (odbiera ConsensusMsg)
+//! Odpowiada za dispatch wiadomości i koordynację rund konsensusu.
+//! Używa:
+//! - ValidatorSessionTransport (listener + broadcast)
 //! - PrivaiNode (logika konsensusu)
-//! - Tor broadcast (wysyła odpowiedzi)
 //! - Timeout checker (ViewChange)
 
 use std::collections::HashMap;
@@ -57,14 +57,14 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     /// Uruchamia główną pętlę konsensusu.
     ///
-    /// 1. Startuje Tor listener
+    /// 1. Startuje ValidatorSessionTransport listener
     /// 2. Uruchamia timeout checker (co 1s)
     /// 3. Dispatchuje przychodzące ConsensusMsg
     pub async fn run(&mut self) -> Result<(), ConsensusLoopError> {
         // Channel na incoming messages — BOUNDED (256) zapobiega OOM przy floodzie
         let (msg_tx, mut msg_rx) = mpsc::channel::<(String, ConsensusMsg)>(256);
 
-        // Start Tor listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
+        // Start session listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
         let listener_handle = self
             .session_transport
             .spawn_listener(msg_tx, self.node.config(), self.peer_book.clone());
@@ -88,7 +88,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
         loop {
             tokio::select! {
-                // Incoming message z Tor listenera
+                // Incoming message z session listenera
                 Some((peer_hint, msg)) = msg_rx.recv() => {
                     self.handle_message(peer_hint, msg);
                 }

@@ -1,18 +1,28 @@
-//! Moduł sieciowy P2P dla konsensusu — Tor-only transport.
+//! Concrete implementation of the validator session transport layer.
 //!
-//! Każdy validator:
-//! - nasłuchuje na Tor hidden service (TCP)
-//! - wysyła ConsensusMsg do peerów przez SOCKS5h proxy
-//! - odbiera ConsensusMsg od innych validatorów
+//! This module contains the current in-node implementation of Layer C from
+//! `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`.
+//! It provides the actual validator-session transport used by
+//! `ValidatorSessionTransport`:
+//! - listener for incoming validator-session connections
+//! - `ConnectionPool` for persistent outgoing connections via SOCKS5h proxy
+//! - PQC handshake: FrodoKEM key exchange + Falcon signature (anti-MITM)
+//! - encrypted frames with FrodoKEM-derived shared secret
 //!
-//! ConnectionPool v3 — Actor pattern per peer + encrypted frames + backpressure
+//! Architecture (ConnectionPool v3):
+//! - actor pattern per peer via bounded MPSC writer channels
+//! - backpressure via bounded channels
+//! - automatic connection maintenance (stale/idle detection + reconnection)
+//! - ban list + rate limiter for incoming connection security
+//! - zeroize on secret keys
 //!
-//! Architektura:
-//! - Każdy peer ma dedykowany writer task (wzorzec Actor)
-//! - Wiadomości wrzucane do BOUNDED MPSC channel (backpressure)
-//! - Frame encryption: AES-256-GCM z FrodoKEM shared secret
-//! - Timeout na całe połączenie (nie tylko na kroki handshake)
-//! - Zeroize na kluczach tajnych (ochrona przed memory dump)
+//! Boundary rules:
+//! - this is not the escrow/control-plane packet protocol
+//! - this is not `NXMS/1`, `NXMS/2`, `NxmsEnvelope*`, or `SealedPacket`
+//! - this module moves already-defined `ConsensusMsg` payloads but does not
+//!   define gossip, sync, vote, QC, or retry semantics
+//! - higher layers (`consensus_loop`, `gossip`, `state_sync`) should use
+//!   `ValidatorSessionTransport` instead of depending on these internals
 
 use tokio::sync::mpsc;
 
@@ -570,16 +580,16 @@ fn jitter_max_age(base_age_secs: u64) -> u64 {
     base_age_secs + jitter
 }
 
-/// Menedżer stałych połączeń Tor (Connection Pool v1).
+/// Menedżer stałych połączeń Tor (ConnectionPool, v3 — Actor pattern).
 ///
 /// Zapobiega ciągłemu otwieraniu/zamykaniu socketów i budowaniu
-/// kosztownych Tor circuits przy każdej wiadomości Gossip.
+/// kosztownych Tor circuits przy każdej wiadomości.
 ///
 /// Architektura:
-/// - Każde połączenie ma metadane (wiek, ostatnia aktywność)
+/// - Każde połączenie ma metadane (wiek, ostatnia aktywność, shared secret)
 /// - Tła zadanie "pool maintenance" sprawdza zdrowie połączeń
 /// - Zepsute/stare połączenia są automatycznie przebudowywane
-/// - Semaphore limituje jednoczesne circuit builds (max 3)
+/// - Semaphore limituje jednocześnie circuit builds (max 6)
 #[derive(Clone)]
 pub struct ConnectionPool {
     /// Mapa: PeerId -> metadane połączenia

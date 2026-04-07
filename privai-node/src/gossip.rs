@@ -1,9 +1,9 @@
-//! Gossip Protocol — propagacja transakcji między nodami przez Tor.
+//! Gossip semantics — propagacja transakcji między validatorami.
 //!
-//! Flow:
-//! 1. Użytkownik wysyła Tx do węzła (przez Tor)
+//! Odpowiada za politykę i logikę rozprzestrzeniania Tx:
+//! 1. Użytkownik wysyła Tx do węzła
 //! 2. Węzeł weryfikuje Tx, dodaje do mempoola
-//! 3. Gossip: propaguje Tx do sąsiadów (przez nxms-transport/Tor)
+//! 3. Gossip: propaguje Tx do sąsiadów (przez ValidatorSessionTransport)
 //! 4. Sąsiedzi weryfikują, dodają do swojego mempoola, propagują dalej
 //!
 //! Anti-spam:
@@ -119,9 +119,7 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
 
 /// Propaguje transakcję do losowego subsetu peerów (gossip fanout).
 ///
-/// Każdy spawn wysyła przez ConnectionPool, który:
-/// 1. Przy pierwszym połączeniu: Tor circuit build + FrodoKEM handshake
-/// 2. Przy kolejnych: szybki zapis do istniejącego tunelu
+/// Każdy spawn wysyła jedną wiadomość przez ValidatorSessionTransport.
 fn propagate_tx(
     peer_book: &PeerBook,
     session_transport: &ValidatorSessionTransport,

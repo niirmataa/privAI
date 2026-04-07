@@ -1,3 +1,28 @@
+//! Facade for the validator session transport layer.
+//!
+//! This is the `privai-node` side of the architectural split described in
+//! `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`.
+//! `ValidatorSessionTransport` is the Layer C boundary used by higher-level
+//! modules (`consensus_loop`, `gossip`, `state_sync`) to move `ConsensusMsg`
+//! values over validator sessions without carrying raw session key material
+//! through the rest of the node.
+//!
+//! It wraps the concrete implementation in `session_impl.rs`
+//! (connection pool, PQC handshake, encrypted frames) and exposes a simpler
+//! API that takes `&NodeConfig` instead of raw cryptographic keys.
+//!
+//! Responsibilities:
+//! - spawn and manage the listener for incoming validator-session traffic
+//! - spawn connection-pool maintenance (health checks, reconnection)
+//! - send messages to individual peers (`send_message`)
+//! - broadcast messages to all known peers (`broadcast_message`)
+//!
+//! Non-responsibilities:
+//! - this is not the escrow / mailbox packet protocol
+//! - this is not `NXMS/1`, `NXMS/2`, `NxmsEnvelope*`, or `SealedPacket`
+//! - this is not the consensus overlay itself; gossip/sync/vote semantics
+//!   stay in higher-level modules
+
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;

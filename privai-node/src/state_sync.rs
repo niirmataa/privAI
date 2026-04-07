@@ -1,9 +1,10 @@
-//! State Sync — mechanizm catch-up dla węzłów które były offline.
+//! State sync semantics — mechanizm catch-up dla węzłów które były offline.
 //!
-//! Gdy węzeł wykryje, że jest z tyłu za siecią:
-//! 1. Wysyła SyncRequest do peerów
-//! 2. Odbiera SyncResponse z blokami + QC
-//! 3. Importuje bloki sekwencyjnie i finalizuje z QC
+//! Odpowiada za politykę synchronizacji stanu:
+//! 1. Węzeł wykryje, że jest z tyłu za siecią
+//! 2. Wysyła SyncRequest do peerów (przez ValidatorSessionTransport)
+//! 3. Odbiera SyncResponse z blokami + QC
+//! 4. Importuje bloki sekwencyjnie i finalizuje z QC
 
 use nxms_transport::peers::PeerBook;
 use privai_chain::{Block, ConsensusMsg, Hash32, QuorumCertificate, VoteType};
@@ -17,7 +18,6 @@ use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
 
 /// Maksymalna liczba bloków w jednej odpowiedzi sync.
-/// 10 bloków × ~1MB = ~10MB max payload. Realistyczne dla Tor circuit.
 /// Requester wysyła kolejny SyncRequest jeśli potrzebuje więcej.
 pub const MAX_SYNC_BATCH: u64 = 10;
 
