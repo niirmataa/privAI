@@ -10,7 +10,12 @@ Depends on:
 - `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
 - `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+- `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+- `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+- `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+- `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
 - `spec/PRIVAI_PROOF_BOUNDARIES.md`
+- `spec/PRIVAI_REFERENCE_VECTORS.md`
 
 ## 1. Cel
 
@@ -40,8 +45,13 @@ Jesli wracasz po przerwie, czytaj w tej kolejnosci:
 10. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 11. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
 12. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
-13. `spec/PRIVAI_PROOF_BOUNDARIES.md`
-14. `spec/PRIVAI_REFERENCE_VECTORS.md`
+13. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+14. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+15. `spec/PRIVAI_REFERENCE_VECTORS.md`
+16. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+17. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+18. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+19. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
 
 ## 3. Current system snapshot
 
@@ -101,6 +111,11 @@ Jesli task dotyczy:
 - escrow `2 z 3` / `nexum-core` adaptation: czytaj `PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - potencjalny wklad kryptograficzny / research direction: czytaj `PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
 - transport / session / validator P2P split: czytaj `PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+- current validator session behavior / reconnect / handshake invariants: czytaj `PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+- storage / persistence / restart / recovery work map: czytaj `PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+- current storage invariants (durable / rebuildable / ephemeral): czytaj `PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+- current restart/recovery rules: czytaj `PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+- current `TransferNoteTx` proof semantics: czytaj `PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
 - bit-to-bit outputs: czytaj `PRIVAI_REFERENCE_VECTORS.md`
 - statusu proof i czego nie wolno dopowiadac: czytaj `PRIVAI_PROOF_BOUNDARIES.md`
 - zatwierdzonych decyzji: czytaj `PRIVAI_DECISION_REGISTER.md`

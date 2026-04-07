@@ -12,6 +12,10 @@ Depends on:
 - `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
 - `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+- `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+- `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+- `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+- `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
 - `spec/PRIVAI_REFERENCE_VECTORS.md`
 - `spec/PRIVAI_DECISION_REGISTER.md`
 - `spec/PRIVAI_GAP_REGISTER.md`
@@ -110,6 +114,27 @@ Sluza do zapisania jednego zamrozonego kierunku tam, gdzie potrzebny jest bardzi
    - mapowanie aktualnego kodu na docelowe warstwy,
    - granice API pod refactor P2P.
 
+4. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+   Zakres:
+   - current canonical behavior validator session layer,
+   - handshake / session / reconnect / ban / limiter invariants,
+   - current non-conformities and unresolved gaps,
+   - anty-hallucination boundary for session transport behavior.
+   Status roli:
+   - support doc anti-drift,
+   - nie tworzy nowego rownorzednego source of truth,
+   - rozwija current behavior wynikajacy z transport split i aktualnego kodu.
+
+5. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+   Zakres:
+   - chain/storage follow-up plan,
+   - persistence / restart / recovery checklist,
+   - runtime durability contract to freeze next.
+   Status roli:
+   - support doc anti-drift,
+   - nie tworzy nowego rownorzednego source of truth,
+   - porzadkuje current storage/recovery work przed wejsciem w nowe code changes.
+
 ## 3. Reading Order
 
 Kazdy dev i kazdy agent powinien czytac dokumenty w tej kolejnosci:
@@ -126,8 +151,13 @@ Kazdy dev i kazdy agent powinien czytac dokumenty w tej kolejnosci:
 10. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 11. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
 12. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
-13. `spec/PRIVAI_PROOF_BOUNDARIES.md`
-14. `spec/PRIVAI_REFERENCE_VECTORS.md`
+13. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+14. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+15. `spec/PRIVAI_REFERENCE_VECTORS.md`
+16. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+17. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+18. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+19. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
 
 ## 3.1. Anti-Drift Support Docs
 
@@ -156,6 +186,37 @@ Ponizsze pliki nie zastepuja canonical setu, ale sa obowiazkowymi dokumentami po
    - proof status boundaries,
    - czego nie wolno zakladac dla `OnChainLite`,
    - jak czytac current bytes `ExecutionBundle` i `ProofCertificate`.
+
+5. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+   Zakres:
+   - current validator session behavior,
+   - handshake / reconnect / ban / limiter invariants,
+   - anti-drift guard for test and implementation tasks.
+
+6. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+   Zakres:
+   - storage / restart / recovery work map,
+   - next docs to freeze,
+   - anti-drift guard before storage implementation tasks.
+
+7. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+   Zakres:
+   - current storage behavior mapping (durable / rebuildable / ephemeral),
+   - source of truth dla note status, nullifiers, blocks, tip, QC, safety state,
+   - atomicity groups, current non-conformities, unresolved gaps.
+
+8. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+   Zakres:
+   - current restart/recovery behavior mapping,
+   - startup sequence, tip recovery, safety recovery,
+   - failure model, current non-conformities, unresolved gaps.
+
+9. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
+   Zakres:
+   - current proof-bearing semantics for `TransferNoteTx`,
+   - current statement / public inputs / witness relation,
+   - ledger-vs-proof boundary for the main proof-covered tx class,
+   - anti-drift guard before further proof vectors and proof tests.
 
 ## 4. What Is Not Source Of Truth
 
