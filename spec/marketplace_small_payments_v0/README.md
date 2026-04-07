@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: migration index for marketplace small-payments docs.
+Canonicality: non-canonical. Ten katalog jest pomocniczy do czasu utworzenia finalnego kanonicznego doc marketplace.
+Owner: privAI marketplace payments.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`.
+
 Ten katalog zawiera materialy specyfikacyjne dla lekkiego raila malych platnosci w `privAI v0`.
 
 To nie jest audyt.

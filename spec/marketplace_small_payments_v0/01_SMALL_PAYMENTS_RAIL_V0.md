@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: legacy design rationale retained for migration.
+Canonicality: non-canonical. Ten dokument nie definiuje finalnego systemu samodzielnie.
+Owner: privAI marketplace payments.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`.
+
 ## Small Payments Rail v0
 
 ## 1. Cel

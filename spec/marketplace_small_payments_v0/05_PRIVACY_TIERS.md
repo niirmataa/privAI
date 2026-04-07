@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: migration source for final privacy-tier semantics.
+Canonicality: non-canonical. Do czasu finalnego kanonicznego doc marketplace ten plik nie moze samodzielnie definiowac tierow systemu.
+Owner: privAI product and protocol privacy.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA.md` oraz planowany `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`.
+
 ## Privacy Tiers
 
 ## 1. Cel

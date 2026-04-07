@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: migration source for final marketplace receipt and settlement semantics.
+Canonicality: non-canonical. Ten dokument jest wazny tylko jako material do zlozenia finalnej spec.
+Owner: privAI marketplace payments.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`.
+
 ## Receipt And Settlement Root
 
 ## 1. Cel

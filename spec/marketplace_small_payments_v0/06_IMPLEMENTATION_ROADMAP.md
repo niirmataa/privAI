@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: implementation roadmap retained as execution aid.
+Canonicality: non-canonical. To jest roadmap wdrozeniowy, nie finalne zrodlo prawdy.
+Owner: privAI marketplace implementation.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: finalny implementation alignment i roadmap wynikajacy z canonical final spec set.
+
 ## Implementation Roadmap
 
 ## 1. Cel

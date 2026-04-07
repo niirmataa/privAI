@@ -1,5 +1,11 @@
 # Marketplace Small Payments v0
 
+Status: readiness checkpoint retained for migration.
+Canonicality: non-canonical. To jest dokument przygotowawczy, nie finalne zrodlo prawdy.
+Owner: privAI marketplace payments.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md` oraz finalny implementation alignment.
+
 ## Pre-Implementation Readiness
 
 ## 1. Cel tego dokumentu
