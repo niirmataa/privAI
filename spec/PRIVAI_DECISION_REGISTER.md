@@ -62,6 +62,8 @@ Zamrozona zasada:
 | `DEC-018` | `Frozen` | Escrow `2 z 3` belongs to `FullPrivacy`, not to `OnChainLite` and not to `MarketplaceSmallPaymentsRail`. | Utrzymuje escrow w prawidlowym trust i privacy modelu. | freeze, protocol, consensus, escrow adaptation | no |
 | `DEC-019` | `Frozen` | `nexum-core` is adapted as workflow/control-plane only; Monero multisig execution is not part of the target runtime. | Rozdziela portable orchestration od Monero-specific custody and execution. | escrow adaptation, future integration | no |
 | `DEC-020` | `Frozen` | Escrow `2 z 3` v1 uses separate Falcon signatures checked by ledger threshold rules, without requiring a Monero-style multisig address or aggregated threshold signature. | Stabilizuje techniczny model multisig dla `privAI` v1. | protocol, ledger, escrow adaptation | yes |
+| `DEC-021` | `Frozen` | `nxms-transport` is not the final validator consensus wire protocol; it remains escrow/control-plane transport plus shared primitives. | Zatrzymuje mieszanie packet transportu escrow z validator networking. | transport, p2p, refactor planning | no |
+| `DEC-022` | `Frozen` | Validator P2P requires a separate session transport layer between shared primitives and `privai-node` consensus overlay. | Zamyka docelowy split warstw i zmniejsza ryzyko dalszej duplikacji session logic. | transport, p2p, privai-node | yes |
 
 ## 4. Rules for adding entries
 

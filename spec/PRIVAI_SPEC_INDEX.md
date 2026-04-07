@@ -11,6 +11,7 @@ Depends on:
 - `spec/PRIVAI_CONSENSUS.md`
 - `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
+- `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
 - `spec/PRIVAI_REFERENCE_VECTORS.md`
 - `spec/PRIVAI_DECISION_REGISTER.md`
 - `spec/PRIVAI_GAP_REGISTER.md`
@@ -103,6 +104,12 @@ Sluza do zapisania jednego zamrozonego kierunku tam, gdzie potrzebny jest bardzi
    - po czym wolno rozpoznac przelom kryptograficzny,
    - jak nie mylic autorskiej architektury z nowym prymitywem.
 
+3. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+   Zakres:
+   - rozdzial `nxms-transport`, validator session transport i `privai-node`,
+   - mapowanie aktualnego kodu na docelowe warstwy,
+   - granice API pod refactor P2P.
+
 ## 3. Reading Order
 
 Kazdy dev i kazdy agent powinien czytac dokumenty w tej kolejnosci:
@@ -118,8 +125,9 @@ Kazdy dev i kazdy agent powinien czytac dokumenty w tej kolejnosci:
 9. `spec/PRIVAI_CONSENSUS.md`
 10. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 11. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
-12. `spec/PRIVAI_PROOF_BOUNDARIES.md`
-13. `spec/PRIVAI_REFERENCE_VECTORS.md`
+12. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+13. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+14. `spec/PRIVAI_REFERENCE_VECTORS.md`
 
 ## 3.1. Anti-Drift Support Docs
 

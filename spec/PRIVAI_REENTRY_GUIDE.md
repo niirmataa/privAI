@@ -9,6 +9,7 @@ Depends on:
 - `spec/PRIVAI_GAP_REGISTER.md`
 - `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
+- `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
 - `spec/PRIVAI_PROOF_BOUNDARIES.md`
 
 ## 1. Cel
@@ -38,8 +39,9 @@ Jesli wracasz po przerwie, czytaj w tej kolejnosci:
 9. `spec/PRIVAI_CONSENSUS.md`
 10. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 11. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
-12. `spec/PRIVAI_PROOF_BOUNDARIES.md`
-13. `spec/PRIVAI_REFERENCE_VECTORS.md`
+12. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+13. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+14. `spec/PRIVAI_REFERENCE_VECTORS.md`
 
 ## 3. Current system snapshot
 
@@ -55,6 +57,7 @@ To, co nie jest jeszcze w 100% domkniete, to nie jest kierunek, tylko:
 - proof boundaries,
 - coin-side escrow multisig architecture do dobudowania,
 - obszary z realnym potencjalem na wklad kryptograficzny,
+- split `nxms-transport` / validator session transport / `privai-node`,
 - finalizacja lite raila,
 - finalizacja amount layer.
 
@@ -97,6 +100,7 @@ Jesli task dotyczy:
 - consensus / roots / rail enforcement: czytaj `PRIVAI_CONSENSUS.md`
 - escrow `2 z 3` / `nexum-core` adaptation: czytaj `PRIVAI_ESCROW_2OF3_ADAPTATION.md`
 - potencjalny wklad kryptograficzny / research direction: czytaj `PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
+- transport / session / validator P2P split: czytaj `PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
 - bit-to-bit outputs: czytaj `PRIVAI_REFERENCE_VECTORS.md`
 - statusu proof i czego nie wolno dopowiadac: czytaj `PRIVAI_PROOF_BOUNDARIES.md`
 - zatwierdzonych decyzji: czytaj `PRIVAI_DECISION_REGISTER.md`
