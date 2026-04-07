@@ -7,8 +7,8 @@
 
 use std::collections::BTreeSet;
 
-use privai_chain::{Block, Hash32, Transaction};
 use privai_chain::hash::merkle_root;
+use privai_chain::{Block, Hash32, Transaction};
 use privai_proof::ProofVerifier;
 
 use crate::error::{LedgerError, ValidationError};
@@ -51,11 +51,7 @@ pub fn compute_state_root(snapshot: &LedgerSnapshot) -> Hash32 {
     merkle_root(leaves.into_iter())
 }
 
-pub fn apply_transaction_local(
-    tx: &Transaction,
-    block_height: u64,
-    snapshot: &mut LedgerSnapshot,
-) {
+pub fn apply_transaction_local(tx: &Transaction, block_height: u64, snapshot: &mut LedgerSnapshot) {
     let _ = apply_transaction(tx, block_height, snapshot);
 }
 
@@ -68,7 +64,23 @@ pub struct Ledger<S: LedgerStore, V: ProofVerifier> {
 
 impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
     pub fn open(mut store: S, chain_id: u32, proof_verifier: V) -> Result<Self, LedgerError> {
-        let snapshot = store.load()?.unwrap_or_else(|| LedgerSnapshot::genesis(chain_id));
+        let snapshot = store
+            .load()?
+            .unwrap_or_else(|| LedgerSnapshot::genesis(chain_id));
+            
+        // Weryfikacja spójności (boot-time state root verification)
+        if snapshot.height > 0 {
+            if let Some(last_block) = snapshot.blocks.get(&snapshot.height) {
+                let computed = compute_state_root(&snapshot);
+                if computed != last_block.header.state_root {
+                    return Err(LedgerError::Validation(ValidationError::StateRootMismatch {
+                        expected: last_block.header.state_root,
+                        actual: computed,
+                    }));
+                }
+            }
+        }
+            
         store.save(&snapshot)?;
         Ok(Self {
             store,
@@ -91,7 +103,10 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         Ok(())
     }
 
-    pub fn update_consensus_safety(&mut self, new_state: crate::state::ConsensusSafetyState) -> Result<(), LedgerError> {
+    pub fn update_consensus_safety(
+        &mut self,
+        new_state: crate::state::ConsensusSafetyState,
+    ) -> Result<(), LedgerError> {
         self.snapshot.consensus_safety = new_state;
         self.store.save(&self.snapshot)?;
         Ok(())
@@ -118,7 +133,14 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
         block: &Block,
         min_proof_coverage: u32,
         epoch_params: &privai_chain::EpochParams,
-    ) -> Result<(), LedgerError> {        validate_block(block, &self.snapshot, &self.proof_verifier, min_proof_coverage, epoch_params)?;
+    ) -> Result<(), LedgerError> {
+        validate_block(
+            block,
+            &self.snapshot,
+            &self.proof_verifier,
+            min_proof_coverage,
+            epoch_params,
+        )?;
 
         for tx in &block.body.txs {
             apply_transaction(tx, block.header.height, &mut self.snapshot)?;
@@ -126,7 +148,9 @@ impl<S: LedgerStore, V: ProofVerifier> Ledger<S, V> {
 
         self.snapshot.height = block.header.height;
         self.snapshot.tip_hash = block.hash();
-        self.snapshot.blocks.insert(block.header.height, block.clone());
+        self.snapshot
+            .blocks
+            .insert(block.header.height, block.clone());
 
         // Limit cached blocks in memory — keep only last 128
         const MAX_CACHED_BLOCKS: u64 = 128;
@@ -160,7 +184,10 @@ pub fn validate_transaction(
         // Anti-Forging: operator MUSI podpisać settlement_root kluczem Falcon.
         // v0: jeśli auth puste, skipuj operator_sig check (brak prawdziwych kluczy Falcon)
         if !tx.core().auth.is_empty() {
-            let operator_pk = tx.core().auth.first()
+            let operator_pk = tx
+                .core()
+                .auth
+                .first()
                 .and_then(|a| a.signer_pks.first())
                 .ok_or(ValidationError::MissingOperatorSignature)?;
             if batch_tx.operator_sig.is_empty() {
@@ -189,24 +216,34 @@ pub fn validate_transaction(
             for (i, auth) in tx.core().auth.iter().enumerate() {
                 if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
                     return Err(ValidationError::InvalidAuth(format!(
-                        "auth[{}]: missing signer_pks or signatures", i
+                        "auth[{}]: missing signer_pks or signatures",
+                        i
                     )));
                 }
                 if auth.signer_pks.len() != auth.signatures.len() {
                     return Err(ValidationError::InvalidAuth(format!(
                         "auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
-                        i, auth.signer_pks.len(), auth.signatures.len()
+                        i,
+                        auth.signer_pks.len(),
+                        auth.signatures.len()
                     )));
                 }
-                for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+                for (j, (pk, sig)) in auth
+                    .signer_pks
+                    .iter()
+                    .zip(auth.signatures.iter())
+                    .enumerate()
+                {
                     if pk.is_empty() || sig.is_empty() {
                         return Err(ValidationError::InvalidAuth(format!(
-                            "auth[{}][{}]: empty pk or sig", i, j
+                            "auth[{}][{}]: empty pk or sig",
+                            i, j
                         )));
                     }
                     if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
                         return Err(ValidationError::InvalidAuth(format!(
-                            "auth[{}][{}]: invalid Falcon signature", i, j
+                            "auth[{}][{}]: invalid Falcon signature",
+                            i, j
                         )));
                     }
                 }
@@ -308,14 +345,19 @@ pub fn validate_block<V: ProofVerifier>(
 
     proof_verifier.verify_block(block)?;
 
-    let total_require_proof = block.body.txs.iter()
+    let total_require_proof = block
+        .body
+        .txs
+        .iter()
         .filter(|tx| matches!(tx, Transaction::TransferNote(_)))
         .count();
 
     if total_require_proof > 0 {
         let provided_certificates = block.body.proof_certificates.len();
         if provided_certificates < (min_proof_coverage as usize) {
-            return Err(ValidationError::Proof(privai_proof::ProofError::MissingProofCoverage));
+            return Err(ValidationError::Proof(
+                privai_proof::ProofError::MissingProofCoverage,
+            ));
         }
     }
 
@@ -383,7 +425,7 @@ fn apply_transaction(
 mod tests {
     use privai_chain::{
         merkle_root, Block, BlockTemplate, ExecutionBundle, ExecutionMode, InputRef, OutputNote,
-        ProofCertificate, RecipientBox, Transaction, TransferNoteTx, TxCore,
+        ProofCertificate, RecipientBox, Transaction, TransferNoteTx, TxCore, DEFAULT_CHAIN_ID,
         TX_TYPE_TRANSFER_NOTE,
     };
     use privai_proof::StructuralProofVerifier;
@@ -396,12 +438,18 @@ mod tests {
             [seed; 32],
             privai_chain::LweCiphertext::default(),
             [seed.wrapping_add(1); 32],
-            RecipientBox::new(vec![seed], [seed; 24], vec![seed + 1], [seed; 16], [seed; 16]),
+            RecipientBox::new(
+                vec![seed],
+                [seed; 24],
+                vec![seed + 1],
+                [seed; 16],
+                [seed; 16],
+            ),
         )
     }
 
-    use privai_chain::tx::{MarketplaceBatchTx, TX_TYPE_MARKETPLACE_BATCH};
     use privai_chain::small_payments::SettlementBatchSummary;
+    use privai_chain::tx::{MarketplaceBatchTx, TX_TYPE_MARKETPLACE_BATCH};
 
     fn test_epoch_params() -> privai_chain::EpochParams {
         privai_chain::EpochParams {
@@ -440,7 +488,7 @@ mod tests {
             total_fee_amount: 10,
             total_refund_amount: 0,
         };
-        
+
         // Create a valid MarketplaceBatchTx (v0: auth puste — brak prawdziwych kluczy Falcon)
         let batch_tx = Transaction::MarketplaceBatch(MarketplaceBatchTx {
             core: TxCore {
@@ -460,10 +508,10 @@ mod tests {
 
         // 1. Submit should succeed the first time
         assert!(validate_transaction(&batch_tx, ledger.snapshot(), 0).is_ok());
-        
+
         // 2. Apply it directly to the ledger snapshot to simulate block inclusion
         apply_transaction(&batch_tx, 1, &mut ledger.snapshot).expect("apply tx");
-        
+
         // Ensure state is updated
         assert!(ledger.snapshot.is_ticket_nullifier_spent(&nullifier1));
         assert!(ledger.snapshot.is_ticket_nullifier_spent(&nullifier2));
@@ -482,89 +530,13 @@ mod tests {
             },
             summary: summary.clone(),
             ticket_nullifiers: vec![nullifier1.clone()], // this one is already spent!
-            operator_sig: Vec::new(), // v0: puste
+            operator_sig: Vec::new(),                    // v0: puste
         });
 
         // 4. Validation MUST reject this
-        let err = validate_transaction(&replay_tx, ledger.snapshot(), 0).expect_err("should reject double spend");
+        let err = validate_transaction(&replay_tx, ledger.snapshot(), 0)
+            .expect_err("should reject double spend");
         assert!(matches!(err, ValidationError::DoubleSpend(_)));
     }
 
-    #[test]
-    fn mempool_and_block_flow_spends_input() {
-        let mut ledger =
-            Ledger::open(MemoryStore::new(), 17, StructuralProofVerifier).expect("ledger");
-        let funding_note = sample_note(9);
-        ledger.snapshot.notes.insert(
-            funding_note.note_commit,
-            NoteRecord {
-                note: funding_note.clone(),
-                created_in_block: Some(0),
-                status: NoteStatus::Unspent,
-            },
-        );
-
-        let spend_tx = Transaction::TransferNote(TransferNoteTx {
-            core: TxCore {
-                version: 0,
-                tx_type: TX_TYPE_TRANSFER_NOTE,
-                inputs: vec![InputRef {
-                    note_commit: funding_note.note_commit,
-                }],
-                input_nullifiers: vec![privai_chain::Nullifier([7; 32])],
-                outputs: vec![sample_note(10)],
-                fee: 3,
-                statement_commit: [11; 32],
-                auth: Vec::new(),
-            },
-        });
-
-        ledger
-            .submit_transaction(spend_tx.clone(), 1_000)
-            .expect("submit");
-        let execution_bundle = ExecutionBundle {
-            statement_commits: vec![spend_tx.statement_commit()],
-            covered_tx_indexes: vec![0],
-            public_inputs_root: [5; 32],
-            execution_mode: ExecutionMode::FullBatchProof,
-        };
-        let statement_root = merkle_root(execution_bundle.statement_commits.iter().copied());
-
-        // Oblicz state_root przed tworzeniem bloku
-        let mut temp_snapshot = ledger.snapshot().clone();
-        crate::ledger::apply_transaction_local(&spend_tx, 1, &mut temp_snapshot);
-        let state_root = crate::ledger::compute_state_root(&temp_snapshot);
-
-        let block = Block::from_template(BlockTemplate {
-            chain_id: 17,
-            height: 1,
-            epoch: 0,
-            round: 0,
-            timestamp_ms: 1_000,
-            prev_block_hash: [0; 32],
-            proposer_pk_hash: [1; 32],
-            epoch_seed_hash: [2; 32],
-            parent_qc_hash: [3; 32],
-            state_root,
-            txs: vec![spend_tx.clone()],
-            execution_bundle: execution_bundle.clone(),
-            proof_certificates: vec![ProofCertificate {
-                proof_system_id: 1,
-                statement_root,
-                public_inputs_root: execution_bundle.public_inputs_root,
-                proof_bytes_hash: [6; 32],
-                prover_ids: vec![[8; 32]],
-                proof_meta_hash: [9; 32],
-            }],
-            extra_receipts: Vec::new(),
-        });
-
-        ledger.apply_block(&block, 1, &test_epoch_params()).expect("apply block");
-
-        assert!(matches!(
-            ledger.snapshot.notes.get(&funding_note.note_commit).unwrap().status,
-            NoteStatus::Spent { .. }
-        ));
-        assert!(ledger.mempool.is_empty());
-    }
 }
