@@ -1,5 +1,11 @@
 # privAI Consensus v0
 
+Status: legacy consensus reference in migration.
+Canonicality: non-canonical. Ten dokument nie moze nadpisywac canonical final spec set.
+Owner: privAI consensus.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_CONSENSUS.md`.
+
 ## 1. Cel
 
 Ten dokument opisuje autorski szkic konsensusu dla `privAI`.

@@ -1,5 +1,11 @@
 # privAI v0 Protocol Skeleton
 
+Status: legacy protocol reference in migration.
+Canonicality: non-canonical. Ten dokument nie moze nadpisywac `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Owner: privAI protocol.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_PROTOCOL_CORE.md` oraz `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA.md`.
+
 ## 1. Cel
 
 `privAI` ma byc privacy blockchainem z natywnym coinem do rozliczen w marketplace lokalnych modeli AI.

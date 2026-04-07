@@ -1,5 +1,11 @@
 # privAI v0 Concrete Formats
 
+Status: legacy wire-format reference in migration.
+Canonicality: non-canonical. Do czasu nowego canonical formats doc ten plik jest tylko pomocniczy i nie moze samodzielnie definiowac finalnego wire format.
+Owner: privAI protocol formats.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: planowany `spec/PRIVAI_CANONICAL_FORMATS.md`.
+
 ## 1. Cel dokumentu
 
 Ten dokument zamraza konkretne formaty obiektow i payloadow dla `privAI v0`.

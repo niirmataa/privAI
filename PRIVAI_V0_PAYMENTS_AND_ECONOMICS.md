@@ -1,5 +1,11 @@
 # privAI v0 Payments and Economics
 
+Status: legacy payments and economics reference in migration.
+Canonicality: non-canonical. Ten dokument nie moze nadpisywac finalnych decyzji z `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Owner: privAI product and economics.
+Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
+Superseded by: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA.md` oraz odpowiednie finalne docs kanoniczne.
+
 ## 1. Cel
 
 Ten dokument zamraza produktowo-architektoniczny kierunek dla:
