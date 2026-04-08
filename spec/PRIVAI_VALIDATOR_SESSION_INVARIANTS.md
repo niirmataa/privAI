@@ -71,9 +71,7 @@ Regula interpretacji:
 
 ### Current non-conformity
 
-- listener-side post-handshake receive path nie wykonuje jeszcze jawnego decrypt using the derived shared secret before deserializing `ConsensusMsg`,
-- outgoing handshake path nie weryfikuje jawnie, ze `peer_handshake.peer_id` equals the dialed `Peer.id`,
-- `BanList` currently gates incoming path, not the outgoing dial path.
+- (Usunięto dawne niezgodności: incoming decrypt gap, weryfikacja `peer_id` oraz policy symmetry dla ban list zostały naprawione).
 
 ## 4. Scope And Boundary
 
@@ -114,7 +112,7 @@ Ta warstwa nie obejmuje:
 - `ConnectionPool`
 - `ConnectionMeta`
 - `BanList`
-- `RateLimiter`
+- `ListenerPressureGuard`
 - `run_listener`
 
 ## 6. Handshake Invariants
@@ -144,17 +142,18 @@ Incoming path in `run_listener` zachowuje sie dzis tak:
 
 Outgoing path in `ConnectionPool::establish_connection` zachowuje sie dzis tak:
 
-1. Tor connect ma timeout `30s`,
-2. outgoing side (klient) odbiera najpierw `HandshakeMsg::Challenge` od serwera z timeoutem odczytu `10s`,
-3. klient wysyla `HandshakeMsg::Init` podpisany kluczem Falcon w powiazaniu z nonce serwera, z timeoutem zapisu `10s`,
-4. klient czeka na podpisany `HandshakeMsg::Response` od peera z timeoutem odczytu `10s`,
-5. peer reply musi miec `version = 1` oraz nonce serwera musi byc spojny w transcriptach,
-6. Falcon signature peera musi przejsc verify,
-7. peer handshake musi zawierac `kem_ct_b64`,
-8. shared secret jest derivowany przez `kem_decaps(my_kem_sk, peer_kem_ct)`,
-9. po sukcesie tworzony jest bounded writer channel,
-10. `ConnectionMeta` dostaje peer keys, shared secret i `handshake_done = true`,
-11. dopiero wtedy polaczenie jest zapisywane w `connections`.
+1. Weryfikacja po stronie klienta, czy `Peer.id` znajduje się na liście `BanList` (odrzucenie, jeśli zbanowany),
+2. Tor connect ma timeout `30s`,
+3. outgoing side (klient) odbiera najpierw `HandshakeMsg::Challenge` od serwera z timeoutem odczytu `10s`,
+4. klient wysyla `HandshakeMsg::Init` podpisany kluczem Falcon w powiazaniu z nonce serwera, z timeoutem zapisu `10s`,
+5. klient czeka na podpisany `HandshakeMsg::Response` od peera z timeoutem odczytu `10s`,
+6. peer reply musi miec `version = 1` oraz nonce serwera musi byc spojny w transcriptach,
+7. Falcon signature peera musi przejsc verify,
+8. peer handshake musi zawierac `kem_ct_b64`,
+9. shared secret jest derivowany przez `kem_decaps(my_kem_sk, peer_kem_ct)`,
+10. po sukcesie tworzony jest bounded writer channel,
+11. `ConnectionMeta` dostaje peer keys, shared secret, ustawia `tx_seq = 0` i `handshake_done = true`,
+12. dopiero wtedy polaczenie jest zapisywane w `connections`.
 
 ### 6.4. Unresolved
 
@@ -164,7 +163,7 @@ Outgoing path in `ConnectionPool::establish_connection` zachowuje sie dzis tak:
 
 ### 6.5. Current non-conformities
 
-(Usunięto dawne niezgodności: incoming decrypt gap oraz weryfikacja `peer_id` zostały naprawione w modelu `Challenge -> Init -> Response`).
+(Usunięto dawne niezgodności: incoming decrypt gap, weryfikacja `peer_id` oraz policy symmetry dla ban list zostały naprawione).
 
 ## 7. Session Establishment And Active Session Rules
 
@@ -255,7 +254,7 @@ Maintenance tick today:
 
 ### 10.2. Current non-conformity
 
-- outgoing dial path does not currently consult `BanList` before connect / handshake.
+- (Brak w obszarze Ban List – polityka jest obecnie symetryczna na wejściu i wyjściu).
 
 ## 11. Rate Limiting Rules
 
@@ -303,7 +302,7 @@ Maintenance tick today:
 ### 13.1. Current canonical
 
 - `send_message` serializes `msg` as JSON bytes,
-- po udanym handshake validator session frames musza byc szyfrowane,
+- po udanym handshake validator session frames musza byc szyfrowane (zawieraja `seq` jako AAD chroniące przed powtórzeniami),
 - brak `shared_secret` po `handshake_done == true` jest stanem niepoprawnym i nalezy go traktowac jako transport error / rebuild-required state,
 - current outgoing path encrypts the frame before enqueue because active pooled sessions store a derived `shared_secret`,
 - `broadcast_message` spawns one task per target peer and returns a vector of per-peer results,
@@ -380,7 +379,7 @@ Validator session layer does not own:
 
 ### 17.1. Current non-conformities
 
-- outgoing path does not consult `BanList` before connect.
+- (Brak dawnych niezgodności w zakresie BanList lub decrypt gap).
 
 ### 17.2. Most important unresolved gaps
 
@@ -415,5 +414,4 @@ Ponizsze testy powinny istniec jako minimalny regression pack dla current valida
 - ban list reject,
 - rate limit reject,
 - stale connection rebuild,
-- queue timeout path,
-- incoming decrypt gap currently unresolved.
+- queue timeout path.

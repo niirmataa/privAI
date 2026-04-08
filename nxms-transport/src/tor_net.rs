@@ -4,8 +4,8 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
-pub const DEFAULT_FRAME_MAX_LEN: usize = 24 * 1024 * 1024;
-pub const ABSOLUTE_FRAME_MAX_LEN: usize = 64 * 1024 * 1024;
+pub const DEFAULT_FRAME_MAX_LEN: usize = 1024 * 1024;
+pub const ABSOLUTE_FRAME_MAX_LEN: usize = 8 * 1024 * 1024;
 const DEFAULT_TOR_CONNECT_TIMEOUT_SECS: u64 = 20;
 const MAX_TOR_CONNECT_TIMEOUT_SECS: u64 = 300;
 const DEFAULT_TOR_READ_TIMEOUT_SECS: u64 = 30;

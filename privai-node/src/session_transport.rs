@@ -31,24 +31,27 @@ use nxms_transport::peers::{Peer, PeerBook};
 use privai_chain::ConsensusMsg;
 
 use crate::config::NodeConfig;
-use crate::net::{self, BanList, ConnectionPool, NetConfig, NetError, RateLimiter};
+use crate::net::{self, BanList, ConnectionPool, NetConfig, NetError, ListenerPressureGuard, HandshakeCooldown};
 
 #[derive(Clone)]
 pub struct ValidatorSessionTransport {
     net_config: NetConfig,
     connection_pool: ConnectionPool,
     ban_list: BanList,
-    rate_limiter: RateLimiter,
+    pressure_guard: ListenerPressureGuard,
+    handshake_cooldown: HandshakeCooldown,
 }
 
 impl ValidatorSessionTransport {
     pub fn new(net_config: NetConfig) -> Self {
-        let connection_pool = ConnectionPool::new(net_config.tor_socks_url.clone());
+        let ban_list = BanList::new();
+        let connection_pool = ConnectionPool::new(net_config.tor_socks_url.clone(), ban_list.clone());
         Self {
             net_config,
             connection_pool,
-            ban_list: BanList::new(),
-            rate_limiter: RateLimiter::new(),
+            ban_list,
+            pressure_guard: ListenerPressureGuard::new(),
+            handshake_cooldown: HandshakeCooldown::new(),
         }
     }
 
@@ -61,7 +64,20 @@ impl ValidatorSessionTransport {
         msg_tx: mpsc::Sender<(String, ConsensusMsg)>,
         node_config: &NodeConfig,
         peer_book: PeerBook,
-    ) -> JoinHandle<()> {
+    ) -> Result<JoinHandle<()>, NetError> {
+        let is_placeholder = |k: &[u8]| k.is_empty() || k.iter().all(|&b| b == 0);
+
+        if is_placeholder(&node_config.node_kem_pk)
+            || is_placeholder(&node_config.node_kem_sk)
+            || is_placeholder(&node_config.node_sig_pk)
+            || is_placeholder(&node_config.node_sig_sk)
+        {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "CRITICAL: ValidatorSessionTransport cannot start with placeholder / zero transport keys. \
+                 Ensure PQC Identity (vault) is loaded or explicitly disable this guard in test mode."
+            )));
+        }
+
         let net_config = self.net_config.clone();
         let kem_pk = node_config.node_kem_pk.clone();
         let kem_sk = node_config.node_kem_sk.clone();
@@ -69,9 +85,10 @@ impl ValidatorSessionTransport {
         let sig_sk = node_config.node_sig_sk.clone();
         let peer_id = self.net_config.my_peer_id.clone();
         let ban_list = self.ban_list.clone();
-        let rate_limiter = self.rate_limiter.clone();
+        let pressure_guard = self.pressure_guard.clone();
+        let handshake_cooldown = self.handshake_cooldown.clone();
 
-        tokio::spawn(async move {
+        Ok(tokio::spawn(async move {
             if let Err(e) = net::run_listener(
                 net_config,
                 msg_tx,
@@ -82,13 +99,14 @@ impl ValidatorSessionTransport {
                 peer_id,
                 peer_book,
                 ban_list,
-                rate_limiter,
+                pressure_guard,
+                handshake_cooldown,
             )
             .await
             {
                 eprintln!("[session] listener error: {}", e);
             }
-        })
+        }))
     }
 
     pub fn spawn_maintenance(&self, peer_book: PeerBook, node_config: &NodeConfig) {

@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use privai_chain::{DEFAULT_CHAIN_ID, EpochParams, Hash32};
+use privai_chain::{EpochParams, Hash32, DEFAULT_CHAIN_ID};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidatorConfig {
@@ -84,6 +84,7 @@ impl NodeConfig {
 
     pub fn load(path: impl AsRef<Path>) -> Result<Self, std::io::Error> {
         let contents = std::fs::read_to_string(path)?;
-        toml::from_str(&contents).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+        toml::from_str(&contents)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
     }
 }

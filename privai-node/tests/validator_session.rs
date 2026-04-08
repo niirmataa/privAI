@@ -17,7 +17,7 @@ use base64::Engine;
 use nxms_transport::crypto;
 use nxms_transport::peers::{Peer, PeerBook};
 use privai_node::net::{
-    BanList, ConnectionPool, ConnectionPoolConfig, HandshakeMsg, NetConfig, RateLimiter,
+    BanList, ConnectionPool, ConnectionPoolConfig, HandshakeMsg, NetConfig, ListenerPressureGuard, HandshakeCooldown,
 };
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -152,7 +152,7 @@ async fn start_test_listener_on_port(
     port: u16,
     peer_book: PeerBook,
     ban_list: BanList,
-    rate_limiter: RateLimiter,
+    pressure_guard: ListenerPressureGuard,
     keys: &TestKeys,
     peer_id: &str,
 ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
@@ -185,7 +185,8 @@ async fn start_test_listener_on_port(
             pid,
             peer_book,
             ban_list,
-            rate_limiter,
+            pressure_guard,
+            HandshakeCooldown::new(),
         )
         .await;
         if let Err(e) = result {
@@ -306,12 +307,12 @@ async fn ban_list_cleanup_preserves_active_bans() {
 }
 
 // ===========================================================================
-// 2. RateLimiter — current canonical behavior (§11.1)
+// 2. ListenerPressureGuard — current canonical behavior (§11.1)
 // ===========================================================================
 
 #[tokio::test]
 async fn rate_limit_allows_within_limit() {
-    let limiter = RateLimiter::new();
+    let limiter = ListenerPressureGuard::new();
     let source = "192.168.1.1:9050";
 
     // MAX_CONNECTIONS_PER_SOURCE = 5, first 5 should pass
@@ -326,7 +327,7 @@ async fn rate_limit_allows_within_limit() {
 
 #[tokio::test]
 async fn rate_limit_rejects_over_limit() {
-    let limiter = RateLimiter::new();
+    let limiter = ListenerPressureGuard::new();
     let source = "192.168.1.2:9050";
 
     // Consume all 5 allowed connections
@@ -349,7 +350,7 @@ async fn rate_limit_rejects_over_limit() {
 
 #[tokio::test]
 async fn rate_limit_independent_sources() {
-    let limiter = RateLimiter::new();
+    let limiter = ListenerPressureGuard::new();
 
     // Each source (keyed by full addr string) has its own counter
     for _ in 0..5 {
@@ -376,7 +377,7 @@ async fn rate_limit_independent_sources() {
 // simulating multiple connections from the SAME source address, which is not
 // feasible with standard TCP sockets in tests.
 //
-// The direct RateLimiter::check tests above cover the limiter logic accurately.
+// The direct ListenerPressureGuard::check tests above cover the limiter logic accurately.
 
 // ===========================================================================
 // 3. HandshakeMsg — signing and verification
@@ -489,7 +490,7 @@ async fn listener_handshake_accept_known_peer() {
         19001,
         peer_book,
         BanList::new(),
-        RateLimiter::new(),
+        ListenerPressureGuard::new(),
         &node_keys,
         "node-1",
     )
@@ -508,8 +509,8 @@ async fn listener_handshake_accept_known_peer() {
 
 #[tokio::test]
 async fn listener_handshake_reject_unknown_peer() {
-    // Current canonical (§6.2 step 7): peer_id must exist in PeerBook,
-    // else connection is dropped and peer is banned.
+    // Current canonical (§6.2 step 6): peer_id must exist in PeerBook,
+    // else connection is dropped (but peer is NOT banned before auth to prevent poisoning).
     let node_keys = TestKeys::generate();
     let peer_keys = TestKeys::generate();
 
@@ -519,7 +520,7 @@ async fn listener_handshake_reject_unknown_peer() {
         19002,
         peer_book,
         BanList::new(),
-        RateLimiter::new(),
+        ListenerPressureGuard::new(),
         &node_keys,
         "node-1",
     )
@@ -557,7 +558,7 @@ async fn listener_handshake_reject_wrong_version() {
         19003,
         peer_book,
         BanList::new(),
-        RateLimiter::new(),
+        ListenerPressureGuard::new(),
         &node_keys,
         "node-1",
     )
@@ -577,8 +578,8 @@ async fn listener_handshake_reject_wrong_version() {
 
 #[tokio::test]
 async fn listener_handshake_reject_bad_falcon_signature() {
-    // Current canonical (§6.2 step 8): bad Falcon sig → peer is banned
-    // and connection dropped.
+    // Current canonical (§6.2 step 7): bad Falcon sig → connection dropped
+    // (peer is NOT banned before auth to prevent poisoning).
     let node_keys = TestKeys::generate();
     let peer_keys = TestKeys::generate();
 
@@ -598,7 +599,7 @@ async fn listener_handshake_reject_bad_falcon_signature() {
         19004,
         peer_book,
         ban_list.clone(),
-        RateLimiter::new(),
+        ListenerPressureGuard::new(),
         &node_keys,
         "node-1",
     )
@@ -648,7 +649,7 @@ async fn listener_handshake_reject_banned_peer() {
         19005,
         peer_book,
         ban_list,
-        RateLimiter::new(),
+        ListenerPressureGuard::new(),
         &node_keys,
         "node-1",
     )
@@ -674,7 +675,8 @@ async fn connection_pool_send_to_unreachable_returns_error() {
     //
     // This test verifies the error path, not the stale rebuild path specifically.
     // Full stale rebuild testing requires a working Tor proxy.
-    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string());
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
 
     let peer = Peer {
         id: "unreachable-peer".to_string(),
@@ -708,7 +710,8 @@ async fn connection_pool_send_to_unreachable_returns_error() {
 
 #[tokio::test]
 async fn connection_pool_stats_initial() {
-    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string());
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
     let stats = pool.stats().await;
     assert_eq!(stats.total_connections, 0);
     assert_eq!(stats.total_messages_sent, 0);
@@ -753,7 +756,8 @@ async fn bounded_channel_backpressure_does_not_panic() {
 async fn broadcast_returns_per_peer_results() {
     // Current canonical (§13.1): broadcast_message spawns one task per peer
     // and returns a vector of per-peer results. Best-effort, no atomic success.
-    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string());
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
     let peer_book = PeerBook { peers: vec![] };
     let keys = TestKeys::generate();
     let msg = serde_json::json!({"broadcast": true});
@@ -780,7 +784,8 @@ async fn broadcast_returns_per_peer_results() {
 async fn broadcast_does_not_panic_on_unreachable_peers() {
     // Current canonical (§13.1): broadcast is best-effort, returns per-peer
     // errors. Does not panic or deadlock on unreachable peers.
-    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string());
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
     let peer_book = PeerBook {
         peers: vec![Peer {
             id: "unreachable-1".to_string(),
@@ -813,28 +818,15 @@ async fn broadcast_does_not_panic_on_unreachable_peers() {
 }
 
 // ===========================================================================
-// 8. Current non-conformity: incoming decrypt gap (§6.5, §17.1)
+// 8. Resolved non-conformity: incoming decrypt gap (§6.5, §17.1)
 // ===========================================================================
 
 #[test]
-fn incoming_decrypt_gap_is_current_non_conformity() {
-    // Regression note (spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md §6.5, §17.1):
-    //
-    //   "incoming path currently discards the derived shared secret and therefore
-    //    cannot perform session decrypt before ConsensusMsg deserialize"
-    //
-    // Evidence in session_impl.rs:
-    //   - Line ~143: `_node_kem_sk` is prefixed with underscore (unused in listener)
-    //   - Line ~310: FrodoKEM encap produces `_kem_shared_secret` (unused)
-    //   - Line ~370: message loop reads raw `read_frame` data and does
-    //     `serde_json::from_slice::<ConsensusMsg>(&data)` — no decrypt step
-    //   - `decrypt_frame` function exists but is `#[allow(dead_code)]`
-    //
-    // This test is a compile-time regression marker. If someone removes
-    // `decrypt_frame` or changes the listener to decrypt, this comment must
-    // be updated to reflect the new behavior.
-    //
-    // Do NOT "fix" this non-conformity without a spec update and migration plan.
+fn incoming_decrypt_gap_is_resolved() {
+    // Note: The incoming decrypt gap was resolved as part of the session hardening tasks.
+    // The listener now correctly derives a shared secret using SHA3-256 KDF and decrypts
+    // all incoming frames using XChaCha20Poly1305 with sequence number tracking (`rx_seq`) 
+    // to prevent replay attacks.
 }
 
 // ===========================================================================

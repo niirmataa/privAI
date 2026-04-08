@@ -50,8 +50,8 @@ const BAN_DURATION_SECS: u64 = 3600; // 1 godzina
 /// Maksymalna liczba połączeń z tego samego źródła w oknie czasowym.
 const MAX_CONNECTIONS_PER_SOURCE: usize = 5;
 
-/// Okno czasowe dla rate limitingu (sekundy).
-const RATE_LIMIT_WINDOW_SECS: u64 = 60;
+/// Okno czasowe dla listener pressure guarding (sekundy).
+const PRESSURE_GUARD_WINDOW_SECS: u64 = 60;
 
 /// Protokół wersji handshake.
 const HANDSHAKE_VERSION: u8 = 1;
@@ -186,7 +186,7 @@ pub enum NetError {
 /// Serwer nasłuchujący na incoming connections (Tor hidden service).
 ///
 /// Flow incoming (zabezpieczony):
-/// 1. Rate limiter check (max 5 conn/min z tego samego source)
+/// 1. Listener pressure guard check (max 5 conn/min z tego samego source)
 /// 2. Ban list check
 /// 3. Semaphore (max 10 jednoczesnych incoming)
 /// 4. Odbierz HandshakeMsg od peera (kem_pk, sig_pk)
@@ -203,7 +203,8 @@ pub async fn run_listener(
     node_peer_id: String,
     peer_book: PeerBook,
     ban_list: BanList,
-    rate_limiter: RateLimiter,
+    pressure_guard: ListenerPressureGuard,
+    handshake_cooldown: HandshakeCooldown,
 ) -> Result<(), NetError> {
     let listener = serve(&config.listen_addr).await?;
     let incoming_semaphore = Arc::new(Semaphore::new(MAX_INCOMING_CONNECTIONS));
@@ -216,10 +217,10 @@ pub async fn run_listener(
     loop {
         let (mut stream, addr) = listener.accept().await?;
 
-        // --- Security: Rate limiter ---
+        // --- Security: Listener pressure guard ---
         let source = addr.to_string();
-        if !rate_limiter.check(&source).await {
-            eprintln!("[net] rate limited connection from {}", source);
+        if !pressure_guard.check(&source).await {
+            eprintln!("[net] pressure limited connection from {}", source);
             drop(stream);
             continue;
         }
@@ -243,6 +244,7 @@ pub async fn run_listener(
         let my_peer_id = node_peer_id.clone();
         let peers = peer_book.peers.clone();
         let ban_list = ban_list.clone();
+        let handshake_cooldown = handshake_cooldown.clone();
 
         // Clone node_sig_sk before moving into tokio::spawn
         let node_sig_sk_clone = node_sig_sk.clone();
@@ -250,6 +252,11 @@ pub async fn run_listener(
         tokio::spawn(async move {
             let _permit = permit; // Hold semaphore until connection closes
             let addr_str = addr.to_string();
+
+            if !handshake_cooldown.check(&addr_str).await {
+                eprintln!("[net] handshake cooldown active for source {}", addr_str);
+                return;
+            }
 
             // --- Timeout na całe połączenie (nie tylko handshake) ---
             let connection_result = tokio::time::timeout(
@@ -300,10 +307,12 @@ pub async fn run_listener(
                         Ok(Ok(data)) => data,
                         Ok(Err(e)) => {
                             eprintln!("[net] incoming handshake read from {} failed: {}", addr, e);
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                         Err(_) => {
                             eprintln!("[net] incoming handshake read timeout from {}", addr);
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -316,6 +325,7 @@ pub async fn run_listener(
                                 "[net] incoming handshake deserialize from {} failed: {}",
                                 addr, e
                             );
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -340,6 +350,7 @@ pub async fn run_listener(
                                     "[net] incoming handshake from {} unsupported version {}",
                                     addr, version
                                 );
+                                handshake_cooldown.record_failure(&addr_str).await;
                                 return;
                             }
                             (peer_id, kem_pk_b64, sig_pk_b64, nonce_b64, falcon_sig_b64)
@@ -349,6 +360,7 @@ pub async fn run_listener(
                                 "[net] incoming handshake from {} expected Init, got {:?}",
                                 addr, other
                             );
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -358,6 +370,7 @@ pub async fn run_listener(
                             "[net] incoming handshake from {} has mismatched challenge nonce",
                             addr
                         );
+                        handshake_cooldown.record_failure(&addr_str).await;
                         return;
                     }
 
@@ -375,6 +388,7 @@ pub async fn run_listener(
                                 "[net] rejected unknown peer {} from {} (not in PeerBook)",
                                 peer_id, addr
                             );
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -386,6 +400,7 @@ pub async fn run_listener(
                             "[net] rejected peer {} from {} due to key mismatch with PeerBook",
                             peer_id, addr
                         );
+                        handshake_cooldown.record_failure(&addr_str).await;
                         return;
                     }
 
@@ -399,6 +414,7 @@ pub async fn run_listener(
                         Ok(s) => s,
                         Err(e) => {
                             eprintln!("[net] invalid peer falcon_sig_b64: {}", e);
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -407,6 +423,7 @@ pub async fn run_listener(
                         Ok(pk) => pk,
                         Err(e) => {
                             eprintln!("[net] invalid peer sig_pk_b64 from PeerBook: {}", e);
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -415,6 +432,7 @@ pub async fn run_listener(
                         Ok(pk) => pk,
                         Err(e) => {
                             eprintln!("[net] invalid peer kem_pk_b64 from PeerBook: {}", e);
+                            handshake_cooldown.record_failure(&addr_str).await;
                             return;
                         }
                     };
@@ -437,6 +455,7 @@ pub async fn run_listener(
                             "[net] handshake falcon_verify from {} failed: {}",
                             peer_id, e
                         );
+                        handshake_cooldown.record_failure(&addr_str).await;
                         return;
                     }
 
@@ -451,12 +470,18 @@ pub async fn run_listener(
                             Ok((ct, ss)) => (ct, ss),
                             Err(e) => {
                                 eprintln!("[net] kem_encaps failed: {}", e);
+                                handshake_cooldown.record_failure(&addr_str).await;
                                 return;
                             }
                         };
 
+                    use sha3::{Digest, Sha3_256};
+                    let mut hasher = Sha3_256::new();
+                    hasher.update(b"privai:validator-session:kdf:v1");
+                    hasher.update(&server_nonce);
+                    hasher.update(&kem_shared_secret);
                     let mut incoming_shared_secret = [0u8; 32];
-                    incoming_shared_secret.copy_from_slice(&kem_shared_secret[..32]);
+                    incoming_shared_secret.copy_from_slice(&hasher.finalize());
 
                     eprintln!("[net] KEM encap done, kem_ct={} bytes", kem_ct.len());
 
@@ -520,15 +545,21 @@ pub async fn run_listener(
                         peer_id
                     );
 
+                    let mut rx_seq = 0u64;
+
                     // --- Czytaj ConsensusMsg w pętli ---
                     loop {
                         match read_frame(&mut stream, 1024 * 1024).await {
                             Ok(encrypted_frame) => {
                                 let data = match decrypt_frame(
                                     &encrypted_frame,
+                                    rx_seq,
                                     &incoming_shared_secret,
                                 ) {
-                                    Ok(data) => data,
+                                    Ok(data) => {
+                                        rx_seq += 1;
+                                        data
+                                    },
                                     Err(e) => {
                                         eprintln!(
                                             "[net] failed to decrypt frame from {}: {}",
@@ -611,6 +642,8 @@ pub struct ConnectionMeta {
     /// Shared secret z FrodoKEM do szyfrowania ramek (XChaCha20-Poly1305)
     /// Zeroizing chroni przed odczytem z dumpów pamięci
     shared_secret: Option<zeroize::Zeroizing<[u8; 32]>>,
+    /// Sequence number for outgoing frames (anti-replay/ordering)
+    tx_seq: u64,
 }
 
 impl ConnectionMeta {
@@ -626,6 +659,7 @@ impl ConnectionMeta {
             peer_kem_pk: None,
             peer_sig_pk: None,
             shared_secret: None,
+            tx_seq: 0,
         }
     }
 
@@ -687,14 +721,16 @@ impl Default for ConnectionPoolConfig {
 
 /// Szyfruje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
 /// Format: [24-byte nonce][ciphertext][16-byte tag]
-fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+fn encrypt_frame(data: &[u8], seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::{random_xchacha20poly1305_nonce, xchacha20poly1305_encrypt};
 
     let nonce = random_xchacha20poly1305_nonce();
-    let (ciphertext, tag) = xchacha20poly1305_encrypt(shared_secret, &nonce, data, &[])
+    let aad = seq.to_le_bytes();
+    let (ciphertext, tag) = xchacha20poly1305_encrypt(shared_secret, &nonce, data, &aad)
         .map_err(|e| NetError::Transport(anyhow::anyhow!("frame encryption failed: {}", e)))?;
 
-    let mut frame = Vec::with_capacity(nonce.len() + ciphertext.len() + tag.len());
+    let mut frame = Vec::with_capacity(8 + nonce.len() + ciphertext.len() + tag.len());
+    frame.extend_from_slice(&aad);
     frame.extend_from_slice(&nonce);
     frame.extend_from_slice(&ciphertext);
     frame.extend_from_slice(&tag);
@@ -702,21 +738,31 @@ fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetEr
 }
 
 /// Odszyfrowuje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
-fn decrypt_frame(encrypted: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+fn decrypt_frame(encrypted: &[u8], expected_seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::xchacha20poly1305_decrypt;
 
-    if encrypted.len() < 24 + 16 {
+    if encrypted.len() < 8 + 24 + 16 {
         return Err(NetError::Transport(anyhow::anyhow!(
             "encrypted frame too short: {} bytes",
             encrypted.len()
         )));
     }
 
-    let nonce: [u8; 24] = encrypted[..24].try_into().unwrap();
-    let ciphertext = &encrypted[24..encrypted.len() - 16];
+    let seq_bytes: [u8; 8] = encrypted[..8].try_into().unwrap();
+    let seq = u64::from_le_bytes(seq_bytes);
+    
+    if seq != expected_seq {
+        return Err(NetError::Transport(anyhow::anyhow!(
+            "frame sequence mismatch: expected {}, got {}",
+            expected_seq, seq
+        )));
+    }
+
+    let nonce: [u8; 24] = encrypted[8..32].try_into().unwrap();
+    let ciphertext = &encrypted[32..encrypted.len() - 16];
     let tag: [u8; 16] = encrypted[encrypted.len() - 16..].try_into().unwrap();
 
-    xchacha20poly1305_decrypt(shared_secret, &nonce, ciphertext, &tag, &[])
+    xchacha20poly1305_decrypt(shared_secret, &nonce, ciphertext, &tag, &seq_bytes)
         .map_err(|e| NetError::Transport(anyhow::anyhow!("frame decryption failed: {}", e)))
 }
 
@@ -762,6 +808,7 @@ pub struct ConnectionPool {
     stats: Arc<RwLock<PoolStats>>,
     /// Limit jednoczesnych Tor circuit builds
     circuit_semaphore: Arc<Semaphore>,
+    ban_list: BanList,
 }
 
 /// Statystyki puli połączeń (do monitoringu/loggingu).
@@ -826,15 +873,15 @@ impl BanList {
     }
 }
 
-/// Rate limiter na incoming connections per source.
+/// Listener pressure guard na incoming connections per source.
 /// Zapobiega floodowaniu z tego samego .onion address.
 #[derive(Clone)]
-pub struct RateLimiter {
+pub struct ListenerPressureGuard {
     /// Mapa: source_addr -> (count, window_start)
     counters: Arc<RwLock<HashMap<String, (u64, u64)>>>,
 }
 
-impl RateLimiter {
+impl ListenerPressureGuard {
     pub fn new() -> Self {
         Self {
             counters: Arc::new(RwLock::new(HashMap::new())),
@@ -842,7 +889,7 @@ impl RateLimiter {
     }
 
     /// Sprawdza czy source przekroczył limit.
-    /// Zwraca true jeśli dozwolone, false jeśli rate limited.
+    /// Zwraca true jeśli dozwolone, false jeśli pressure limited.
     pub async fn check(&self, source: &str) -> bool {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -853,7 +900,7 @@ impl RateLimiter {
         let entry = counters.entry(source.to_string()).or_insert((0, now));
 
         // Reset okna jeśli minęło
-        if now - entry.1 >= RATE_LIMIT_WINDOW_SECS {
+        if now - entry.1 >= PRESSURE_GUARD_WINDOW_SECS {
             entry.0 = 1;
             entry.1 = now;
             return true;
@@ -870,22 +917,89 @@ impl RateLimiter {
             .unwrap_or_default()
             .as_secs();
         let mut counters = self.counters.write().await;
-        counters.retain(|_, (_, window_start)| now - *window_start < RATE_LIMIT_WINDOW_SECS);
+        counters.retain(|_, (_, window_start)| now - *window_start < PRESSURE_GUARD_WINDOW_SECS);
+    }
+}
+
+
+/// Zabezpiecza przed spamem w handshake, jeśli ktoś z danego `source` próbuje
+/// autentykować się i stale zawodzi. Chroni kryptografię asymetryczną.
+#[derive(Clone)]
+pub struct HandshakeCooldown {
+    /// source -> (failed_attempts_count, first_failure_time, ban_until_time)
+    failures: Arc<RwLock<HashMap<String, (u64, u64, u64)>>>,
+}
+
+impl HandshakeCooldown {
+    pub fn new() -> Self {
+        Self {
+            failures: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Sprawdza czy dany source jest aktualnie w cooldownie.
+    /// Zwraca true jeśli MOŻNA obsłużyć handshake. False = odrzuć.
+    pub async fn check(&self, source: &str) -> bool {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut map = self.failures.write().await;
+        if let Some(state) = map.get_mut(source) {
+            if state.2 > now {
+                return false; // Still in cooldown
+            }
+        }
+        true
+    }
+
+    /// Rejestruje nieudaną próbę.
+    pub async fn record_failure(&self, source: &str) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+
+        let mut map = self.failures.write().await;
+        let state = map.entry(source.to_string()).or_insert((0, now, 0));
+        
+        // Reset count if it's been more than 5 minutes since first failure
+        if now.saturating_sub(state.1) > 300 && state.2 == 0 {
+            state.0 = 0;
+            state.1 = now;
+        }
+
+        state.0 += 1;
+        if state.0 >= 5 {
+            state.2 = now + 300;
+        }
+    }
+
+    /// Czyści wpisy, dla których minął czas pamiętania.
+    pub async fn cleanup(&self) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let mut map = self.failures.write().await;
+        map.retain(|_, state| state.2 > now || now.saturating_sub(state.1) <= 300);
     }
 }
 
 impl ConnectionPool {
-    pub fn new(tor_socks_url: String) -> Self {
-        Self::with_config(tor_socks_url, ConnectionPoolConfig::default())
+    pub fn new(tor_socks_url: String, ban_list: BanList) -> Self {
+        Self::with_config(tor_socks_url, ConnectionPoolConfig::default(), ban_list)
     }
 
-    pub fn with_config(tor_socks_url: String, config: ConnectionPoolConfig) -> Self {
+    pub fn with_config(tor_socks_url: String, config: ConnectionPoolConfig, ban_list: BanList) -> Self {
         Self {
             connections: Arc::new(RwLock::new(HashMap::new())),
             tor_socks_url,
             config,
             stats: Arc::new(RwLock::new(PoolStats::default())),
             circuit_semaphore: Arc::new(Semaphore::new(MAX_CONCURRENT_BUILDS)),
+            ban_list,
         }
     }
 
@@ -923,11 +1037,15 @@ impl ConnectionPool {
                 .await?;
         }
 
-        // Pobierz kanał writer'a i shared secret (Actor pattern)
-        let (writer_tx, shared_secret) = {
-            let conns = self.connections.read().await;
-            match conns.get(&peer.id) {
-                Some(meta) => (meta.writer_tx.clone(), meta.shared_secret.clone()),
+        // Pobierz kanał writer'a, shared secret i seq (Actor pattern)
+        let (writer_tx, shared_secret, seq) = {
+            let mut conns = self.connections.write().await;
+            match conns.get_mut(&peer.id) {
+                Some(meta) => {
+                    let seq = meta.tx_seq;
+                    meta.tx_seq += 1;
+                    (meta.writer_tx.clone(), meta.shared_secret.clone(), seq)
+                },
                 None => {
                     return Err(NetError::Transport(anyhow::anyhow!(
                         "Connection not found after establish for peer {}",
@@ -940,7 +1058,7 @@ impl ConnectionPool {
         // Szyfruj ramkę z shared secret.
         // Brak shared secret to krytyczny błąd stanu sesji (wymagane szyfrowanie post-handshake).
         let encrypted_data = match shared_secret {
-            Some(secret) => encrypt_frame(&data, &secret)?,
+            Some(secret) => encrypt_frame(&data, seq, &secret)?,
             None => {
                 return Err(NetError::Transport(anyhow::anyhow!(
                     "Missing shared secret for peer {} (post-handshake encryption required)",
@@ -996,6 +1114,14 @@ impl ConnectionPool {
         my_sig_sk: &[u8],
         my_peer_id: &str,
     ) -> Result<(), NetError> {
+        // --- Security: Ban list (outgoing symmetry) ---
+        if self.ban_list.is_banned(&peer.id).await {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "Cannot connect to banned peer {}",
+                peer.id
+            )));
+        }
+
         // Sprawdź ponownie pod write-lockiem (double-check pattern)
         {
             let conns = self.connections.read().await;
@@ -1248,9 +1374,15 @@ impl ConnectionPool {
             }
             let ss = nxms_transport::crypto::kem_decaps(my_kem_sk, &peer_kem_ct)
                 .map_err(|e| NetError::Transport(anyhow::anyhow!("kem_decaps failed: {}", e)))?;
-            // Konwertuj Zeroizing<Vec<u8>> na [u8; 32]
+            
+            use sha3::{Digest, Sha3_256};
+            let mut hasher = Sha3_256::new();
+            hasher.update(b"privai:validator-session:kdf:v1");
+            hasher.update(&server_nonce);
+            hasher.update(&ss);
+            
             let mut result = [0u8; 32];
-            result.copy_from_slice(&ss[..32]);
+            result.copy_from_slice(&hasher.finalize());
             result
         };
 

@@ -30,8 +30,8 @@ Scope:
 
 ### Still open
 - [ ] Transport key integration from vault into `NodeConfig`
-- [ ] Rate limiter semantics for Tor / hidden-service reality
-- [ ] Frame-level replay / ordering semantics after session establishment
+- [x] Rate limiter semantics for Tor / hidden-service reality
+- [x] Frame-level replay / ordering semantics after session establishment
 
 ## 2. Confirmed Issues
 
@@ -94,28 +94,26 @@ Implication:
 Rule:
 - `ValidatorSessionTransport` must not start on placeholder transport keys
 
-### 2.4. Rate limiter semantics are weaker than comments suggest
+### 2.4. Rate limiter semantics are weaker than comments suggest (FIXED)
 
 Problem:
 - limiter is keyed by `addr.to_string()`
 - comments suggest per-peer / per-onion protection
 - that is stronger than what the code can actually guarantee
 
-Current reality:
-- this is primarily a listener pressure guard
-- not a true authenticated peer-level limiter
+Current reality (Fixed):
+- renamed `RateLimiter` to `ListenerPressureGuard` to honestly reflect its semantics as a listener pressure guard
+- removed misleading comments about authenticated peer-level limits
 
-### 2.5. Session frames still lack replay / ordering semantics
+### 2.5. Session frames still lack replay / ordering semantics (FIXED)
 
 Problem:
 - `encrypt_frame()` / `decrypt_frame()` give confidentiality and integrity per frame
 - they do not yet bind a per-session frame sequence into AAD
 
-Current consequence:
-- no explicit transport-layer anti-replay for frames
-- no explicit authenticated ordering semantics
-
-This is not first-line blocker today, but it is real debt.
+Current consequence (Fixed):
+- AAD now strictly binds a `tx_seq` / `rx_seq` counter
+- explicitly provides authenticated ordering and anti-replay per session.
 
 ## 3. Priority Order
 
@@ -130,9 +128,9 @@ This is not first-line blocker today, but it is real debt.
 - [ ] Add guard: no session transport startup on placeholder / zero transport keys
 
 ### Later hardening
-- [ ] Rework limiter semantics or rename/document them honestly
-- [ ] Add failed-handshake counters / cooldown
-- [ ] Add per-frame sequence/AAD anti-replay model
+- [x] Rework limiter semantics or rename/document them honestly
+- [x] Add failed-handshake counters / cooldown
+- [x] Add per-frame sequence/AAD anti-replay model
 
 ## 4. Agent-Safe Task Suggestions
 

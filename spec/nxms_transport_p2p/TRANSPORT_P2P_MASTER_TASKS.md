@@ -26,13 +26,13 @@ Scope:
 - [x] Short server-side write timeouts for `Challenge` / `Response`
 - [x] Tracker/comment drift cleanup
 
-### Still open
-- [ ] transport KEM keys are not wired end-to-end into runtime startup
-- [ ] session transport does not fail fast on placeholder / zero transport keys
-- [ ] rate limiter semantics are stronger in comments/docs than in reality
-- [ ] frame-level replay / ordering semantics are still missing
-- [ ] failed-handshake cooldown / anti-spam policy is still missing
-- [ ] outgoing path still lacks ban/cooldown policy review
+### Fixed / Recently Completed
+- [x] transport KEM keys are wired end-to-end into runtime startup
+- [x] session transport fails fast on placeholder / zero transport keys
+- [x] rate limiter semantics improved
+- [x] frame-level replay / ordering semantics implemented
+- [x] failed-handshake cooldown / anti-spam policy implemented
+- [x] outgoing path ban policy implemented
 
 ## 2. Coordination Rules
 
@@ -196,7 +196,7 @@ Context:
 
 Required work:
 - [x] update invariants doc to reflect `Challenge -> Init -> Response`
-- [ ] update test plan doc to reflect handshake v2 helpers and expectations
+- [x] update test plan doc to reflect handshake v2 helpers and expectations
 - [x] keep tracker consistent with current status
 
 Must not:
@@ -257,7 +257,7 @@ Acceptance:
 - [x] runtime path no longer relies on placeholder transport keys
 
 ### Task 07
-Status: blocked
+Status: done
 Depends on: Task 06
 Parallel-safe: no
 Lane: B
@@ -272,18 +272,18 @@ Goal:
 - validator session transport must not start on empty / zero transport key material
 
 Required work:
-- [ ] detect empty/zero placeholder transport keys
-- [ ] fail fast before listener/pool startup
-- [ ] keep the error explicit and operator-readable
-- [ ] run `cargo check`
+- [x] detect empty/zero placeholder transport keys
+- [x] fail fast before listener/pool startup
+- [x] keep the error explicit and operator-readable
+- [x] run `cargo check`
 
 Acceptance:
-- [ ] no real startup path can silently proceed on placeholder transport keys
+- [x] no real startup path can silently proceed on placeholder transport keys
 
 ## 6. Later Hardening Tasks
 
 ### Task 08
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: C
 Title: Clarify or rework rate limiter semantics
@@ -301,15 +301,15 @@ Context:
 - that is a listener pressure guard, not a true authenticated peer-level limiter
 
 Required work:
-- [ ] audit comments and assumptions
-- [ ] either rename/document honestly or minimally improve semantics without redesign
-- [ ] run `cargo check`
+- [x] audit comments and assumptions
+- [x] either rename/document honestly or minimally improve semantics without redesign
+- [x] run `cargo check`
 
 Acceptance:
-- [ ] comments/docs no longer overclaim protection level
+- [x] comments/docs no longer overclaim protection level
 
 ### Task 09
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: C
 Title: Add failed-handshake counters / cooldown policy
@@ -322,16 +322,16 @@ Goal:
 - add cheap anti-spam pressure after handshake v2 without changing the core protocol
 
 Required work:
-- [ ] count repeated failed handshake attempts in a local transport-safe way
-- [ ] add cooldown / refusal policy
-- [ ] avoid `BanList(peer_id)` before identity proof
-- [ ] run `cargo check`
+- [x] count repeated failed handshake attempts in a local transport-safe way
+- [x] add cooldown / refusal policy
+- [x] avoid `BanList(peer_id)` before identity proof
+- [x] run `cargo check`
 
 Acceptance:
-- [ ] repeated failed attempts are throttled without reintroducing ban poisoning
+- [x] repeated failed attempts are throttled without reintroducing ban poisoning
 
 ### Task 10
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: C
 Title: Add frame-level replay / ordering semantics
@@ -348,20 +348,20 @@ Context:
 - it does not yet authenticate ordering or provide explicit anti-replay semantics
 
 Required work:
-- [ ] design minimal frame sequence model
-- [ ] bind sequence into AAD
-- [ ] reject duplicates / out-of-order frames according to the chosen model
-- [ ] update tests/docs if the implementation is changed
+- [x] design minimal frame sequence model
+- [x] bind sequence into AAD
+- [x] reject duplicates / out-of-order frames according to the chosen model
+- [x] update tests/docs if the implementation is changed
 
 Must not:
 - redesign higher-level consensus semantics
 - require wire changes outside validator session framing without explicit note
 
 Acceptance:
-- [ ] session framing has explicit sequence semantics
+- [x] session framing has explicit sequence semantics
 
 ### Task 11
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: C
 Title: Review outgoing path policy symmetry
@@ -375,12 +375,12 @@ Goal:
 - review whether outgoing path should consult ban/cooldown policy and make it explicit
 
 Required work:
-- [ ] inspect current outgoing connect / establish path
-- [ ] decide and implement whether outgoing path should consult `BanList` or cooldown state
-- [ ] document the chosen policy
+- [x] inspect current outgoing connect / establish path
+- [x] decide and implement whether outgoing path should consult `BanList` or cooldown state
+- [x] document the chosen policy
 
 Acceptance:
-- [ ] outgoing policy is explicit rather than accidental
+- [x] outgoing policy is explicit rather than accidental
 
 ## 7. Suggested Parallel Batches
 
@@ -426,11 +426,11 @@ Can run later, after the above stabilizes:
 - [x] Task 04 done
 - [x] Task 05 done
 - [x] Task 06 done
-- [ ] Task 07 done
-- [ ] Task 08 done
-- [ ] Task 09 done
-- [ ] Task 10 done
-- [ ] Task 11 done
+- [x] Task 07 done
+- [x] Task 08 done
+- [x] Task 09 done
+- [x] Task 10 done
+- [x] Task 11 done
 
 ## 9. Notes
 

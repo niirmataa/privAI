@@ -3,10 +3,10 @@ pub mod consensus_loop;
 pub mod gossip;
 pub mod identity_provider;
 pub mod mempool;
-mod session_impl;
 pub mod net;
 pub mod node;
 pub mod proposer;
+mod session_impl;
 pub mod session_transport;
 pub mod state_sync;
 
