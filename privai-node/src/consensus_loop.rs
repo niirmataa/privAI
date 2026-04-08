@@ -12,14 +12,14 @@ use tokio::sync::mpsc;
 use tokio::time::{interval, Duration};
 
 use nxms_transport::peers::PeerBook;
-use privai_chain::{Block, ConsensusMsg, Hash32, VoteType, consensus::PeerInfo};
+use privai_chain::{consensus::PeerInfo, Block, ConsensusMsg, Hash32, VoteType};
 
-use crate::{NetConfig, NetError};
 use crate::node::{NodeError, PrivaiNode};
 use crate::session_transport::ValidatorSessionTransport;
+use crate::{NetConfig, NetError};
 use privai_ledger::LedgerStore;
-use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
+use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 
 /// Stan pętli konsensusu.
 pub struct ConsensusLoop<S: LedgerStore, V, A, P>
@@ -40,11 +40,7 @@ where
 impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>
     ConsensusLoop<S, V, A, P>
 {
-    pub fn new(
-        node: PrivaiNode<S, V, A, P>,
-        net_config: NetConfig,
-        peer_book: PeerBook,
-    ) -> Self {
+    pub fn new(node: PrivaiNode<S, V, A, P>, net_config: NetConfig, peer_book: PeerBook) -> Self {
         let session_transport = ValidatorSessionTransport::new(net_config.clone());
         Self {
             node,
@@ -65,15 +61,15 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let (msg_tx, mut msg_rx) = mpsc::channel::<(String, ConsensusMsg)>(256);
 
         // Start session listener w tle (zabezpieczony: rate limiter + ban list + weryfikacja peerów)
-        let listener_handle = self
-            .session_transport
-            .spawn_listener(msg_tx, self.node.config(), self.peer_book.clone());
+        let listener_handle = self.session_transport.spawn_listener(
+            msg_tx,
+            self.node.config(),
+            self.peer_book.clone(),
+        )?;
 
         // Uruchamia pool maintenance — sprawdza health connections co 30s
-        self.session_transport.spawn_maintenance(
-            self.peer_book.clone(),
-            self.node.config(),
-        );
+        self.session_transport
+            .spawn_maintenance(self.peer_book.clone(), self.node.config());
 
         // Timeout checker — co 1 sekundę sprawdzamy czy nie przekroczyliśmy limitu
         let mut timeout_ticker = interval(Duration::from_secs(1));
@@ -120,7 +116,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         );
 
         match msg {
-            ConsensusMsg::Proposal { block, proposer_sig } => {
+            ConsensusMsg::Proposal {
+                block,
+                proposer_sig,
+            } => {
                 eprintln!(
                     "[consensus] received proposal height={} round={} hash={:?}",
                     block.header.height,
@@ -129,10 +128,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 );
 
                 // 1. Weryfikacja proposera — czy jest uprawniony dla (epoch_seed, round)
-                let expected_proposer = self.node.next_proposer(
-                    &block.header.epoch_seed_hash,
-                    block.header.round,
-                );
+                let expected_proposer = self
+                    .node
+                    .next_proposer(&block.header.epoch_seed_hash, block.header.round);
                 if expected_proposer != Some(block.header.proposer_pk_hash) {
                     eprintln!(
                         "[consensus] REJECTED proposal: wrong proposer {:?} (expected {:?})",
@@ -144,11 +142,17 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
                 // 2. Weryfikacja podpisu Proposera (obowiązkowy)
                 if proposer_sig.is_empty() {
-                    eprintln!("[consensus] REJECTED proposal: missing proposer signature (mandatory)");
+                    eprintln!(
+                        "[consensus] REJECTED proposal: missing proposer signature (mandatory)"
+                    );
                     return;
                 }
                 // Lookup pełnego PK z registry (proposer_pk_hash → sig_pk)
-                let proposer_pk = match self.node.config().validators.iter()
+                let proposer_pk = match self
+                    .node
+                    .config()
+                    .validators
+                    .iter()
                     .find(|v| v.pk_hash == block.header.proposer_pk_hash)
                     .map(|v| &v.sig_pk)
                 {
@@ -158,12 +162,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         return;
                     }
                 };
-                if nxms_transport::crypto::falcon_verify(
-                    proposer_pk,
-                    &block.hash(),
-                    &proposer_sig,
-                )
-                .is_err()
+                if nxms_transport::crypto::falcon_verify(proposer_pk, &block.hash(), &proposer_sig)
+                    .is_err()
                 {
                     eprintln!("[consensus] REJECTED proposal: invalid proposer signature");
                     return;
@@ -179,7 +179,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     );
                     return;
                 }
-                if block.header.timestamp_ms < now.saturating_sub(self.node.config().consensus_timeout_ms * 2) {
+                if block.header.timestamp_ms
+                    < now.saturating_sub(self.node.config().consensus_timeout_ms * 2)
+                {
                     eprintln!(
                         "[consensus] REJECTED proposal: timestamp too old ({} < {})",
                         block.header.timestamp_ms,
@@ -201,9 +203,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
                 // 5. Walidacja prev_block_hash (musi pasować do current tip)
                 if block.header.prev_block_hash != self.node.ledger().snapshot().tip_hash {
-                    eprintln!(
-                        "[consensus] REJECTED proposal: prev_block_hash mismatch"
-                    );
+                    eprintln!("[consensus] REJECTED proposal: prev_block_hash mismatch");
                     return;
                 }
 
@@ -267,7 +267,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     let validator_pk = self.node.config().node_sig_pk.clone();
                     let mut falcon_sig = vec![];
                     if let Some(sk) = self.node.falcon_sk() {
-                        if let Ok(sig) = nxms_transport::crypto::falcon_sign_ct_prepared(sk, &vote.block_hash) {
+                        if let Ok(sig) =
+                            nxms_transport::crypto::falcon_sign_ct_prepared(sk, &vote.block_hash)
+                        {
                             falcon_sig = sig;
                         }
                     }
@@ -350,7 +352,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 }
             }
 
-            ConsensusMsg::Ping { height, round, sender_pk_hash } => {
+            ConsensusMsg::Ping {
+                height,
+                round,
+                sender_pk_hash,
+            } => {
                 eprintln!(
                     "[consensus] ping from {:?} at height={} round={}",
                     &sender_pk_hash[..8],
@@ -359,7 +365,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 );
             }
 
-            ConsensusMsg::SyncRequest { from_height, to_height, requester_pk_hash } => {
+            ConsensusMsg::SyncRequest {
+                from_height,
+                to_height,
+                requester_pk_hash,
+            } => {
                 eprintln!(
                     "[consensus] SyncRequest from {:?} for {}..{}",
                     &requester_pk_hash[..8],
@@ -378,7 +388,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 );
             }
 
-            ConsensusMsg::SyncResponse { blocks, qcs, sender_pk_hash } => {
+            ConsensusMsg::SyncResponse {
+                blocks,
+                qcs,
+                sender_pk_hash,
+            } => {
                 crate::state_sync::handle_sync_response(
                     &mut self.node,
                     blocks,
@@ -387,7 +401,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 );
             }
 
-            ConsensusMsg::Gossip { tx, sender_pk_hash, hops } => {
+            ConsensusMsg::Gossip {
+                tx,
+                sender_pk_hash,
+                hops,
+            } => {
                 eprintln!(
                     "[consensus] received gossip tx from {:?} hops={}",
                     &sender_pk_hash[..8],
@@ -424,11 +442,14 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 );
 
                 // Zbierz informacje o znanych peerach z PeerBook
-                let peers: Vec<PeerInfo> = self.peer_book.peers.iter()
-                            .filter(|peer| peer.id != self.session_transport.my_peer_id())
+                let peers: Vec<PeerInfo> = self
+                    .peer_book
+                    .peers
+                    .iter()
+                    .filter(|peer| peer.id != self.session_transport.my_peer_id())
                     .filter_map(|peer| {
-                        use base64::Engine;
                         use base64::engine::general_purpose::STANDARD as B64;
+                        use base64::Engine;
                         if let Ok(falcon_pk) = B64.decode(&peer.sig_pk_b64) {
                             Some(PeerInfo {
                                 address: format!("{}:{}", peer.host, peer.port),
@@ -443,7 +464,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 // Podpisz listę peerów kluczem Falcon (ochrona przed Eclipse attack)
                 let peers_bytes = serde_json::to_vec(&peers).unwrap_or_default();
                 let falcon_sig = if let Some(sk) = self.node.falcon_sk() {
-                    nxms_transport::crypto::falcon_sign_ct_prepared(sk, &peers_bytes).unwrap_or_default()
+                    nxms_transport::crypto::falcon_sign_ct_prepared(sk, &peers_bytes)
+                        .unwrap_or_default()
                 } else {
                     Vec::new()
                 };
@@ -458,7 +480,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 self.broadcast_msg(response);
             }
 
-            ConsensusMsg::PeersList { peers, sender_pk_hash, falcon_sig } => {
+            ConsensusMsg::PeersList {
+                peers,
+                sender_pk_hash,
+                falcon_sig,
+            } => {
                 eprintln!(
                     "[consensus] received PeersList from {:?} with {} peers",
                     &sender_pk_hash[..8],
@@ -472,7 +498,11 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                     return;
                 }
                 // Lookup pełnego PK z registry (sender_pk_hash → sig_pk)
-                let sender_pk = match self.node.config().validators.iter()
+                let sender_pk = match self
+                    .node
+                    .config()
+                    .validators
+                    .iter()
                     .find(|v| v.pk_hash == sender_pk_hash)
                     .map(|v| &v.sig_pk)
                 {
@@ -482,7 +512,9 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                         return;
                     }
                 };
-                if nxms_transport::crypto::falcon_verify(sender_pk, &peers_bytes, &falcon_sig).is_err() {
+                if nxms_transport::crypto::falcon_verify(sender_pk, &peers_bytes, &falcon_sig)
+                    .is_err()
+                {
                     eprintln!("[consensus] REJECTED PeersList: invalid Falcon signature");
                     return;
                 }
@@ -508,7 +540,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         let epoch = snapshot.consensus_safety.current_view as u64; // epoch z current_view
         let epoch_seed_hash = privai_chain::hash::domain_hash(
             "privai:epoch-seed:v0",
-            &[&epoch.to_le_bytes(), &self.node.config().chain_id.to_le_bytes()],
+            &[
+                &epoch.to_le_bytes(),
+                &self.node.config().chain_id.to_le_bytes(),
+            ],
         );
         let parent_qc_hash = if height > 1 {
             // Hash ostatniego bloku jako parent
@@ -541,8 +576,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             timestamp_ms,
             epoch_seed_hash,
             parent_qc_hash,
-            Vec::new(),  // proof_certificates — zbierane później
-            Vec::new(),  // extra_receipts
+            Vec::new(), // proof_certificates — zbierane później
+            Vec::new(), // extra_receipts
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -574,7 +609,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             &block_hash[..8]
         );
 
-        self.broadcast_msg(ConsensusMsg::Proposal { block, proposer_sig });
+        self.broadcast_msg(ConsensusMsg::Proposal {
+            block,
+            proposer_sig,
+        });
     }
 
     /// Sprawdza timeout i wysyła ViewChange jeśli potrzeba.
@@ -604,19 +642,20 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         if qc.signers.len() != qc.signatures.len() {
             return Err(format!(
                 "signers/signatures count mismatch: {} vs {}",
-                qc.signers.len(), qc.signatures.len()
+                qc.signers.len(),
+                qc.signatures.len()
             ));
         }
 
         // 2. Równoległa weryfikacja każdego signera + podpisu
-        let results: Vec<Result<u64, String>> = qc.signers.par_iter()
+        let results: Vec<Result<u64, String>> = qc
+            .signers
+            .par_iter()
             .zip(qc.signatures.par_iter())
             .map(|(signer_pk, sig)| {
                 // 2a. Sprawdź czy signer jest znanym validatorem
-                let voter_pk_hash = privai_chain::hash::domain_hash(
-                    "privai:falcon-pk:v0",
-                    &[signer_pk],
-                );
+                let voter_pk_hash =
+                    privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[signer_pk]);
                 let voter_stake = validators
                     .iter()
                     .find(|v| v.pk_hash == voter_pk_hash)
@@ -625,10 +664,16 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
                 // 2b. Weryfikuj podpis Falcon
                 if sig.is_empty() {
-                    return Err(format!("empty signature for signer {:?}", &voter_pk_hash[..8]));
+                    return Err(format!(
+                        "empty signature for signer {:?}",
+                        &voter_pk_hash[..8]
+                    ));
                 }
                 if nxms_transport::crypto::falcon_verify(signer_pk, &qc.block_hash, sig).is_err() {
-                    return Err(format!("invalid Falcon signature for signer {:?}", &voter_pk_hash[..8]));
+                    return Err(format!(
+                        "invalid Falcon signature for signer {:?}",
+                        &voter_pk_hash[..8]
+                    ));
                 }
 
                 Ok(voter_stake)

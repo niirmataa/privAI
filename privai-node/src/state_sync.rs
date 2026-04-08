@@ -10,12 +10,12 @@ use nxms_transport::peers::PeerBook;
 use privai_chain::{Block, ConsensusMsg, Hash32, QuorumCertificate, VoteType};
 
 use crate::config::NodeConfig;
-use crate::NetError;
 use crate::node::{NodeError, PrivaiNode};
 use crate::session_transport::ValidatorSessionTransport;
+use crate::NetError;
 use privai_ledger::LedgerStore;
-use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
+use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 
 /// Maksymalna liczba bloków w jednej odpowiedzi sync.
 /// Requester wysyła kolejny SyncRequest jeśli potrzebuje więcej.
@@ -58,7 +58,12 @@ pub async fn request_blocks(
 }
 
 /// Obsługuje przychodzący SyncRequest — wysyła bloki do requestera.
-pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
+pub fn handle_sync_request<
+    S: LedgerStore,
+    V: ProofVerifier,
+    A: ProofArtifactStore,
+    P: BlockArtifactVerifier,
+>(
     node: &PrivaiNode<S, V, A, P>,
     block_cache: &std::collections::HashMap<Hash32, Block>,
     from_height: u64,
@@ -94,7 +99,10 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
 
     // Fallback na persistent storage jeśli cache nie ma bloków
     if blocks.is_empty() {
-        blocks = node.ledger().snapshot().blocks
+        blocks = node
+            .ledger()
+            .snapshot()
+            .blocks
             .range(from..=to)
             .map(|(_, b)| b.clone())
             .collect();
@@ -118,7 +126,8 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
     );
 
     // Zbieramy QCs z ledgera dla tych bloków
-    let qcs: Vec<QuorumCertificate> = blocks.iter()
+    let qcs: Vec<QuorumCertificate> = blocks
+        .iter()
         .filter_map(|b| node.ledger().snapshot().qcs.get(&b.header.height).cloned())
         .collect();
 
@@ -152,9 +161,12 @@ pub fn handle_sync_request<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSto
 
 /// Znajduje peera w PeerBook po pk_hash (hash Falcon public key).
 /// falcon_pk_hash = BLAKE3("privai:falcon-pk:v0" || pk_bytes)
-fn find_peer_by_pk_hash(peer_book: &PeerBook, pk_hash: &Hash32) -> Option<nxms_transport::peers::Peer> {
-    use base64::Engine;
+fn find_peer_by_pk_hash(
+    peer_book: &PeerBook,
+    pk_hash: &Hash32,
+) -> Option<nxms_transport::peers::Peer> {
     use base64::engine::general_purpose::STANDARD as B64;
+    use base64::Engine;
     use privai_chain::hash::domain_hash;
 
     const FALCON_PK_DOMAIN: &str = "privai:falcon-pk:v0";
@@ -171,7 +183,12 @@ fn find_peer_by_pk_hash(peer_book: &PeerBook, pk_hash: &Hash32) -> Option<nxms_t
 }
 
 /// Obsługuje przychodzący SyncResponse — importuje bloki i finalizuje.
-pub fn handle_sync_response<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
+pub fn handle_sync_response<
+    S: LedgerStore,
+    V: ProofVerifier,
+    A: ProofArtifactStore,
+    P: BlockArtifactVerifier,
+>(
     node: &mut PrivaiNode<S, V, A, P>,
     blocks: Vec<Block>,
     qcs: Vec<QuorumCertificate>,
@@ -199,13 +216,16 @@ pub fn handle_sync_response<S: LedgerStore, V: ProofVerifier, A: ProofArtifactSt
                 &expected_prev_hash[..8],
                 &block.header.prev_block_hash[..8]
             );
-            break;  // prev_hash mismatch — kolejne bloki też będą złe
+            break; // prev_hash mismatch — kolejne bloki też będą złe
         }
 
         // Walidacja roots
         if !block.roots_match() {
-            eprintln!("[sync] REJECTED block at height={}: roots mismatch", block.header.height);
-            break;  // roots mismatch — zatrzymaj sync
+            eprintln!(
+                "[sync] REJECTED block at height={}: roots mismatch",
+                block.header.height
+            );
+            break; // roots mismatch — zatrzymaj sync
         }
 
         // Import bloku

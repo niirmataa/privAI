@@ -12,16 +12,16 @@
 //! - Rate-limit per sender
 
 use nxms_transport::peers::PeerBook;
-use privai_chain::{Hash32, Transaction};
 use privai_chain::hash::domain_hash;
+use privai_chain::{Hash32, Transaction};
 
 use crate::config::NodeConfig;
 use crate::mempool::{Mempool, MempoolEntry};
 use crate::node::PrivaiNode;
 use crate::session_transport::ValidatorSessionTransport;
 use privai_ledger::LedgerStore;
-use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 use privai_proof::store::ProofArtifactStore;
+use privai_proof::{BlockArtifactVerifier, ProofVerifier};
 
 /// Maksymalna liczba peerów do których propagujemy jedną Tx.
 /// Nie wysyłamy do WSZYSTKICH — tylko do subsetu (gossip fanout).
@@ -44,7 +44,12 @@ pub const MAX_GOSSIP_HOPS: u8 = 5;
 
 /// Obsługuje przychodzącą wiadomość Gossip z peera.
 /// Weryfikuje Tx, dodaje do mempoola (antyspam), bridge do ledger.mempool, propaguje dalej.
-pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
+pub fn handle_gossip_tx<
+    S: LedgerStore,
+    V: ProofVerifier,
+    A: ProofArtifactStore,
+    P: BlockArtifactVerifier,
+>(
     node: &mut PrivaiNode<S, V, A, P>,
     mempool: &mut Mempool,
     msg: GossipTxMsg,
@@ -98,7 +103,8 @@ pub fn handle_gossip_tx<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore,
     if let Err(e) = node.submit_transaction(msg.tx.clone(), current_time_ms) {
         eprintln!(
             "[gossip] ledger rejected tx {:?}: {} (still in node-mempool)",
-            &msg.tx_hash[..8], e
+            &msg.tx_hash[..8],
+            e
         );
         // Nie return — tx jest w node-mempool jako antyspam layer
     }
@@ -184,7 +190,12 @@ fn propagate_tx(
 }
 
 /// Wysyła nową transakcję do mempoola (antyspam), bridge do ledger.mempool i gossipuje do sieci.
-pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVerifier>(
+pub fn submit_and_gossip<
+    S: LedgerStore,
+    V: ProofVerifier,
+    A: ProofArtifactStore,
+    P: BlockArtifactVerifier,
+>(
     node: &mut PrivaiNode<S, V, A, P>,
     mempool: &mut Mempool,
     tx: Transaction,
@@ -211,7 +222,11 @@ pub fn submit_and_gossip<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore
 
     // Bridge do ledger.mempool
     if let Err(e) = node.submit_transaction(tx.clone(), current_time_ms) {
-        eprintln!("[gossip] ledger rejected local tx {:?}: {}", &tx_hash[..8], e);
+        eprintln!(
+            "[gossip] ledger rejected local tx {:?}: {}",
+            &tx_hash[..8],
+            e
+        );
         // Nie return — tx jest w node-mempool
     }
 

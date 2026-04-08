@@ -114,7 +114,9 @@ impl Mempool {
 
     /// Usuwa przestarzałe transakcje. O(n) — retain zamiast O(n²) remove-by-index.
     pub fn evict_stale(&mut self, current_time_ms: u64) {
-        let stale_hashes: Vec<Hash32> = self.entries.iter()
+        let stale_hashes: Vec<Hash32> = self
+            .entries
+            .iter()
             .filter(|e| current_time_ms.saturating_sub(e.received_at_ms) > MAX_TX_AGE_MS)
             .map(|e| e.tx_hash)
             .collect();
@@ -167,7 +169,8 @@ impl Mempool {
             if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
                 eprintln!(
                     "[mempool] tx {:?} auth[{}]: missing signer_pks or signatures",
-                    &tx_hash[..8], i
+                    &tx_hash[..8],
+                    i
                 );
                 return false;
             }
@@ -175,17 +178,27 @@ impl Mempool {
             if auth.signer_pks.len() != auth.signatures.len() {
                 eprintln!(
                     "[mempool] tx {:?} auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
-                    &tx_hash[..8], i, auth.signer_pks.len(), auth.signatures.len()
+                    &tx_hash[..8],
+                    i,
+                    auth.signer_pks.len(),
+                    auth.signatures.len()
                 );
                 return false;
             }
 
             // Weryfikuj każdy podpis Falcon
-            for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+            for (j, (pk, sig)) in auth
+                .signer_pks
+                .iter()
+                .zip(auth.signatures.iter())
+                .enumerate()
+            {
                 if pk.is_empty() || sig.is_empty() {
                     eprintln!(
                         "[mempool] tx {:?} auth[{}][{}]: empty pk or sig",
-                        &tx_hash[..8], i, j
+                        &tx_hash[..8],
+                        i,
+                        j
                     );
                     return false;
                 }
@@ -195,7 +208,10 @@ impl Mempool {
                 if let Err(e) = nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig) {
                     eprintln!(
                         "[mempool] tx {:?} auth[{}][{}]: falcon_verify failed: {}",
-                        &tx_hash[..8], i, j, e
+                        &tx_hash[..8],
+                        i,
+                        j,
+                        e
                     );
                     return false;
                 }

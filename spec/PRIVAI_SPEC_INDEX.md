@@ -143,21 +143,22 @@ Kazdy dev i kazdy agent powinien czytac dokumenty w tej kolejnosci:
 2. `spec/PRIVAI_REENTRY_GUIDE.md`
 3. `spec/PRIVAI_DECISION_REGISTER.md`
 4. `spec/PRIVAI_GAP_REGISTER.md`
-5. `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`
-6. `spec/PRIVAI_PROTOCOL_CORE.md`
-7. `spec/PRIVAI_CANONICAL_FORMATS.md`
-8. `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`
-9. `spec/PRIVAI_CONSENSUS.md`
-10. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
-11. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
-12. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
-13. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
-14. `spec/PRIVAI_PROOF_BOUNDARIES.md`
-15. `spec/PRIVAI_REFERENCE_VECTORS.md`
-16. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
-17. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
-18. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
-19. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
+5. `spec/PRIVAI_EXECUTION_SPINE.md`
+6. `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`
+7. `spec/PRIVAI_PROTOCOL_CORE.md`
+8. `spec/PRIVAI_CANONICAL_FORMATS.md`
+9. `spec/PRIVAI_MARKETPLACE_SMALL_PAYMENTS.md`
+10. `spec/PRIVAI_CONSENSUS.md`
+11. `spec/PRIVAI_ESCROW_2OF3_ADAPTATION.md`
+12. `spec/PRIVAI_CRYPTOGRAPHIC_BREAKTHROUGH_CANDIDATES.md`
+13. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+14. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+15. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+16. `spec/PRIVAI_REFERENCE_VECTORS.md`
+17. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+18. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+19. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+20. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
 
 ## 3.1. Anti-Drift Support Docs
 
@@ -181,37 +182,44 @@ Ponizsze pliki nie zastepuja canonical setu, ale sa obowiazkowymi dokumentami po
    - forbidden inference,
    - next action.
 
-4. `spec/PRIVAI_PROOF_BOUNDARIES.md`
+4. `spec/PRIVAI_EXECUTION_SPINE.md`
+   Zakres:
+   - master execution order across transport, auth, chain, proof, escrow and marketplace work,
+   - phase-level dependencies,
+   - phase checklists and exit criteria,
+   - execution-control spine for future narrow docs.
+
+5. `spec/PRIVAI_PROOF_BOUNDARIES.md`
    Zakres:
    - proof status boundaries,
    - czego nie wolno zakladac dla `OnChainLite`,
    - jak czytac current bytes `ExecutionBundle` i `ProofCertificate`.
 
-5. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+6. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
    Zakres:
    - current validator session behavior,
    - handshake / reconnect / ban / limiter invariants,
    - anti-drift guard for test and implementation tasks.
 
-6. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
+7. `spec/PRIVAI_CHAIN_STORAGE_AND_RECOVERY_NEXT_STEPS.md`
    Zakres:
    - storage / restart / recovery work map,
    - next docs to freeze,
    - anti-drift guard before storage implementation tasks.
 
-7. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
+8. `spec/PRIVAI_CHAIN_STORAGE_INVARIANTS.md`
    Zakres:
    - current storage behavior mapping (durable / rebuildable / ephemeral),
    - source of truth dla note status, nullifiers, blocks, tip, QC, safety state,
    - atomicity groups, current non-conformities, unresolved gaps.
 
-8. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
+9. `spec/PRIVAI_RECOVERY_AND_RESTART_RULES.md`
    Zakres:
    - current restart/recovery behavior mapping,
    - startup sequence, tip recovery, safety recovery,
    - failure model, current non-conformities, unresolved gaps.
 
-9. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
+10. `spec/PRIVAI_TRANSFER_NOTE_PROOF_SEMANTICS.md`
    Zakres:
    - current proof-bearing semantics for `TransferNoteTx`,
    - current statement / public inputs / witness relation,
