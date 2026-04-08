@@ -18,6 +18,8 @@ Scope:
 ### Already fixed locally
 - [x] Incoming decrypt gap in `session_impl.rs`
 - [x] Handshake transcript hardening (`Challenge -> Init -> Response`)
+- [x] `validator_session` tests updated to handshake v2
+- [x] `identity_provider.rs` TLV parser reconciled with `vault.c`
 - [x] Shared frame defaults reduced in `nxms-transport/src/tor_net.rs`
 - [x] Ban poisoning removed from unauthenticated handshake branches
 - [x] Plaintext fallback removed from `ConnectionPool::send_message()`
@@ -25,8 +27,6 @@ Scope:
 - [x] Tracker/comment drift cleanup
 
 ### Still open
-- [ ] `validator_session` tests still target old handshake shape
-- [ ] `identity_provider.rs` TLV parser is inconsistent with `nexum-cli/src/vault.c`
 - [ ] transport KEM keys are not wired end-to-end into runtime startup
 - [ ] session transport does not fail fast on placeholder / zero transport keys
 - [ ] rate limiter semantics are stronger in comments/docs than in reality
@@ -75,7 +75,7 @@ Scope:
 ## 4. Ready Tasks
 
 ### Task 01
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: A
 Title: Update `validator_session` tests to handshake v2
@@ -92,13 +92,13 @@ Context:
 - runtime is already on handshake v2; tests must catch up without changing runtime code
 
 Required work:
-- [ ] rewrite handshake helpers in `validator_session.rs`
-- [ ] read `Challenge` first, then build signed `Init`
-- [ ] interpret `Response` as success path
-- [ ] preserve wrong-version test semantics
-- [ ] preserve bad-signature test semantics
-- [ ] keep non-handshake tests stable unless compilation requires minimal edits
-- [ ] run `cargo check --test validator_session` or `cargo test --test validator_session --no-run`
+- [x] rewrite handshake helpers in `validator_session.rs`
+- [x] read `Challenge` first, then build signed `Init`
+- [x] interpret `Response` as success path
+- [x] preserve wrong-version test semantics
+- [x] preserve bad-signature test semantics
+- [x] keep non-handshake tests stable unless compilation requires minimal edits
+- [x] run `cargo check --test validator_session` or `cargo test --test validator_session --no-run`
 
 Must not:
 - modify `privai-node/src/session_impl.rs`
@@ -106,11 +106,11 @@ Must not:
 - export private production helpers just to satisfy tests
 
 Acceptance:
-- [ ] `validator_session.rs` no longer assumes old `HandshakeMsg` struct
-- [ ] test target compiles
+- [x] `validator_session.rs` no longer assumes old `HandshakeMsg` struct
+- [x] test target compiles
 
 ### Task 02
-Status: ready
+Status: done
 Parallel-safe: yes
 Lane: B
 Title: Reconcile `identity_provider.rs` TLV parser with `vault.c`
@@ -128,13 +128,13 @@ Context:
 - `vault.c` writes TLV as `u16 type + u32 len`
 
 Required work:
-- [ ] align TLV tag constants with `vault.c`
-- [ ] change parser header layout to `u16 type + u32 len`
-- [ ] parse `T_KEM_PK`
-- [ ] parse `T_KEM_SK`
-- [ ] preserve Falcon parsing
-- [ ] add a narrow unit test or fixture-driven parser test if practical
-- [ ] run `cargo check`
+- [x] align TLV tag constants with `vault.c`
+- [x] change parser header layout to `u16 type + u32 len`
+- [x] parse `T_KEM_PK`
+- [x] parse `T_KEM_SK`
+- [x] preserve Falcon parsing
+- [x] add a narrow unit test or fixture-driven parser test if practical
+- [x] run `cargo check`
 
 Must not:
 - wire keys into startup/runtime yet
@@ -142,8 +142,8 @@ Must not:
 - touch session transport code
 
 Acceptance:
-- [ ] parser layout matches `vault.c`
-- [ ] parser can read Falcon + KEM keys from the current format
+- [x] parser layout matches `vault.c`
+- [x] parser can read Falcon + KEM keys from the current format
 
 ### Task 03
 Status: done
@@ -420,8 +420,8 @@ Can run later, after the above stabilizes:
 
 ## 8. Single-Page Operator Checklist
 
-- [ ] Task 01 done
-- [ ] Task 02 done
+- [x] Task 01 done
+- [x] Task 02 done
 - [x] Task 03 done
 - [x] Task 04 done
 - [x] Task 05 done
