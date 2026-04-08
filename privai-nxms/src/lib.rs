@@ -114,10 +114,67 @@ pub struct EscrowOpenBody {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowFundedBody {
+    pub session_context: ContextId,
+    pub descriptor: EscrowFundingDescriptor,
+    pub funding_tx_ref: Hash32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowSpendProposalBody {
+    pub session_context: ContextId,
+    pub proposal: EscrowSpendProposal,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowApprovalBody {
+    pub session_context: ContextId,
+    pub proposal_hash: Hash32,
+    pub signer_pk: Hash32,
+    pub signature: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EscrowResolveBody {
     pub session_context: ContextId,
     pub resolution_tx_ref: Hash32,
     pub outcome_code: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowFundingDescriptor {
+    pub escrow_id: Hash32,
+    pub buyer_pk: Hash32,
+    pub merchant_pk: Hash32,
+    pub operator_pk: Hash32,
+    pub amount: u64,
+    pub spend_policy_commit: Hash32,
+    pub timeout_blocks: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowSnapshot {
+    pub escrow_id: Hash32,
+    pub funding_descriptor: EscrowFundingDescriptor,
+    pub funding_note_commit: Option<Hash32>,
+    pub status: u8,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowSpendProposal {
+    pub proposal_hash: Hash32,
+    pub escrow_id: Hash32,
+    pub snapshot_hash: Hash32,
+    pub action: u8, // 0 = release, 1 = refund, 2 = recovery_release, etc.
+    pub tx_signing_hash: Hash32, // The object to be signed for the ledger
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct EscrowApprovalBundle {
+    pub proposal_hash: Hash32,
+    pub tx_signing_hash: Hash32,
+    pub signer_pks: Vec<Hash32>,
+    pub signatures: Vec<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -149,6 +206,9 @@ pub enum PrivaiBody {
     InferenceResponse(InferenceResponseBody),
     WitnessUpdate(WitnessUpdateBody),
     EscrowOpen(EscrowOpenBody),
+    EscrowFunded(EscrowFundedBody),
+    EscrowSpendProposal(EscrowSpendProposalBody),
+    EscrowApproval(EscrowApprovalBody),
     EscrowResolve(EscrowResolveBody),
     ProofServiceRequest(ProofServiceRequestBody),
     ProofServiceResponse(ProofServiceResponseBody),
@@ -191,6 +251,9 @@ impl PrivaiBody {
             Self::InferenceResponse(_) => "inference_response",
             Self::WitnessUpdate(_) => "witness_update",
             Self::EscrowOpen(_) => "escrow_open",
+            Self::EscrowFunded(_) => "escrow_funded",
+            Self::EscrowSpendProposal(_) => "escrow_spend_proposal",
+            Self::EscrowApproval(_) => "escrow_approval",
             Self::EscrowResolve(_) => "escrow_resolve",
             Self::ProofServiceRequest(_) => "proof_service_request",
             Self::ProofServiceResponse(_) => "proof_service_response",
