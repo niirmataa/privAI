@@ -12,7 +12,7 @@ use privai_proof::StructuralProofVerifier;
 
 use privai_ledger::{
     apply_transaction_local, compute_state_root,
-    state::{ConsensusSafetyState, LedgerSnapshot, NoteRecord, NoteStatus},
+    state::{LedgerSnapshot, NoteRecord, NoteStatus},
     store::{FileSystemStore, LedgerStore, MemoryStore},
     Ledger,
 };

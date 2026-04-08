@@ -26,20 +26,6 @@ fn sample_note(seed: u8) -> OutputNote {
     )
 }
 
-fn test_epoch_params() -> privai_chain::EpochParams {
-    privai_chain::EpochParams {
-        epoch_number: 0,
-        start_height: 0,
-        end_height: 1_000_000,
-        min_validator_stake: 0,
-        min_prover_bond: 0,
-        min_fee: 0,
-        max_block_bytes: 10_000_000,
-        max_block_statements: 100_000,
-        min_proof_coverage: 1,
-    }
-}
-
 /// Helper: build a minimal valid block that extends the current tip.
 fn make_block(
     height: u64,
@@ -153,7 +139,7 @@ fn test_open_with_mismatched_state_root_fails_fast() {
     assert!(ledger_err.is_err(), "Expected Ledger::open to fail due to StateRootMismatch");
     match ledger_err {
         Err(LedgerError::Validation(ValidationError::StateRootMismatch { .. })) => {}
-        err => panic!("Oczekiwano StateRootMismatch, ale otrzymano inna pule / pass"),
+        _err => panic!("Oczekiwano StateRootMismatch, ale otrzymano inna pule / pass"),
     }
 }
 
