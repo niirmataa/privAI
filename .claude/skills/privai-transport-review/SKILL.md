@@ -1,0 +1,74 @@
+---
+name: privai-transport-review
+description: Review or extend privAI validator transport, handshake, session framing, Tor-backed networking, timeout policy, or tracker claims. Use when tasks touch `session_impl.rs`, `session_transport.rs`, `net.rs`, `nxms-transport`, or `spec/nxms_transport_p2p/*`.
+argument-hint: [scope]
+---
+
+# privAI Transport Review
+
+Use this skill when reviewing, extending, or sanity-checking validator transport and the P2P session layer in privAI.
+
+Treat `$ARGUMENTS` as the narrowed transport scope.
+
+## Read first
+
+1. `spec/PRIVAI_EXECUTION_SPINE.md`
+2. `spec/nxms_transport_p2p/TRANSPORT_P2P_MASTER_TASKS.md`
+3. `spec/nxms_transport_p2p/TRANSPORT_P2P_FIX_TRACKER.md`
+4. `spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md`
+5. `spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md`
+
+## Primary code
+
+- `privai-node/src/session_impl.rs`
+- `privai-node/src/session_transport.rs`
+- `privai-node/src/net.rs`
+- `nxms-transport/src/tor_net.rs`
+- `privai-node/tests/validator_session.rs`
+
+## Review workflow
+
+1. Read the invariants and tracker docs before reading the Rust code.
+2. Inspect the runtime path for handshake, decrypt, deserialize, timeout, ban, cooldown, and pressure behavior.
+3. Compare tracker claims against code and tests. Do not trust checked boxes.
+4. Treat validator transport and escrow/control-plane transport as separate layers.
+
+Useful repo search:
+
+```bash
+rg -n "handshake|decrypt|deserialize|ban|cooldown|timeout|plaintext|pressure" \
+  privai-node \
+  nxms-transport \
+  spec
+```
+
+## Core review questions
+
+- Does the incoming path decrypt before deserializing messages?
+- Is post-handshake plaintext impossible?
+- Is handshake freshness protected by challenge or transcript binding?
+- Is incoming ban policy safe against ban poisoning?
+- Are cooldown and pressure-guard semantics described honestly?
+- Are server-side handshake writes bounded by short timeouts?
+- Does startup fail closed on placeholder transport keys?
+- Do tracker claims match actual code paths and tests?
+
+## Guardrails
+
+- Do not assume a tracker item is fixed because it is checked off.
+- Do not describe pressure guard as real per-peer identity protection under Tor.
+- Treat `ban poisoning`, `plaintext fallback`, and unbounded handshake writes as high severity.
+- Keep findings concrete and tied to code, tests, or docs in this repo.
+
+## Output
+
+When reviewing:
+
+1. Findings first, highest severity first.
+2. Then residual gaps.
+3. Then short verdict: `done`, `done with residual gaps`, or `not done`.
+
+When drafting fixes:
+
+- Name exact file targets.
+- Separate code changes from doc or tracker changes.

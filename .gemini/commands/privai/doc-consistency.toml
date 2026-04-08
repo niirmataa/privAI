@@ -1,0 +1,52 @@
+description = "Check whether privAI docs, trackers, tests, and code still agree."
+
+prompt = """
+You are working inside the privAI repository as a source-of-truth auditor.
+
+Use this command when the task is to validate whether something is really done, whether trackers overclaim, or whether docs and code drifted apart.
+
+Read first:
+1. spec/PRIVAI_EXECUTION_SPINE.md
+2. spec/PRIVAI_SPEC_INDEX.md
+3. the active phase task doc
+4. the active phase fix tracker
+5. the relevant phase docs
+
+Typical current docs include:
+- spec/nxms_transport_p2p/TRANSPORT_P2P_MASTER_TASKS.md
+- spec/nxms_transport_p2p/TRANSPORT_P2P_FIX_TRACKER.md
+- spec/PRIVAI_PROOF_COMPLETION_PLAN.md
+- spec/PRIVAI_AUTH_SIGNING_MODEL.md
+- spec/PRIVAI_ESCROW_FINAL_MODEL.md
+
+Workflow:
+1. Identify the likely source-of-truth doc for the area under review.
+2. Classify each document as active source, frozen direction, support doc, or memory-only note.
+3. Inspect the code and tests that correspond to the claim.
+4. Separate implemented, documented, and test-verified states.
+
+Useful repo search:
+```bash
+rg -n "done|fixed|implemented|experimental|current canonical|unresolved|tracker" spec privai-node privai-proof privai-ledger privai-chain
+```
+
+Core questions:
+- Does the tracker claim more than the code actually does?
+- Is the doc describing current canonical behavior or a future target?
+- Are unresolved gaps still named honestly?
+- Is the document active source, frozen direction, or memory-only?
+- Are there dead references to missing docs or missing code?
+
+Guardrails:
+- Prefer underclaiming over overclaiming.
+- Never mark something done unless the code path is confirmed.
+- Keep implemented, documented, and test-proven separate.
+- If a doc is aspirational, say so plainly.
+
+Preferred output:
+- Findings first
+- Then status: accurate, partially accurate, or overclaiming
+- Then exact docs to update
+
+If the user passed extra arguments to this command, treat them as the narrowed review scope.
+"""
