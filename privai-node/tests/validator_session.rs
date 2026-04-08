@@ -12,8 +12,8 @@
 
 use std::time::Duration;
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use nxms_transport::crypto;
 use nxms_transport::peers::{Peer, PeerBook};
 use privai_node::net::{
@@ -46,54 +46,98 @@ impl TestKeys {
     }
 }
 
-/// Sign a HandshakeMsg's canonical form (falcon_sig_b64 cleared) and fill the sig field.
-/// This is the single source of truth for how a handshake gets signed in tests.
-fn sign_handshake(msg: &mut HandshakeMsg, sig_sk: &[u8]) {
-    let payload = serde_json::to_vec(&HandshakeMsg {
-        falcon_sig_b64: String::new(),
-        ..msg.clone()
-    })
-    .expect("serialize sig payload");
-
-    let sig = crypto::falcon_sign_ct_prepared(sig_sk, &payload).expect("falcon sign");
-    msg.falcon_sig_b64 = B64.encode(&sig);
+#[derive(Clone, Copy)]
+enum InitVariant {
+    Valid,
+    WrongVersion(u8),
+    BadSignature,
 }
 
-/// Build a correctly signed HandshakeMsg (version = 1).
-fn build_handshake(peer_id: &str, keys: &TestKeys) -> HandshakeMsg {
-    let mut msg = HandshakeMsg {
-        version: 1,
-        kem_pk_b64: B64.encode(&keys.kem_pk),
-        kem_ct_b64: String::new(),
-        sig_pk_b64: B64.encode(&keys.sig_pk),
-        peer_id: peer_id.to_string(),
-        falcon_sig_b64: String::new(),
+struct ServerChallenge {
+    peer_id: String,
+    nonce_b64: String,
+    nonce: Vec<u8>,
+}
+
+fn push_transcript_part(out: &mut Vec<u8>, data: &[u8]) {
+    let len = u32::try_from(data.len()).expect("transcript field length fits u32");
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(data);
+}
+
+fn build_handshake_init_transcript(
+    version: u8,
+    client_peer_id: &str,
+    server_peer_id: &str,
+    client_kem_pk: &[u8],
+    client_sig_pk: &[u8],
+    server_nonce: &[u8],
+) -> Vec<u8> {
+    let mut transcript = Vec::with_capacity(256 + client_kem_pk.len() + client_sig_pk.len());
+    push_transcript_part(&mut transcript, b"privai:validator-handshake:init:v1");
+    push_transcript_part(&mut transcript, &[version]);
+    push_transcript_part(&mut transcript, client_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, server_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, client_kem_pk);
+    push_transcript_part(&mut transcript, client_sig_pk);
+    push_transcript_part(&mut transcript, server_nonce);
+    transcript
+}
+
+fn parse_challenge(bytes: &[u8]) -> Option<ServerChallenge> {
+    let challenge = serde_json::from_slice::<HandshakeMsg>(bytes).ok()?;
+    match challenge {
+        HandshakeMsg::Challenge {
+            version,
+            peer_id,
+            nonce_b64,
+        } if version == 1 => {
+            let nonce = B64.decode(&nonce_b64).ok()?;
+            Some(ServerChallenge {
+                peer_id,
+                nonce_b64,
+                nonce,
+            })
+        }
+        _ => None,
+    }
+}
+
+/// Build a signed client Init message for the current handshake v2 flow.
+fn build_handshake_init(
+    peer_id: &str,
+    server: &ServerChallenge,
+    keys: &TestKeys,
+    variant: InitVariant,
+) -> HandshakeMsg {
+    let version = match variant {
+        InitVariant::Valid | InitVariant::BadSignature => 1,
+        InitVariant::WrongVersion(version) => version,
     };
-    sign_handshake(&mut msg, &keys.sig_sk);
-    msg
-}
 
-/// Build a HandshakeMsg with wrong version AND a valid signature over that wrong version.
-/// This isolates the version gate: the sig is valid, but version != 1.
-fn build_handshake_wrong_version(peer_id: &str, keys: &TestKeys) -> HandshakeMsg {
-    let mut msg = HandshakeMsg {
-        version: 99,
-        kem_pk_b64: B64.encode(&keys.kem_pk),
-        kem_ct_b64: String::new(),
-        sig_pk_b64: B64.encode(&keys.sig_pk),
-        peer_id: peer_id.to_string(),
-        falcon_sig_b64: String::new(),
+    let sig_payload = build_handshake_init_transcript(
+        version,
+        peer_id,
+        &server.peer_id,
+        &keys.kem_pk,
+        &keys.sig_pk,
+        &server.nonce,
+    );
+    let falcon_sig =
+        crypto::falcon_sign_ct_prepared(&keys.sig_sk, &sig_payload).expect("falcon sign");
+    let falcon_sig_b64 = match variant {
+        InitVariant::BadSignature => B64.encode(b"this-is-not-a-valid-falcon-signature"),
+        InitVariant::Valid | InitVariant::WrongVersion(_) => B64.encode(&falcon_sig),
     };
-    // Re-sign with the wrong version — sig is valid, but version gate should reject it
-    sign_handshake(&mut msg, &keys.sig_sk);
-    msg
-}
 
-/// Build a HandshakeMsg with a bad Falcon signature (correct version, valid keys).
-fn build_handshake_bad_sig(peer_id: &str, keys: &TestKeys) -> HandshakeMsg {
-    let mut msg = build_handshake(peer_id, keys);
-    msg.falcon_sig_b64 = B64.encode(b"this-is-not-a-valid-falcon-signature");
-    msg
+    HandshakeMsg::Init {
+        version,
+        peer_id: peer_id.to_string(),
+        kem_pk_b64: B64.encode(&keys.kem_pk),
+        sig_pk_b64: B64.encode(&keys.sig_pk),
+        nonce_b64: server.nonce_b64.clone(),
+        falcon_sig_b64,
+    }
 }
 
 /// Serialize a HandshakeMsg to bytes (what gets written over the wire).
@@ -155,17 +199,39 @@ async fn start_test_listener_on_port(
 }
 
 /// Connect to the listener, send a handshake, and check whether we receive
-/// a reply frame (indicating the listener accepted the handshake).
+/// a `Response` frame (indicating the listener accepted the handshake).
 ///
-/// Returns `true` if we received a reply frame (handshake accepted),
+/// Returns `true` if we received `Challenge -> Init -> Response`,
 /// `false` if the connection was closed, timed out, or produced an error.
-async fn try_handshake(addr: std::net::SocketAddr, handshake: &HandshakeMsg) -> bool {
+async fn try_handshake(
+    addr: std::net::SocketAddr,
+    peer_id: &str,
+    keys: &TestKeys,
+    variant: InitVariant,
+) -> bool {
     let mut stream = match TcpStream::connect(addr).await {
         Ok(s) => s,
         Err(_) => return false,
     };
 
-    let bytes = handshake_bytes(handshake);
+    let challenge_bytes = match tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await
+    {
+        Ok(Ok(data)) => data,
+        Ok(Err(_)) => return false,
+        Err(_) => return false,
+    };
+
+    let server = match parse_challenge(&challenge_bytes) {
+        Some(server) => server,
+        None => return false,
+    };
+
+    let init = build_handshake_init(peer_id, &server, keys, variant);
+    let bytes = handshake_bytes(&init);
 
     // Write frame (length-prefixed, matching nxms-transport wire format)
     if nxms_transport::tor_net::write_frame(&mut stream, &bytes)
@@ -175,8 +241,7 @@ async fn try_handshake(addr: std::net::SocketAddr, handshake: &HandshakeMsg) -> 
         return false;
     }
 
-    // The listener sends its own signed HandshakeMsg reply on success.
-    // If the handshake was rejected, the connection is typically closed.
+    // The listener sends a signed Response on success.
     let read_result = tokio::time::timeout(
         Duration::from_secs(3),
         nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
@@ -184,9 +249,19 @@ async fn try_handshake(addr: std::net::SocketAddr, handshake: &HandshakeMsg) -> 
     .await;
 
     match read_result {
-        Ok(Ok(_data)) => true, // Got a reply frame — handshake accepted
-        Ok(Err(_)) => false,   // Read error — connection closed by listener
-        Err(_) => false,       // Timeout — no reply (likely dropped)
+        Ok(Ok(data)) => match serde_json::from_slice::<HandshakeMsg>(&data) {
+            Ok(HandshakeMsg::Response {
+                version,
+                peer_id: response_peer_id,
+                nonce_b64,
+                ..
+            }) => {
+                version == 1 && response_peer_id == server.peer_id && nonce_b64 == server.nonce_b64
+            }
+            _ => false,
+        },
+        Ok(Err(_)) => false,
+        Err(_) => false,
     }
 }
 
@@ -310,16 +385,28 @@ async fn rate_limit_independent_sources() {
 #[tokio::test]
 async fn handshake_sign_and_verify() {
     let keys = TestKeys::generate();
-    let handshake = build_handshake("test-peer", &keys);
+    let server = ServerChallenge {
+        peer_id: "test-server".to_string(),
+        nonce_b64: B64.encode([7u8; 24]),
+        nonce: vec![7u8; 24],
+    };
+    let init = build_handshake_init("test-peer", &server, &keys, InitVariant::Valid);
 
-    // Verify the signature matches
-    let sig_payload = serde_json::to_vec(&HandshakeMsg {
-        falcon_sig_b64: String::new(),
-        ..handshake.clone()
-    })
-    .expect("serialize");
+    let sig_payload = build_handshake_init_transcript(
+        1,
+        "test-peer",
+        &server.peer_id,
+        &keys.kem_pk,
+        &keys.sig_pk,
+        &server.nonce,
+    );
 
-    let sig_bytes = B64.decode(&handshake.falcon_sig_b64).expect("decode sig");
+    let sig_bytes = match init {
+        HandshakeMsg::Init { falcon_sig_b64, .. } => {
+            B64.decode(&falcon_sig_b64).expect("decode sig")
+        }
+        _ => panic!("expected init"),
+    };
     assert!(
         crypto::falcon_verify(&keys.sig_pk, &sig_payload, &sig_bytes).is_ok(),
         "valid Falcon signature should verify"
@@ -340,17 +427,33 @@ async fn handshake_wrong_version_has_valid_signature() {
     // over the version=99 payload. This confirms the test isolates the version
     // gate, not a bad-signature rejection.
     let keys = TestKeys::generate();
-    let handshake = build_handshake_wrong_version("test-peer", &keys);
+    let server = ServerChallenge {
+        peer_id: "test-server".to_string(),
+        nonce_b64: B64.encode([9u8; 24]),
+        nonce: vec![9u8; 24],
+    };
+    let init = build_handshake_init("test-peer", &server, &keys, InitVariant::WrongVersion(99));
 
-    assert_eq!(handshake.version, 99, "version should be 99");
+    let sig_payload = build_handshake_init_transcript(
+        99,
+        "test-peer",
+        &server.peer_id,
+        &keys.kem_pk,
+        &keys.sig_pk,
+        &server.nonce,
+    );
 
-    let sig_payload = serde_json::to_vec(&HandshakeMsg {
-        falcon_sig_b64: String::new(),
-        ..handshake.clone()
-    })
-    .expect("serialize");
-
-    let sig_bytes = B64.decode(&handshake.falcon_sig_b64).expect("decode sig");
+    let sig_bytes = match init {
+        HandshakeMsg::Init {
+            version,
+            falcon_sig_b64,
+            ..
+        } => {
+            assert_eq!(version, 99, "version should be 99");
+            B64.decode(&falcon_sig_b64).expect("decode sig")
+        }
+        _ => panic!("expected init"),
+    };
     assert!(
         crypto::falcon_verify(&keys.sig_pk, &sig_payload, &sig_bytes).is_ok(),
         "wrong-version handshake should still have a valid signature"
@@ -392,8 +495,7 @@ async fn listener_handshake_accept_known_peer() {
     )
     .await;
 
-    let handshake = build_handshake("known-peer", &peer_keys);
-    let got_reply = try_handshake(addr, &handshake).await;
+    let got_reply = try_handshake(addr, "known-peer", &peer_keys, InitVariant::Valid).await;
 
     handle.abort();
     let _ = handle.await;
@@ -423,16 +525,12 @@ async fn listener_handshake_reject_unknown_peer() {
     )
     .await;
 
-    let handshake = build_handshake("unknown-peer", &peer_keys);
-    let got_reply = try_handshake(addr, &handshake).await;
+    let got_reply = try_handshake(addr, "unknown-peer", &peer_keys, InitVariant::Valid).await;
 
     handle.abort();
     let _ = handle.await;
 
-    assert!(
-        !got_reply,
-        "connection from unknown peer should be dropped"
-    );
+    assert!(!got_reply, "connection from unknown peer should be dropped");
 }
 
 #[tokio::test]
@@ -465,8 +563,8 @@ async fn listener_handshake_reject_wrong_version() {
     )
     .await;
 
-    let handshake = build_handshake_wrong_version("peer-v99", &peer_keys);
-    let got_reply = try_handshake(addr, &handshake).await;
+    let got_reply =
+        try_handshake(addr, "peer-v99", &peer_keys, InitVariant::WrongVersion(99)).await;
 
     handle.abort();
     let _ = handle.await;
@@ -506,8 +604,8 @@ async fn listener_handshake_reject_bad_falcon_signature() {
     )
     .await;
 
-    let handshake = build_handshake_bad_sig("peer-bad-sig", &peer_keys);
-    let got_reply = try_handshake(addr, &handshake).await;
+    let got_reply =
+        try_handshake(addr, "peer-bad-sig", &peer_keys, InitVariant::BadSignature).await;
 
     handle.abort();
     let _ = handle.await;
@@ -517,12 +615,12 @@ async fn listener_handshake_reject_bad_falcon_signature() {
         "connection with bad Falcon signature should be dropped"
     );
 
-    // Current canonical: peer with bad sig gets banned (§10.1)
-    // The listener task bans asynchronously — give it a moment.
+    // Current runtime after unauthenticated-ban hardening: bad signature is
+    // dropped, but the claimed peer_id is not banned before authentication.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert!(
-        ban_list.is_banned("peer-bad-sig").await,
-        "peer with bad signature should be banned"
+        !ban_list.is_banned("peer-bad-sig").await,
+        "bad signature before identity confirmation should not poison BanList"
     );
 }
 
@@ -556,16 +654,12 @@ async fn listener_handshake_reject_banned_peer() {
     )
     .await;
 
-    let handshake = build_handshake("banned-peer", &peer_keys);
-    let got_reply = try_handshake(addr, &handshake).await;
+    let got_reply = try_handshake(addr, "banned-peer", &peer_keys, InitVariant::Valid).await;
 
     handle.abort();
     let _ = handle.await;
 
-    assert!(
-        !got_reply,
-        "connection from banned peer should be dropped"
-    );
+    assert!(!got_reply, "connection from banned peer should be dropped");
 }
 
 // ===========================================================================
@@ -606,7 +700,10 @@ async fn connection_pool_send_to_unreachable_returns_error() {
         )
         .await;
 
-    assert!(result.is_err(), "send to unreachable peer should return error");
+    assert!(
+        result.is_err(),
+        "send to unreachable peer should return error"
+    );
 }
 
 #[tokio::test]
@@ -635,7 +732,10 @@ async fn bounded_channel_backpressure_does_not_panic() {
 
     // Third try_send should fail (channel full)
     let result = tx.try_send(vec![3]);
-    assert!(result.is_err(), "try_send on full bounded channel should fail");
+    assert!(
+        result.is_err(),
+        "try_send on full bounded channel should fail"
+    );
 
     // With timeout: should return Err(timeout), not panic
     let timeout_result = tokio::time::timeout(Duration::from_millis(100), tx.send(vec![4])).await;

@@ -131,25 +131,24 @@ Incoming path in `run_listener` zachowuje sie dzis tak:
 
 1. incoming connection przechodzi najpierw przez rate limiter keyed by `source = addr.to_string()`,
 2. incoming connection jest odrzucane, jesli semaphore `MAX_INCOMING_CONNECTIONS = 10` jest pelny,
-3. listener czeka do `10s` na pierwsza handshake frame,
-4. frame jest deserializowana jako `HandshakeMsg`,
-5. `version` musi byc rowne `HANDSHAKE_VERSION = 1`,
-6. po odczycie `peer_id` sprawdzany jest `BanList`,
-7. `peer_id` musi istniec w `PeerBook`,
-8. Falcon signature peera musi przejsc verify,
-9. listener robi FrodoKEM encapsulation against peer KEM public key,
-10. listener wysyla swoj signed handshake reply z `kem_ct`,
-11. po sukcesie listener wchodzi do message loop.
+3. listener generuje losowy nonce i wysyla `HandshakeMsg::Challenge` z timeoutem zapisu `10s`,
+4. listener czeka do `10s` na `HandshakeMsg::Init` od peera,
+5. `version` musi byc rowne `HANDSHAKE_VERSION = 1` oraz nonce musi sie zgadzac z wyslanym w Challenge,
+6. wstepnie sprawdzany jest `BanList` oraz obecnosc `peer_id` w `PeerBook` i zgodnosc kluczy (niezgodnosci skutkuja przerwaniem polaczenia, ale nie wpisuja na BanList przed autoryzacja),
+7. Falcon signature peera na transcript (zawierajacym nonce serwera) musi przejsc verify (kryptograficzne potwierdzenie tozsamosci),
+8. listener robi FrodoKEM encapsulation against peer KEM public key,
+9. listener wysyla swoj signed `HandshakeMsg::Response` z `kem_ct` z timeoutem zapisu `10s`,
+10. po sukcesie listener wchodzi do message loop i odszyfrowuje nadchodzace ramki przy uzyciu derived shared secret.
 
 ### 6.3. Current canonical: outgoing path
 
 Outgoing path in `ConnectionPool::establish_connection` zachowuje sie dzis tak:
 
 1. Tor connect ma timeout `30s`,
-2. handshake write ma timeout `10s`,
-3. handshake read ma timeout `10s`,
-4. outgoing side wysyla signed handshake first,
-5. peer reply musi miec `version = 1`,
+2. outgoing side (klient) odbiera najpierw `HandshakeMsg::Challenge` od serwera z timeoutem odczytu `10s`,
+3. klient wysyla `HandshakeMsg::Init` podpisany kluczem Falcon w powiazaniu z nonce serwera, z timeoutem zapisu `10s`,
+4. klient czeka na podpisany `HandshakeMsg::Response` od peera z timeoutem odczytu `10s`,
+5. peer reply musi miec `version = 1` oraz nonce serwera musi byc spojny w transcriptach,
 6. Falcon signature peera musi przejsc verify,
 7. peer handshake musi zawierac `kem_ct_b64`,
 8. shared secret jest derivowany przez `kem_decaps(my_kem_sk, peer_kem_ct)`,
@@ -165,8 +164,7 @@ Outgoing path in `ConnectionPool::establish_connection` zachowuje sie dzis tak:
 
 ### 6.5. Current non-conformities
 
-- incoming path currently discards the derived shared secret and therefore cannot perform session decrypt before `ConsensusMsg` deserialize,
-- outgoing handshake path does not currently assert `peer_handshake.peer_id == dialed peer.id`.
+(Usunięto dawne niezgodności: incoming decrypt gap oraz weryfikacja `peer_id` zostały naprawione w modelu `Challenge -> Init -> Response`).
 
 ## 7. Session Establishment And Active Session Rules
 
@@ -252,9 +250,8 @@ Maintenance tick today:
 - `BanList::is_banned()` checks current time against expiry,
 - `BanList::cleanup()` removes expired entries,
 - listener rejects an incoming peer if `BanList` already contains its `peer_id`,
-- listener bans a peer when:
-  - `peer_id` is not present in `PeerBook`,
-  - Falcon signature verification fails during incoming handshake.
+- listener odrzuca peera, ale **NIE banuje go** na wczesnym etapie handshake (przed kryptograficznym proof-of-identity) by zapobiec atakom "ban poisoning",
+- ban list chroni przed zautoryzowanymi i znanymi peerami, którzy okazali się złośliwi na wyższym poziomie.
 
 ### 10.2. Current non-conformity
 
@@ -383,8 +380,6 @@ Validator session layer does not own:
 
 ### 17.1. Current non-conformities
 
-- incoming path currently discards the derived shared secret and therefore cannot perform session decrypt before `ConsensusMsg` deserialize,
-- outgoing handshake path does not currently assert `peer_handshake.peer_id == dialed peer.id`,
 - outgoing path does not consult `BanList` before connect.
 
 ### 17.2. Most important unresolved gaps

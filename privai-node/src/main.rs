@@ -15,6 +15,9 @@ struct Cli {
     /// Use RocksDB instead of filesystem storage
     #[arg(long)]
     use_rocksdb: bool,
+    /// Path to nexum-cli vault export for PQC Identity
+    #[arg(long)]
+    vault: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
@@ -49,12 +52,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .config
                 .unwrap_or_else(|| PathBuf::from("privai-node.example.toml"));
             let config = NodeConfig::load(&config_path).unwrap_or_else(|_| NodeConfig::example());
-            
+
             if cli.use_rocksdb {
                 let rocksdb_path = PathBuf::from(&config.data_dir).join("rocksdb");
                 let store = RocksDBStore::new(&rocksdb_path)?;
                 store.ensure_initialized()?;
                 let mut node = PrivaiNode::open(config.clone(), store)?;
+                if let Some(vault_path) = &cli.vault {
+                    node.load_identity(vault_path)?;
+                }
                 let epoch_seed_hash = derive_epoch_seed(&[0; 32], epoch);
                 let block = node.propose_block(
                     epoch,
@@ -74,6 +80,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             } else {
                 let store = FileSystemStore::new(&config.data_dir);
                 let mut node = PrivaiNode::open(config.clone(), store)?;
+                if let Some(vault_path) = &cli.vault {
+                    node.load_identity(vault_path)?;
+                }
                 let epoch_seed_hash = derive_epoch_seed(&[0; 32], epoch);
                 let block = node.propose_block(
                     epoch,

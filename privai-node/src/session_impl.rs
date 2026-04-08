@@ -27,7 +27,7 @@
 use tokio::sync::mpsc;
 
 use nxms_transport::peers::{Peer, PeerBook};
-use nxms_transport::tor_net::{connect_via_tor, read_frame, write_frame, serve};
+use nxms_transport::tor_net::{connect_via_tor, read_frame, serve, write_frame};
 use privai_chain::ConsensusMsg;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -56,26 +56,78 @@ const RATE_LIMIT_WINDOW_SECS: u64 = 60;
 /// Protokół wersji handshake.
 const HANDSHAKE_VERSION: u8 = 1;
 
-/// Wiadomość handshake wymieniana przy pierwszym połączeniu.
-/// Zawiera klucze publiczne PQC (FrodoKEM + Falcon) do szyfrowania dalszej komunikacji.
-/// Podpisana Falconem aby zapobiec MITM.
+/// Wiadomości handshake wymieniane przy pierwszym połączeniu.
+/// Model challenge-response zapewnia freshness i transcript binding.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HandshakeMsg {
-    /// Wersja protokołu handshake
-    pub version: u8,
-    /// Klucz publiczny FrodoKEM (base64)
-    pub kem_pk_b64: String,
-    /// Ciphertext FrodoKEM encapsulation (base64) — do derivacji shared secret
-    /// Nadawca robi encap(peer_kem_pk) → (kem_ct, shared_secret)
-    /// Odbiorca robi decap(my_kem_sk, kem_ct) → shared_secret
-    #[serde(default)]
-    pub kem_ct_b64: String,
-    /// Klucz publiczny Falcon (base64)
-    pub sig_pk_b64: String,
-    /// ID peera w PeerBook
-    pub peer_id: String,
-    /// Podpis Falcon całego obiektu (bez tego pola) — anti-MITM
-    pub falcon_sig_b64: String,
+pub enum HandshakeMsg {
+    /// Serwer żąda świeżej odpowiedzi klienta.
+    Challenge {
+        version: u8,
+        peer_id: String,
+        nonce_b64: String,
+    },
+    /// Klient odpowiada podpisując transcript związany z nonce serwera.
+    Init {
+        version: u8,
+        peer_id: String,
+        kem_pk_b64: String,
+        sig_pk_b64: String,
+        nonce_b64: String,
+        falcon_sig_b64: String,
+    },
+    /// Serwer odsyła KEM ciphertext oraz podpisuje transcript odpowiedzi.
+    Response {
+        version: u8,
+        peer_id: String,
+        kem_ct_b64: String,
+        sig_pk_b64: String,
+        nonce_b64: String,
+        falcon_sig_b64: String,
+    },
+}
+
+fn push_transcript_part(out: &mut Vec<u8>, data: &[u8]) {
+    let len = u32::try_from(data.len()).expect("transcript field length fits u32");
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(data);
+}
+
+fn build_handshake_init_transcript(
+    version: u8,
+    client_peer_id: &str,
+    server_peer_id: &str,
+    client_kem_pk: &[u8],
+    client_sig_pk: &[u8],
+    server_nonce: &[u8],
+) -> Vec<u8> {
+    let mut transcript = Vec::with_capacity(256 + client_kem_pk.len() + client_sig_pk.len());
+    push_transcript_part(&mut transcript, b"privai:validator-handshake:init:v1");
+    push_transcript_part(&mut transcript, &[version]);
+    push_transcript_part(&mut transcript, client_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, server_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, client_kem_pk);
+    push_transcript_part(&mut transcript, client_sig_pk);
+    push_transcript_part(&mut transcript, server_nonce);
+    transcript
+}
+
+fn build_handshake_response_transcript(
+    version: u8,
+    client_peer_id: &str,
+    server_peer_id: &str,
+    kem_ct: &[u8],
+    server_sig_pk: &[u8],
+    server_nonce: &[u8],
+) -> Vec<u8> {
+    let mut transcript = Vec::with_capacity(256 + kem_ct.len() + server_sig_pk.len());
+    push_transcript_part(&mut transcript, b"privai:validator-handshake:response:v1");
+    push_transcript_part(&mut transcript, &[version]);
+    push_transcript_part(&mut transcript, client_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, server_peer_id.as_bytes());
+    push_transcript_part(&mut transcript, kem_ct);
+    push_transcript_part(&mut transcript, server_sig_pk);
+    push_transcript_part(&mut transcript, server_nonce);
+    transcript
 }
 
 /// Konfiguracja sieciowa węzła konsensusowego.
@@ -92,7 +144,12 @@ pub struct NetConfig {
 }
 
 impl NetConfig {
-    pub fn new(listen_addr: String, tor_socks_url: String, peers_path: String, my_peer_id: String) -> Self {
+    pub fn new(
+        listen_addr: String,
+        tor_socks_url: String,
+        peers_path: String,
+        my_peer_id: String,
+    ) -> Self {
         Self {
             listen_addr,
             tor_socks_url,
@@ -127,7 +184,7 @@ pub enum NetError {
 }
 
 /// Serwer nasłuchujący na incoming connections (Tor hidden service).
-/// 
+///
 /// Flow incoming (zabezpieczony):
 /// 1. Rate limiter check (max 5 conn/min z tego samego source)
 /// 2. Ban list check
@@ -139,7 +196,7 @@ pub enum NetError {
 pub async fn run_listener(
     config: NetConfig,
     msg_tx: mpsc::Sender<(String, ConsensusMsg)>,
-    node_kem_pk: Vec<u8>,
+    _node_kem_pk: Vec<u8>,
     _node_kem_sk: Vec<u8>,
     node_sig_pk: Vec<u8>,
     node_sig_sk: Vec<u8>,
@@ -176,15 +233,13 @@ pub async fn run_listener(
             Ok(p) => p,
             Err(_) => {
                 eprintln!("[net] too many incoming connections, rejecting {}", source);
-                 drop(stream);
+                drop(stream);
                 continue;
             }
         };
 
         let tx = msg_tx.clone();
-        let kem_pk = node_kem_pk.clone();
         let sig_pk = node_sig_pk.clone();
-        let _sig_sk = node_sig_sk.clone();
         let my_peer_id = node_peer_id.clone();
         let peers = peer_book.peers.clone();
         let ban_list = ban_list.clone();
@@ -200,210 +255,314 @@ pub async fn run_listener(
             let connection_result = tokio::time::timeout(
                 Duration::from_secs(300), // 5 minut max na połączenie
                 async {
-            // --- PQC Handshake: odbierz od peera (z timeout) ---
-            use base64::Engine;
-            use base64::engine::general_purpose::STANDARD as B64;
+                    // --- PQC Handshake: najpierw wyślij challenge freshness ---
+                    use base64::engine::general_purpose::STANDARD as B64;
+                    use base64::Engine;
 
-            let peer_handshake_bytes = match tokio::time::timeout(
-                Duration::from_secs(10),
-                read_frame(&mut stream, 64 * 1024),
-            )
-            .await
-            {
-                Ok(Ok(data)) => data,
-                Ok(Err(e)) => {
-                    eprintln!("[net] incoming handshake read from {} failed: {}", addr, e);
-                    return;
-                }
-                Err(_) => {
-                    eprintln!("[net] incoming handshake read timeout from {}", addr);
-                    return;
-                }
-            };
+                    let server_nonce = nxms_transport::crypto::random_xchacha20poly1305_nonce();
+                    let server_nonce_b64 = B64.encode(server_nonce);
+                    let challenge = HandshakeMsg::Challenge {
+                        version: HANDSHAKE_VERSION,
+                        peer_id: my_peer_id.clone(),
+                        nonce_b64: server_nonce_b64.clone(),
+                    };
+                    let challenge_bytes = match serde_json::to_vec(&challenge) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[net] challenge serialize failed: {}", e);
+                            return;
+                        }
+                    };
 
-            let peer_handshake: HandshakeMsg = match serde_json::from_slice(&peer_handshake_bytes) {
-                Ok(h) => h,
-                Err(e) => {
-                    eprintln!("[net] incoming handshake deserialize from {} failed: {}", addr, e);
-                    return;
-                }
-            };
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        write_frame(&mut stream, &challenge_bytes),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            eprintln!("[net] challenge write to {} failed: {}", addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("[net] challenge write timeout to {}", addr);
+                            return;
+                        }
+                    }
 
-            if peer_handshake.version != HANDSHAKE_VERSION {
-                eprintln!(
-                    "[net] incoming handshake from {} unsupported version {}",
-                    addr, peer_handshake.version
-                );
-                return;
-            }
+                    let peer_handshake_bytes = match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        read_frame(&mut stream, 64 * 1024),
+                    )
+                    .await
+                    {
+                        Ok(Ok(data)) => data,
+                        Ok(Err(e)) => {
+                            eprintln!("[net] incoming handshake read from {} failed: {}", addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("[net] incoming handshake read timeout from {}", addr);
+                            return;
+                        }
+                    };
 
-            // --- Security: Ban list check ---
-            if ban_list.is_banned(&peer_handshake.peer_id).await {
-                eprintln!(
-                    "[net] rejected banned peer {} from {}",
-                    peer_handshake.peer_id, addr
-                );
-                return;
-            }
+                    let init_msg: HandshakeMsg = match serde_json::from_slice(&peer_handshake_bytes)
+                    {
+                        Ok(h) => h,
+                        Err(e) => {
+                            eprintln!(
+                                "[net] incoming handshake deserialize from {} failed: {}",
+                                addr, e
+                            );
+                            return;
+                        }
+                    };
 
-            // --- Security: Peer verification (anti-sybil) ---
-            let peer_known = peers.iter().any(|p| p.id == peer_handshake.peer_id);
-            if !peer_known {
-                eprintln!(
-                    "[net] rejected unknown peer {} from {} (not in PeerBook)",
-                    peer_handshake.peer_id, addr
-                );
-                ban_list.ban(&peer_handshake.peer_id).await;
-                return;
-            }
+                    let (
+                        peer_id,
+                        peer_kem_pk_b64,
+                        peer_sig_pk_b64,
+                        peer_nonce_b64,
+                        peer_falcon_sig_b64,
+                    ) = match init_msg {
+                        HandshakeMsg::Init {
+                            version,
+                            peer_id,
+                            kem_pk_b64,
+                            sig_pk_b64,
+                            nonce_b64,
+                            falcon_sig_b64,
+                        } => {
+                            if version != HANDSHAKE_VERSION {
+                                eprintln!(
+                                    "[net] incoming handshake from {} unsupported version {}",
+                                    addr, version
+                                );
+                                return;
+                            }
+                            (peer_id, kem_pk_b64, sig_pk_b64, nonce_b64, falcon_sig_b64)
+                        }
+                        other => {
+                            eprintln!(
+                                "[net] incoming handshake from {} expected Init, got {:?}",
+                                addr, other
+                            );
+                            return;
+                        }
+                    };
 
-            eprintln!(
-                "[net] PQC handshake from verified peer {} (addr: {})",
-                peer_handshake.peer_id, addr
-            );
+                    if peer_nonce_b64 != server_nonce_b64 {
+                        eprintln!(
+                            "[net] incoming handshake from {} has mismatched challenge nonce",
+                            addr
+                        );
+                        return;
+                    }
 
-            // --- Security: Weryfikuj podpis Falcon peera (anti-MITM) ---
-            let peer_sig_payload = match serde_json::to_vec(&HandshakeMsg {
-                falcon_sig_b64: String::new(),
-                ..peer_handshake.clone()
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[net] peer sig payload serialize failed: {}", e);
-                    return;
-                }
-            };
+                    // --- Security: Ban list check ---
+                    if ban_list.is_banned(&peer_id).await {
+                        eprintln!("[net] rejected banned peer {} from {}", peer_id, addr);
+                        return;
+                    }
 
-            let peer_falcon_sig = match B64.decode(&peer_handshake.falcon_sig_b64) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[net] invalid peer falcon_sig_b64: {}", e);
-                    return;
-                }
-            };
+                    // --- Security: Peer verification (anti-sybil) ---
+                    let peer_info = match peers.iter().find(|p| p.id == peer_id) {
+                        Some(peer) => peer,
+                        None => {
+                            eprintln!(
+                                "[net] rejected unknown peer {} from {} (not in PeerBook)",
+                                peer_id, addr
+                            );
+                            return;
+                        }
+                    };
 
-            let peer_sig_pk = match B64.decode(&peer_handshake.sig_pk_b64) {
-                Ok(pk) => pk,
-                Err(e) => {
-                    eprintln!("[net] invalid peer sig_pk_b64: {}", e);
-                    return;
-                }
-            };
+                    if peer_sig_pk_b64 != peer_info.sig_pk_b64
+                        || peer_kem_pk_b64 != peer_info.kem_pk_b64
+                    {
+                        eprintln!(
+                            "[net] rejected peer {} from {} due to key mismatch with PeerBook",
+                            peer_id, addr
+                        );
+                        return;
+                    }
 
-            if let Err(e) = nxms_transport::crypto::falcon_verify(&peer_sig_pk, &peer_sig_payload, &peer_falcon_sig) {
-                eprintln!(
-                    "[net] handshake falcon_verify from {} failed: {}",
-                    peer_handshake.peer_id, e
-                );
-                ban_list.ban(&peer_handshake.peer_id).await;
-                return;
-            }
+                    eprintln!(
+                        "[net] PQC handshake from verified peer {} (addr: {})",
+                        peer_id, addr
+                    );
 
-            eprintln!(
-                "[net] handshake signature from {} verified (falcon OK)",
-                peer_handshake.peer_id
-            );
+                    // --- Security: Weryfikuj podpis Falcon peera (anti-MITM) ---
+                    let peer_falcon_sig = match B64.decode(&peer_falcon_sig_b64) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[net] invalid peer falcon_sig_b64: {}", e);
+                            return;
+                        }
+                    };
 
-            // --- FrodoKEM encap: generuj shared secret z kluczem publicznym peera ---
-            let peer_kem_pk_bytes = match B64.decode(&peer_handshake.kem_pk_b64) {
-                Ok(pk) => pk,
-                Err(e) => {
-                    eprintln!("[net] invalid peer kem_pk_b64: {}", e);
-                    return;
-                }
-            };
+                    let peer_sig_pk = match B64.decode(&peer_info.sig_pk_b64) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            eprintln!("[net] invalid peer sig_pk_b64 from PeerBook: {}", e);
+                            return;
+                        }
+                    };
 
-            let (kem_ct, _kem_shared_secret) = match nxms_transport::crypto::kem_encaps(&peer_kem_pk_bytes) {
-                Ok((ct, ss)) => (ct, ss),
-                Err(e) => {
-                    eprintln!("[net] kem_encaps failed: {}", e);
-                    return;
-                }
-            };
+                    let peer_kem_pk_bytes = match B64.decode(&peer_info.kem_pk_b64) {
+                        Ok(pk) => pk,
+                        Err(e) => {
+                            eprintln!("[net] invalid peer kem_pk_b64 from PeerBook: {}", e);
+                            return;
+                        }
+                    };
 
-            eprintln!("[net] KEM encap done, kem_ct={} bytes", kem_ct.len());
+                    let peer_sig_payload = build_handshake_init_transcript(
+                        HANDSHAKE_VERSION,
+                        &peer_id,
+                        &my_peer_id,
+                        &peer_kem_pk_bytes,
+                        &peer_sig_pk,
+                        &server_nonce,
+                    );
 
-            // --- PQC Handshake: wyślij nasz (podpisany + kem_ct) ---
-            let mut my_handshake = HandshakeMsg {
-                version: HANDSHAKE_VERSION,
-                kem_pk_b64: B64.encode(&kem_pk),
-                kem_ct_b64: B64.encode(&kem_ct),
-                sig_pk_b64: B64.encode(&sig_pk),
-                peer_id: my_peer_id,
-                falcon_sig_b64: String::new(), // placeholder
-            };
+                    if let Err(e) = nxms_transport::crypto::falcon_verify(
+                        &peer_sig_pk,
+                        &peer_sig_payload,
+                        &peer_falcon_sig,
+                    ) {
+                        eprintln!(
+                            "[net] handshake falcon_verify from {} failed: {}",
+                            peer_id, e
+                        );
+                        return;
+                    }
 
-            // Podpisz canonical form (bez pola falcon_sig_b64)
-            let sig_payload = match serde_json::to_vec(&HandshakeMsg {
-                falcon_sig_b64: String::new(),
-                ..my_handshake.clone()
-            }) {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("[net] sig payload serialize failed: {}", e);
-                    return;
-                }
-            };
+                    eprintln!(
+                        "[net] handshake signature from {} verified (falcon OK)",
+                        peer_id
+                    );
 
-            let falcon_sig = match nxms_transport::crypto::falcon_sign_ct_prepared(&node_sig_sk_clone, &sig_payload) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!("[net] falcon sign handshake failed: {}", e);
-                    return;
-                }
-            };
+                    // --- FrodoKEM encap: generuj shared secret z kluczem publicznym peera ---
+                    let (kem_ct, kem_shared_secret) =
+                        match nxms_transport::crypto::kem_encaps(&peer_kem_pk_bytes) {
+                            Ok((ct, ss)) => (ct, ss),
+                            Err(e) => {
+                                eprintln!("[net] kem_encaps failed: {}", e);
+                                return;
+                            }
+                        };
 
-            my_handshake.falcon_sig_b64 = B64.encode(&falcon_sig);
+                    let mut incoming_shared_secret = [0u8; 32];
+                    incoming_shared_secret.copy_from_slice(&kem_shared_secret[..32]);
 
-            let handshake_bytes = match serde_json::to_vec(&my_handshake) {
-                Ok(b) => b,
-                Err(e) => {
-                    eprintln!("[net] handshake serialize failed: {}", e);
-                    return;
-                }
-            };
+                    eprintln!("[net] KEM encap done, kem_ct={} bytes", kem_ct.len());
 
-            if let Err(e) = write_frame(&mut stream, &handshake_bytes).await {
-                eprintln!("[net] handshake write to {} failed: {}", addr, e);
-                return;
-            }
+                    // --- PQC Handshake: wyślij nasz (podpisany + kem_ct) ---
+                    let sig_payload = build_handshake_response_transcript(
+                        HANDSHAKE_VERSION,
+                        &peer_id,
+                        &my_peer_id,
+                        &kem_ct,
+                        &sig_pk,
+                        &server_nonce,
+                    );
 
-            eprintln!(
-                "[net] handshake with {} complete, entering msg loop",
-                peer_handshake.peer_id
-            );
+                    let falcon_sig = match nxms_transport::crypto::falcon_sign_ct_prepared(
+                        &node_sig_sk_clone,
+                        &sig_payload,
+                    ) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            eprintln!("[net] falcon sign handshake failed: {}", e);
+                            return;
+                        }
+                    };
 
-            // --- Czytaj ConsensusMsg w pętli ---
-            loop {
-                match read_frame(&mut stream, 1024 * 1024).await {
-                    Ok(data) => {
-                        match serde_json::from_slice::<ConsensusMsg>(&data) {
-                            Ok(msg) => {
-                                let peer_hint = peer_handshake.peer_id.clone();
-                                if tx.send((peer_hint, msg)).await.is_err() {
-                                    break; // channel zamknięty
+                    let my_handshake = HandshakeMsg::Response {
+                        version: HANDSHAKE_VERSION,
+                        peer_id: my_peer_id.clone(),
+                        kem_ct_b64: B64.encode(&kem_ct),
+                        sig_pk_b64: B64.encode(&sig_pk),
+                        nonce_b64: server_nonce_b64,
+                        falcon_sig_b64: B64.encode(&falcon_sig),
+                    };
+
+                    let handshake_bytes = match serde_json::to_vec(&my_handshake) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            eprintln!("[net] handshake serialize failed: {}", e);
+                            return;
+                        }
+                    };
+
+                    match tokio::time::timeout(
+                        Duration::from_secs(10),
+                        write_frame(&mut stream, &handshake_bytes),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(e)) => {
+                            eprintln!("[net] handshake write to {} failed: {}", addr, e);
+                            return;
+                        }
+                        Err(_) => {
+                            eprintln!("[net] handshake write timeout to {}", addr);
+                            return;
+                        }
+                    }
+
+                    eprintln!(
+                        "[net] handshake with {} complete, entering msg loop",
+                        peer_id
+                    );
+
+                    // --- Czytaj ConsensusMsg w pętli ---
+                    loop {
+                        match read_frame(&mut stream, 1024 * 1024).await {
+                            Ok(encrypted_frame) => {
+                                let data = match decrypt_frame(
+                                    &encrypted_frame,
+                                    &incoming_shared_secret,
+                                ) {
+                                    Ok(data) => data,
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[net] failed to decrypt frame from {}: {}",
+                                            peer_id, e
+                                        );
+                                        break;
+                                    }
+                                };
+
+                                match serde_json::from_slice::<ConsensusMsg>(&data) {
+                                    Ok(msg) => {
+                                        let peer_hint = peer_id.clone();
+                                        if tx.send((peer_hint, msg)).await.is_err() {
+                                            break; // channel zamknięty
+                                        }
+                                    }
+                                    Err(e) => {
+                                        eprintln!(
+                                            "[net] failed to deserialize ConsensusMsg from {}: {}",
+                                            peer_id, e
+                                        );
+                                        break;
+                                    }
                                 }
                             }
                             Err(e) => {
-                                eprintln!(
-                                    "[net] failed to deserialize ConsensusMsg from {}: {}",
-                                    peer_handshake.peer_id, e
-                                );
+                                eprintln!("[net] connection from {} closed: {}", peer_id, e);
                                 break;
                             }
                         }
                     }
-                    Err(e) => {
-                        eprintln!(
-                            "[net] connection from {} closed: {}",
-                            peer_handshake.peer_id, e
-                        );
-                        break;
-                    }
-                }
-            }
-            }
-            ).await; // timeout
+                },
+            )
+            .await; // timeout
 
             match connection_result {
                 Ok(()) => {
@@ -449,7 +608,7 @@ pub struct ConnectionMeta {
     peer_kem_pk: Option<Vec<u8>>,
     /// Klucz publiczny Falcon peera (po handshake)
     peer_sig_pk: Option<Vec<u8>>,
-    /// Shared secret z FrodoKEM do szyfrowania ramek (AES-256-GCM)
+    /// Shared secret z FrodoKEM do szyfrowania ramek (XChaCha20-Poly1305)
     /// Zeroizing chroni przed odczytem z dumpów pamięci
     shared_secret: Option<zeroize::Zeroizing<[u8; 32]>>,
 }
@@ -518,16 +677,16 @@ impl Default for ConnectionPoolConfig {
     fn default() -> Self {
         Self {
             // Tor circuits żyją ~10 minut, ale dla Gossip chcemy krócej
-            idle_timeout_secs: 120,   // 2 minuty bezczynności
-            max_age_secs: 600,        // 10 minut maksymalny wiek (z jitter w maintenance)
+            idle_timeout_secs: 120, // 2 minuty bezczynności
+            max_age_secs: 600,      // 10 minut maksymalny wiek (z jitter w maintenance)
             health_check_interval_secs: 30,
             auto_reconnect: true,
         }
     }
 }
 
-/// Szyfruje ramkę AES-256-GCM z shared secret (FrodoKEM).
-/// Format: [12-byte nonce][ciphertext][16-byte tag]
+/// Szyfruje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
+/// Format: [24-byte nonce][ciphertext][16-byte tag]
 fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::{random_xchacha20poly1305_nonce, xchacha20poly1305_encrypt};
 
@@ -542,8 +701,7 @@ fn encrypt_frame(data: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetEr
     Ok(frame)
 }
 
-/// Odszyfrowuje ramkę AES-256-GCM z shared secret (FrodoKEM).
-#[allow(dead_code)] // Używane przy odczycie frame w connection read loop
+/// Odszyfrowuje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
 fn decrypt_frame(encrypted: &[u8], shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::xchacha20poly1305_decrypt;
 
@@ -572,10 +730,12 @@ fn jitter_max_age(base_age_secs: u64) -> u64 {
     static RANDOM: OnceLock<RandomState> = OnceLock::new();
     let state = RANDOM.get_or_init(RandomState::new);
     let mut hasher = state.build_hasher();
-    hasher.write_u64(std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos() as u64);
+    hasher.write_u64(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos() as u64,
+    );
     let jitter = hasher.finish() % 120; // 0-119s jitter
     base_age_secs + jitter
 }
@@ -735,7 +895,7 @@ impl ConnectionPool {
     }
 
     /// Wysyła zaszyfrowaną wiadomość przez kanał MPSC (Actor pattern).
-    /// Wiadomość jest szyfrowana AES-256-GCM z shared secret (FrodoKEM).
+    /// Wiadomość jest szyfrowana XChaCha20-Poly1305 z shared secret (FrodoKEM).
     /// Timeout na send (10s) — chroni przed blokowaniem na pełnym kanale.
     pub async fn send_message<T: Serialize>(
         &self,
@@ -777,11 +937,16 @@ impl ConnectionPool {
             }
         };
 
-        // Szyfruj ramkę AES-256-GCM z shared secret (jeśli dostępny)
-        let encrypted_data = if let Some(secret) = shared_secret {
-            encrypt_frame(&data, &secret)?
-        } else {
-            data // Fallback: plaintext (przed handshake)
+        // Szyfruj ramkę z shared secret.
+        // Brak shared secret to krytyczny błąd stanu sesji (wymagane szyfrowanie post-handshake).
+        let encrypted_data = match shared_secret {
+            Some(secret) => encrypt_frame(&data, &secret)?,
+            None => {
+                return Err(NetError::Transport(anyhow::anyhow!(
+                    "Missing shared secret for peer {} (post-handshake encryption required)",
+                    peer.id
+                )));
+            }
         };
 
         // Wyślij przez kanał MPSC (Actor pattern — brak contention na Mutex)
@@ -791,8 +956,12 @@ impl ConnectionPool {
             writer_tx.send(WriterMsg::Send(encrypted_data)),
         )
         .await
-        .map_err(|_| NetError::Transport(anyhow::anyhow!("Writer send timeout for peer {}", peer.id)))?
-        .map_err(|_| NetError::Transport(anyhow::anyhow!("Writer task closed for peer {}", peer.id)))?;
+        .map_err(|_| {
+            NetError::Transport(anyhow::anyhow!("Writer send timeout for peer {}", peer.id))
+        })?
+        .map_err(|_| {
+            NetError::Transport(anyhow::anyhow!("Writer task closed for peer {}", peer.id))
+        })?;
 
         // Aktualizuj metadane
         {
@@ -843,7 +1012,10 @@ impl ConnectionPool {
         );
 
         // Ogranicz jednoczesne circuit builds (zapobiega floodowaniu Tora)
-        let _permit = self.circuit_semaphore.acquire().await
+        let _permit = self
+            .circuit_semaphore
+            .acquire()
+            .await
             .map_err(|e| NetError::Transport(anyhow::anyhow!("semaphore closed: {}", e)))?;
 
         // WOLNA ŚCIEŻKA: Tor Circuit Build
@@ -863,89 +1035,193 @@ impl ConnectionPool {
         // --- FrodoKEM Handshake ---
         eprintln!("[pool] starting PQC handshake with {}", peer.id);
 
-        use base64::Engine;
         use base64::engine::general_purpose::STANDARD as B64;
+        use base64::Engine;
 
-        // Krok 1: Podpisz i wyślij nasz HandshakeMsg (bez kem_ct — nie znamy jeszcze peer_kem_pk)
-        let mut my_handshake = HandshakeMsg {
-            version: HANDSHAKE_VERSION,
-            kem_pk_b64: B64.encode(my_kem_pk),
-            kem_ct_b64: String::new(), // wyślemy po otrzymaniu peer_kem_pk
-            sig_pk_b64: B64.encode(my_sig_pk),
-            peer_id: my_peer_id.to_string(),
-            falcon_sig_b64: String::new(), // placeholder
-        };
+        // Krok 1: Odbierz Challenge od serwera (z timeout)
+        let challenge_bytes =
+            tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream, 64 * 1024))
+                .await
+                .map_err(|_| {
+                    NetError::Transport(anyhow::anyhow!("handshake read timeout from {}", peer.id))
+                })?
+                .map_err(|e| {
+                    eprintln!("[pool] handshake read from {} failed: {}", peer.id, e);
+                    NetError::Transport(e)
+                })?;
 
-        // Podpisz canonical form (bez pola falcon_sig_b64)
-        let sig_payload = serde_json::to_vec(&HandshakeMsg {
-            falcon_sig_b64: String::new(),
-            ..my_handshake.clone()
-        })
-        .map_err(|e| NetError::Transport(anyhow::anyhow!("sig payload serialize: {}", e)))?;
+        let (server_peer_id, server_nonce_b64) =
+            match serde_json::from_slice::<HandshakeMsg>(&challenge_bytes).map_err(|e| {
+                eprintln!(
+                    "[pool] handshake challenge deserialize from {} failed: {}",
+                    peer.id, e
+                );
+                NetError::Serde(e)
+            })? {
+                HandshakeMsg::Challenge {
+                    version,
+                    peer_id,
+                    nonce_b64,
+                } => {
+                    if version != HANDSHAKE_VERSION {
+                        return Err(NetError::Transport(anyhow::anyhow!(
+                            "unsupported handshake version {} from {}",
+                            version,
+                            peer.id
+                        )));
+                    }
+                    (peer_id, nonce_b64)
+                }
+                other => {
+                    return Err(NetError::Transport(anyhow::anyhow!(
+                        "expected Challenge from {}, got {:?}",
+                        peer.id,
+                        other
+                    )));
+                }
+            };
+
+        if server_peer_id != peer.id {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "challenge peer_id mismatch: expected {}, got {}",
+                peer.id,
+                server_peer_id
+            )));
+        }
+
+        let server_nonce = B64
+            .decode(&server_nonce_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid challenge nonce: {}", e)))?;
+
+        // Krok 2: Podpisz transcript challenge i wyślij Init
+        let sig_payload = build_handshake_init_transcript(
+            HANDSHAKE_VERSION,
+            my_peer_id,
+            &peer.id,
+            my_kem_pk,
+            my_sig_pk,
+            &server_nonce,
+        );
 
         let falcon_sig = nxms_transport::crypto::falcon_sign_ct_prepared(my_sig_sk, &sig_payload)
-            .map_err(|e| NetError::Transport(anyhow::anyhow!("falcon sign handshake: {}", e)))?;
+            .map_err(|e| {
+            NetError::Transport(anyhow::anyhow!("falcon sign handshake: {}", e))
+        })?;
 
-        my_handshake.falcon_sig_b64 = B64.encode(&falcon_sig);
+        let my_handshake = HandshakeMsg::Init {
+            version: HANDSHAKE_VERSION,
+            peer_id: my_peer_id.to_string(),
+            kem_pk_b64: B64.encode(my_kem_pk),
+            sig_pk_b64: B64.encode(my_sig_pk),
+            nonce_b64: server_nonce_b64.clone(),
+            falcon_sig_b64: B64.encode(&falcon_sig),
+        };
 
-        let _handshake_bytes = tokio::time::timeout(
-            Duration::from_secs(10),
-            async {
-                let bytes = serde_json::to_vec(&my_handshake)?;
-                write_frame(&mut stream, &bytes).await?;
-                Ok::<_, anyhow::Error>(())
-            },
-        )
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let bytes = serde_json::to_vec(&my_handshake)?;
+            write_frame(&mut stream, &bytes).await?;
+            Ok::<_, anyhow::Error>(())
+        })
         .await
-        .map_err(|_| NetError::Transport(anyhow::anyhow!("handshake write timeout to {}", peer.id)))?
+        .map_err(|_| {
+            NetError::Transport(anyhow::anyhow!("handshake write timeout to {}", peer.id))
+        })?
         .map_err(|e| {
             eprintln!("[pool] handshake write to {} failed: {}", peer.id, e);
             NetError::Transport(e)
         })?;
 
-        // Krok 2: Odbierz HandshakeMsg od peera (z timeout)
-        let peer_handshake_bytes = tokio::time::timeout(
-            Duration::from_secs(10),
-            read_frame(&mut stream, 64 * 1024),
-        )
-        .await
-        .map_err(|_| NetError::Transport(anyhow::anyhow!("handshake read timeout from {}", peer.id)))?
-        .map_err(|e| {
-            eprintln!("[pool] handshake read from {} failed: {}", peer.id, e);
-            NetError::Transport(e)
-        })?;
+        // Krok 3: Odbierz signed Response od peera (z timeout)
+        let peer_handshake_bytes =
+            tokio::time::timeout(Duration::from_secs(10), read_frame(&mut stream, 64 * 1024))
+                .await
+                .map_err(|_| {
+                    NetError::Transport(anyhow::anyhow!("handshake read timeout from {}", peer.id))
+                })?
+                .map_err(|e| {
+                    eprintln!("[pool] handshake read from {} failed: {}", peer.id, e);
+                    NetError::Transport(e)
+                })?;
 
-        let peer_handshake: HandshakeMsg =
-            serde_json::from_slice(&peer_handshake_bytes).map_err(|e| {
-                eprintln!(
-                    "[pool] handshake deserialize from {} failed: {}",
-                    peer.id, e
-                );
-                NetError::Serde(e)
-            })?;
+        let (
+            response_peer_id,
+            response_kem_ct_b64,
+            response_sig_pk_b64,
+            response_nonce_b64,
+            response_falcon_sig_b64,
+        ) = match serde_json::from_slice::<HandshakeMsg>(&peer_handshake_bytes).map_err(|e| {
+            eprintln!(
+                "[pool] handshake response deserialize from {} failed: {}",
+                peer.id, e
+            );
+            NetError::Serde(e)
+        })? {
+            HandshakeMsg::Response {
+                version,
+                peer_id,
+                kem_ct_b64,
+                sig_pk_b64,
+                nonce_b64,
+                falcon_sig_b64,
+            } => {
+                if version != HANDSHAKE_VERSION {
+                    return Err(NetError::Transport(anyhow::anyhow!(
+                        "unsupported handshake version {} from {}",
+                        version,
+                        peer.id
+                    )));
+                }
+                (peer_id, kem_ct_b64, sig_pk_b64, nonce_b64, falcon_sig_b64)
+            }
+            other => {
+                return Err(NetError::Transport(anyhow::anyhow!(
+                    "expected Response from {}, got {:?}",
+                    peer.id,
+                    other
+                )));
+            }
+        };
 
-        if peer_handshake.version != HANDSHAKE_VERSION {
+        if response_peer_id != peer.id {
             return Err(NetError::Transport(anyhow::anyhow!(
-                "unsupported handshake version {} from {}",
-                peer_handshake.version,
+                "response peer_id mismatch: expected {}, got {}",
+                peer.id,
+                response_peer_id
+            )));
+        }
+
+        if response_nonce_b64 != server_nonce_b64 {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "response nonce mismatch from {}",
                 peer.id
             )));
         }
 
-        // Krok 3: Weryfikuj podpis Falcon peera (anti-MITM)
-        let peer_sig_payload = serde_json::to_vec(&HandshakeMsg {
-            falcon_sig_b64: String::new(),
-            ..peer_handshake.clone()
-        })
-        .map_err(|e| NetError::Transport(anyhow::anyhow!("peer sig payload: {}", e)))?;
-
-        let peer_falcon_sig = B64
-            .decode(&peer_handshake.falcon_sig_b64)
-            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer falcon_sig: {}", e)))?;
+        if response_sig_pk_b64 != peer.sig_pk_b64 {
+            return Err(NetError::Transport(anyhow::anyhow!(
+                "response sig_pk mismatch from {}",
+                peer.id
+            )));
+        }
 
         let peer_sig_pk = B64
-            .decode(&peer_handshake.sig_pk_b64)
+            .decode(&peer.sig_pk_b64)
             .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer sig_pk: {}", e)))?;
+        let peer_falcon_sig = B64
+            .decode(&response_falcon_sig_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer falcon_sig: {}", e)))?;
+        let peer_kem_ct = B64
+            .decode(&response_kem_ct_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_ct: {}", e)))?;
+
+        let peer_sig_payload = build_handshake_response_transcript(
+            HANDSHAKE_VERSION,
+            my_peer_id,
+            &peer.id,
+            &peer_kem_ct,
+            &peer_sig_pk,
+            &server_nonce,
+        );
 
         nxms_transport::crypto::falcon_verify(&peer_sig_pk, &peer_sig_payload, &peer_falcon_sig)
             .map_err(|e| {
@@ -956,26 +1232,20 @@ impl ConnectionPool {
                 NetError::Transport(anyhow::anyhow!("handshake falcon_verify failed: {}", e))
             })?;
 
-        let peer_kem_pk = B64
-            .decode(&peer_handshake.kem_pk_b64)
-            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_pk: {}", e)))?;
-
         eprintln!(
             "[pool] PQC handshake with {} complete (peer_id: {}, falcon verified)",
-            peer.id, peer_handshake.peer_id
+            peer.id, response_peer_id
         );
 
         // Krok 4: FrodoKEM decap — derivuj shared secret z ciphertext peera
         // Peer zrobił encap(my_kem_pk) → kem_ct, my robimy decap(my_kem_sk, kem_ct) → shared_secret
         let shared_secret = {
-            if peer_handshake.kem_ct_b64.is_empty() {
+            if response_kem_ct_b64.is_empty() {
                 return Err(NetError::Transport(anyhow::anyhow!(
                     "peer {} did not send kem_ct (old protocol version?)",
                     peer.id
                 )));
             }
-            let peer_kem_ct = B64.decode(&peer_handshake.kem_ct_b64)
-                .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_ct: {}", e)))?;
             let ss = nxms_transport::crypto::kem_decaps(my_kem_sk, &peer_kem_ct)
                 .map_err(|e| NetError::Transport(anyhow::anyhow!("kem_decaps failed: {}", e)))?;
             // Konwertuj Zeroizing<Vec<u8>> na [u8; 32]
@@ -995,7 +1265,9 @@ impl ConnectionPool {
             while let Some(msg) = writer_rx.recv().await {
                 match msg {
                     WriterMsg::Send(data) => {
-                        if let Err(e) = nxms_transport::tor_net::write_frame_half(&mut writer, &data).await {
+                        if let Err(e) =
+                            nxms_transport::tor_net::write_frame_half(&mut writer, &data).await
+                        {
                             eprintln!("[writer] write failed: {}", e);
                             break;
                         }
@@ -1010,6 +1282,10 @@ impl ConnectionPool {
         });
 
         // Krok 6: Zapisz połączenie z kluczami i kanałem
+        let peer_kem_pk = B64
+            .decode(&peer.kem_pk_b64)
+            .map_err(|e| NetError::Transport(anyhow::anyhow!("invalid peer kem_pk: {}", e)))?;
+
         let mut meta = ConnectionMeta::new(writer_tx);
         meta.set_peer_keys(peer_kem_pk, peer_sig_pk, shared_secret);
 
@@ -1075,7 +1351,9 @@ impl ConnectionPool {
             let id = my_id.to_string();
 
             handles.push(tokio::spawn(async move {
-                let result = pool.send_message(&peer, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &id).await;
+                let result = pool
+                    .send_message(&peer, &msg, &kem_pk, &kem_sk, &sig_pk, &sig_sk, &id)
+                    .await;
                 (peer.id.clone(), result)
             }));
         }
@@ -1084,7 +1362,10 @@ impl ConnectionPool {
         for handle in handles {
             match handle.await {
                 Ok((peer_id, result)) => results.push((peer_id, result)),
-                Err(e) => results.push(("unknown".to_string(), Err(NetError::Transport(anyhow::anyhow!("join error: {}", e))))),
+                Err(e) => results.push((
+                    "unknown".to_string(),
+                    Err(NetError::Transport(anyhow::anyhow!("join error: {}", e))),
+                )),
             }
         }
 
@@ -1115,8 +1396,10 @@ impl ConnectionPool {
             let mut ticker = tokio::time::interval(Duration::from_secs(interval));
             loop {
                 ticker.tick().await;
-                pool.maintenance_tick(&peer_book, &my_id, &my_kem_pk, &my_kem_sk, &my_sig_pk, &my_sig_sk)
-                    .await;
+                pool.maintenance_tick(
+                    &peer_book, &my_id, &my_kem_pk, &my_kem_sk, &my_sig_pk, &my_sig_sk,
+                )
+                .await;
             }
         });
 
@@ -1212,7 +1495,13 @@ impl ConnectionPool {
                     // (lazy connect: nie łączymy na zapas, tylko gdy potrzebujemy)
                     if self.connections.read().await.contains_key(&peer.id) {
                         eprintln!("[pool] reconnecting to stale peer {}", peer.id);
-                        if self.establish_connection(peer, my_kem_pk, my_kem_sk, my_sig_pk, my_sig_sk, my_id).await.is_ok() {
+                        if self
+                            .establish_connection(
+                                peer, my_kem_pk, my_kem_sk, my_sig_pk, my_sig_sk, my_id,
+                            )
+                            .await
+                            .is_ok()
+                        {
                             let mut s = self.stats.write().await;
                             s.total_reconnects += 1;
                         }
