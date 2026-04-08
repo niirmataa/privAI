@@ -155,6 +155,8 @@ Aktualne core domain strings:
 - `STATEMENT_DOMAIN = "privai:stmt:v0"`
 - `AUX_DOMAIN = "privai:aux:v0"`
 - `TX_DOMAIN = "privai:tx:v0"`
+- `TX_SIGNING_DOMAIN = "privai:tx-signing:v0"`
+- `FALCON_PK_DOMAIN = "privai:falcon-pk:v0"`
 - `BLOCK_HEADER_DOMAIN = "privai:block-header:v0"`
 - `PROOF_CERT_DOMAIN = "privai:proof-cert:v0"`
 - `MERKLE_DOMAIN = "privai:merkle:v0"`
@@ -162,6 +164,10 @@ Aktualne core domain strings:
 - `EPOCH_SEED_DOMAIN = "privai:epoch-seed:v0"`
 - `LITE_NOTE_DOMAIN = "privai:lite-note:v0"`
 - `LITE_NOTE_PAYLOAD_DOMAIN = "privai:lite-note-payload:v0"`
+
+Nowe domeny auth/escrow:
+- `TX_SIGNING_DOMAIN` — domena dla `tx_signing_hash`, canonical signing message (nie `tx_id`),
+- `FALCON_PK_DOMAIN` — domena dla `falcon_pk_hash()`, canonical signer identity hash.
 
 ### 4.2. Marketplace domains
 
@@ -227,6 +233,19 @@ Security note:
 3. `seller_pk_hash: [u8; 32]`
 4. `moderator_pk_hash: [u8; 32]`
 5. `timeout_block: u64_le`
+
+`SpendPolicy::Escrow2of3`:
+1. tag `0x03`
+2. `buyer_pk_hash: [u8; 32]`
+3. `merchant_pk_hash: [u8; 32]`
+4. `operator_pk_hash: [u8; 32]`
+5. `timeout_block: u64_le`
+
+Wazna uwaga:
+- `buyer/merchant/operator_pk_hash` sa liczone jako `falcon_pk_hash(raw_falcon_pk)` z domena `FALCON_PK_DOMAIN`,
+- canonical signer ordering: Buyer (index 0), Merchant (index 1), Operator (index 2),
+- action rules sa implied przez policy_tag `0x03` — nie sa zakodowane w polach policy,
+- `timeout_block` determinuje moment dostepnosci recovery mode.
 
 Commitment:
 - `spend_policy_commit = H_policy(canonical(SpendPolicy))`
@@ -349,6 +368,22 @@ Canonical encoding:
 1. `policy_tag: u8`
 2. `signer_pks: vec_bytes`
 3. `signatures: vec_bytes`
+4. `policy_opening: option_bytes`
+5. `escrow_action: option_u8`
+
+Nowe pola (escrow v1):
+- `policy_opening` — canonical encoding `SpendPolicy`, sluzy do rekonstrukcji policy i weryfikacji binding z `spend_policy_commit`,
+- `escrow_action` — deklarowany typ akcji escrow (`0x01` Release, `0x02` Refund, `0x03` RecoveryRelease),
+- dla non-escrow auth (np. `Single`): `policy_opening = Some(canonical(Single{...}))`, `escrow_action = None`,
+- `option_u8` jest kodowane jako: `0x00` dla `None`, `0x01 || u8_value` dla `Some`.
+
+FullPrivacy v1 mandatory auth rule:
+- `policy_opening` jest WYMAGANE dla kazdego auth entry na railu `FullPrivacy`,
+- ledger weryfikuje: `H_policy(policy_opening) == input_note.spend_policy_commit`,
+- dopiero po tym bindingu ledger derywuje typ policy i wybiera sciezke walidacji,
+- `policy_tag` jest tylko routing hint / early dispatch hint,
+- twarda regula: `policy_tag` MUSI byc rowne tagowi derywowanemu z `policy_opening`,
+- mismatch `policy_tag != derived_policy_tag(policy_opening)` = hard reject.
 
 ### 8.3. TxCore
 
@@ -384,6 +419,38 @@ Zamrozona interpretacja stanu obecnego:
 
 Tx hash:
 - `tx_id = H_tx(canonical(Transaction))`
+
+Tx signing hash:
+- `tx_signing_hash = H_tx_signing(signing_preimage(Transaction))`
+- `signing_preimage` to canonical tx body BEZ signature bytes — patrz section 8.6.
+
+### 8.6. tx_signing_hash preimage
+
+`tx_signing_hash` jest canonical signing message, oddzielna od `tx_id`.
+
+Powod:
+- `tx_id` obejmuje `auth` (w tym sygnatury),
+- sygnatury nie moga byc liczone nad wlasnym wynikiem,
+- `tx_signing_hash` rozwiazuje ta cykliczna zaleznosc.
+
+Preimage formula (`signing_preimage`):
+- canonical encoding calego tx body, ale dla kazdego `InputAuth`:
+  - kodowane sa: `policy_tag`, `signer_pks` (bez sygnatur), `policy_opening`, `escrow_action`,
+  - `signatures` sa POMINIETE.
+
+Wazna uwaga:
+- skoro `policy_tag` jest czescia `signing_preimage`, jego wartosc musi byc kanonicznie spojna z `policy_opening`,
+- inaczej ten sam policy/auth state moglby dawac rozne `tx_signing_hash`,
+- dlatego ledger musi hard-rejectowac kazdy auth entry, dla ktorego `policy_tag` nie zgadza sie z typem policy wyprowadzonym z `policy_opening`.
+
+Hash:
+- `tx_signing_hash = H_tx_signing(signing_preimage)`
+- domena: `TX_SIGNING_DOMAIN = "privai:tx-signing:v0"`
+
+Zamrozona zasada:
+- auth artifacts sa ZAWSZE liczone nad `tx_signing_hash`,
+- NIE nad `tx_id`,
+- patrz `spec/PRIVAI_AUTH_SIGNING_MODEL.md` section 5.
 
 ## 9. Payment transaction formats
 
@@ -615,7 +682,11 @@ Za formaty przejsciowe / experimental nalezy uznac obecnie:
 
 - dopisac golden vectors dla wszystkich finalnych struktur,
 - dopisac vectors dla commitment formulas,
+- dopisac vectors dla `tx_signing_hash` preimage,
+- dopisac vectors dla `SpendPolicy::Escrow2of3` canonical encoding i commitment,
+- dopisac vectors dla `InputAuth` z `policy_opening` i `escrow_action`,
 - dopisac finalny receipt-root helper w kodzie (opcjonalnie; vectors sa w `spec/PRIVAI_REFERENCE_VECTORS.md`),
 - zsynchronizowac finalny integer amount encoding z `PVA + aPVA`,
 - potwierdzic, czy obecny encoding lite path zostaje bez zmian czy zostaje zastapiony przez nowy finalny `OnChainLite` format,
-- usunac wszelkie rozjazdy miedzy starym `PRIVAI_V0_FORMATS.md`, tym dokumentem i kodem.
+- usunac wszelkie rozjazdy miedzy starym `PRIVAI_V0_FORMATS.md`, tym dokumentem i kodem,
+- wdrozyc mandatory auth (Option B) w kodzie ledgera i zaktualizowac testy.

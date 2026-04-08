@@ -104,18 +104,27 @@ Zamrozona semantyka:
 
 `SpendPolicy` opisuje warunek wydania noty.
 
-Stan obecny kodu definiuje dwa podstawowe warianty:
-- `Single`
-- `MarketplaceSettlement`
+Warianty:
+- `Single` (tag `0x01`) — wiaze note z jednym kluczem spendera,
+- `MarketplaceSettlement` (tag `0x02`) — zlozony warunek settlementowy marketplace,
+- `Escrow2of3` (tag `0x03`) — policy-constrained 2-of-3 multisig escrow.
 
-Semantyka:
-- `Single` wiaze note z jednym docelowym kluczem/autoryzacja spendera,
-- `MarketplaceSettlement` opisuje bardziej zlozony warunek settlementowy typu marketplace/escrow.
+Semantyka `Escrow2of3`:
+- signer set: Buyer (index 0), Merchant (index 1), Operator (index 2),
+- action rules sa implied przez policy_tag — nie sa przechowywane w polach policy,
+- frozen rule table:
+  - Buyer + Operator → Release (do Merchanta),
+  - Merchant + Operator → Refund (do Buyera),
+  - Buyer + Merchant → RecoveryRelease (po timeout),
+- `timeout_block` okresla moment, od ktorego recovery mode jest dostepny.
+
+`Escrow2of3` nalezy do raila `FullPrivacy`, nie do `MarketplaceSmallPaymentsRail`.
 
 Finalna zasada:
 - `SpendPolicy` nalezy do rdzenia protokolu,
 - `SpendPolicy.commitment()` jest czescia wiarygodnosci noty,
-- otwarcie noty musi dawac mozliwosc weryfikacji, ze `spend_policy_opening` odpowiada `spend_policy_commit`.
+- otwarcie noty musi dawac mozliwosc weryfikacji, ze `spend_policy_opening` odpowiada `spend_policy_commit`,
+- typ policy jest DERYWOWANY z `policy_opening` przy spendzie, nie z jawnego pola na nocie.
 
 ### 5.2. ReceiveBundle
 
@@ -307,9 +316,29 @@ Semantyka finalna:
   - material autoryzacyjny w `auth`,
 - po poprawnym spendzie note przechodzi do stanu `Spent`.
 
+### 9.1. FullPrivacy v1: Mandatory Auth
+
+Zamrozona regula (Option B z `PRIVAI_ESCROW_FULLPRIVACY_BOUNDARY_DECISION_MEMO.md`):
+- na railu `FullPrivacy` kazdy input MUSI miec auth envelope,
+- `auth` nie jest opcjonalny,
+- kazdy `auth[i]` musi zawierac `policy_opening`,
+- ledger weryfikuje binding: `H_policy(canonical(policy_opening)) == spend_policy_commit`,
+- typ policy jest derywowany z `policy_opening`, co determinuje sciezke walidacji:
+  - `Single` → 1-of-1 Falcon signature,
+  - `Escrow2of3` → 2-of-3 threshold z frozen rule table,
+- ta regula zapewnia kryptograficzna jednolitosc:
+  - wszystkie `FullPrivacy` spends wygladaja z zewnatrz identycznie (auth envelope),
+  - Single i Escrow2of3 sa nierozroznialne bez policy_opening,
+  - brak publicznego leak klasy policy.
+
+Scope:
+- dotyczy TYLKO `TransferNoteTx` na railu `FullPrivacy`,
+- `MarketplaceBatchTx` i `LiteTransferTx` maja wlasne modele auth.
+
 Stan obecny:
 - builder `FullPrivacy` jest juz sensownie domkniety dla `TransferNoteTx`,
-- builder lite istnieje, ale nie oznacza to jeszcze finalnego zamrozenia `OnChainLite`.
+- builder lite istnieje, ale nie oznacza to jeszcze finalnego zamrozenia `OnChainLite`,
+- mandatory auth (Option B) jest zamrozona decyzja architektoniczna, wdrozenie w toku.
 
 ## 10. Kanoniczne klasy transakcji
 
@@ -322,7 +351,9 @@ Semantyka finalna:
 - outputy tworza nowe `OutputNote`,
 - conservation wartosci musi byc zachowana,
 - `statement_commit` reprezentuje publiczny commitment do statementu/proofu,
-- `auth` reprezentuje warstwe autoryzacji inputow.
+- `auth` reprezentuje warstwe autoryzacji inputow,
+- `auth` jest mandatory: kazdy input musi miec odpowiadajacy `auth[i]` (FullPrivacy v1, Option B),
+- podpisy sa liczone nad `tx_signing_hash`, nie nad `tx_id`.
 
 ### 10.2. OnChainLite final target
 
@@ -380,7 +411,15 @@ Wallet odpowiada za:
 
 Ledger odpowiada za:
 - shape validation transakcji,
-- podstawowe sprawdzenia auth,
+- mandatory auth enforcement dla `FullPrivacy` (kazdy input musi miec auth envelope),
+- `policy_opening → spend_policy_commit` binding verification,
+- policy-type routing (Single / Escrow2of3) na podstawie zdekodowanej policy,
+- signer identity verification (falcon_pk_hash vs policy fields),
+- signer count, ordering, duplicate rejection,
+- action/signer combination validation (frozen rule table dla escrow),
+- recovery timeout enforcement,
+- output target validation (escrow: ALL outputs musza isc do allowed recipients),
+- Falcon signature verification wzgledem `tx_signing_hash`,
 - wykrywanie duplicate inputs/nullifiers/outputs,
 - tracking note setu i spent nullifiers,
 - zastosowanie transakcji do stanu.

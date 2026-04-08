@@ -22,10 +22,11 @@ Przełożenie teoretycznego modelu Escrow na konkretny, iteracyjny plan testów.
 
 ## Test philosophy
 - **Brak mieszania z marketplace:** Testujemy wyłącznie rdzenną warstwę protokołu sieciowego (escrow note-based), bez ułatwień (convenience rail) i ustępstw obecnych w środowisku marketplace v0.
-- **Kategoryzacja stanu:** Każdy scenariusz posiada oznaczenie przynależności do puli:
+- **Kategoryzacja stanu:** Kazdy scenariusz posiada oznaczenie przynaleznosci do puli:
   - `[stable tests]` - scenariusze gotowe do walidacji na obecnej architekturze i logice polityk v1,
-  - `[blocked tests]` - testy zablokowane przez braki w sąsiadujących komponentach (np. full locktime timeout dla recovery, integracja weryfikatorów ZKP PQ).
-- **Brak overclaimingu:** Dokument odzwierciedla plany na testy. Nie udajemy, że pełne zabezpieczenia PQ (Post-Quantum) czy timer-locked proofy są domknięte i w 100% otestowane, jeśli w rzeczywistości stanowią blokadę.
+  - `[blocked tests]` - testy zablokowane przez braki w sasiadujacych komponentach (np. full locktime timeout dla recovery, integracja weryfikatorow ZKP PQ),
+  - `[future proof-aware tests]` - pula zarezerwowana dla przyszlego proof-aware escrow (np. ukryte signer identities, threshold auth w circuit, action binding w statement/public inputs); nie jest czescia v1 acceptance gate.
+- **Brak overclaimingu:** Dokument odzwierciedla plany na testy. Nie udajemy, ze pelne zabezpieczenia PQ (Post-Quantum) czy timer-locked proofy sa domkniete i w 100% otestowane, jesli w rzeczywistosci stanowia blokade.
 
 ## Positive scenarios
 Scenariusze weryfikujące poprawne zachowanie dla prawidłowych danych wejściowych (Happy path).
@@ -63,6 +64,8 @@ Sprawdzenie mechaniki opóźnień czasowych na styku polityk escrow z zegarem le
 Obszary tymczasowo wykluczone z głównego obiegu testów akceptacyjnych ze względu na uwarunkowania deweloperskie poza samym kodem autoryzacji:
 - **On-chain locktime enforcement:** Precyzyjne odmierzanie timeoutu w trybie recovery musi opierać się o parametry blokowe ledgera (wysokość/timestamp), których pełne zablokowanie (wsparcie locktime on-chain) nie zostało zapięte w warstwie walidacji dowodowej.
 - **Full PQ Privacy verification:** Pełne gwarancje izolacji kwantowej wokół dowodów i operacji na notach escrow zostają wstrzymane dla planów długoterminowych. Czekamy na certyfikację oraz odblokowanie weryfikatorów KEM.
+
+Future proof-aware escrow tests pozostaja osobna, jawnie odlozona pula. Nie sa traktowane jako brakujace testy v1, tylko jako dalszy etap architektury proof-aware escrow po domknieciu obecnego mixed modelu.
 
 ## Checklist
 Zadania wykonawcze, czyli mapowanie poszczególnych zaplanowanych pul testów na pliki weryfikacyjne w codebase:

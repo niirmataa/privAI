@@ -28,6 +28,12 @@ Ten dokument nie jest:
 - zamiennikiem `PRIVAI_CANONICAL_FORMATS.md`,
 - opisem Monero multisig.
 
+Terminology sync note:
+- canonical role names w nowszym frozen secie to `Buyer`, `Merchant`, `Operator`,
+- starsze aliasy `seller` i `moderator` w tym dokumencie nalezy czytac odpowiednio jako `merchant` i `operator`,
+- canonical policy name w nowszym frozen secie to `SpendPolicy::Escrow2of3`,
+- starsze referencje do `SpendPolicy::MarketplaceSettlement` w tym dokumencie maja charakter historycznego implementation context i nie nadpisuja nowszych docs canonical.
+
 ## 2. Frozen Boundary
 
 ### 2.1. Frozen
@@ -40,19 +46,17 @@ Ten dokument nie jest:
 
 ### 2.2. Current Canonical
 
-- Obecnym on-chain nosnikiem polityki `2 z 3` jest `SpendPolicy::MarketplaceSettlement`.
+- Obecnym canonical on-chain nosnikiem polityki `2 z 3` jest `SpendPolicy::Escrow2of3`.
 - Obecny proof plane nie egzekwuje jeszcze finalnej semantyki escrow threshold auth.
 - Obecny model auth w coinie nie wystarcza jeszcze do prawdziwego `2 z 3`.
 
 ### 2.3. Future Target Requiring Migration
 
-- Mozliwa przyszla migracja nazwy `SpendPolicy::MarketplaceSettlement` do bardziej ogolnej nazwy escrow/threshold.
 - Mozliwe przyszle ukrycie threshold auth w bardziej zaawansowanym modelu proof-aware spend.
 - Mozliwe przyszle rozszerzenie timeout/refund/dispute semantics na bardziej jawne on-chain bindings.
 
 ### 2.4. Unresolved
 
-- Finalna nazwa canonical policy typu escrow `2 z 3`.
 - Czy timeout semantics pozostanie tylko w `policy_opening + off-chain snapshot`, czy dostanie dodatkowe on-chain wiazanie.
 - Czy przyszly model privacy/auth dla escrow bedzie public-auth-threshold only czy proof-aware threshold.
 
@@ -132,8 +136,8 @@ Powody:
 
 Escrow `2 z 3` ma trzy role:
 - buyer
-- seller
-- moderator
+- merchant
+- operator
 
 Kazda rola ma:
 - klucz publiczny Falcon,
@@ -145,12 +149,12 @@ Funding note ma `spend_policy_commit`.
 
 Ten commit otwiera sie do polityki zawierajacej co najmniej:
 - `buyer_pk_hash`
-- `seller_pk_hash`
-- `moderator_pk_hash`
+- `merchant_pk_hash`
+- `operator_pk_hash`
 - `timeout_block`
 
-Obecnie technicznym nosnikiem tej polityki jest:
-- `SpendPolicy::MarketplaceSettlement`
+Obecnie canonical technicznym nosnikiem tej polityki jest:
+- `SpendPolicy::Escrow2of3`
 
 ### 6.3. Spend
 
@@ -188,7 +192,7 @@ Monero multisig robi:
 - normalna note jest ufundowana do escrow targetu,
 - note ma polityke wydania `2 z 3`,
 - runtime escrow ma zdolnosc odbioru i wykonania spendu,
-- buyer/seller/moderator daja approval signatures,
+- buyer/merchant/operator daja approval signatures,
 - ledger sprawdza threshold rule.
 
 ### 7.3. Wniosek
@@ -378,7 +382,7 @@ Musi zaczac sprawdzac:
 
 Minimalna regula v1:
 - `Single` -> dokladnie 1 poprawny signer zgodny z policy
-- `MarketplaceSettlement` -> co najmniej 2 poprawne i rozne signery z buyer/seller/moderator
+- `Escrow2of3` -> co najmniej 2 poprawne i rozne signery z buyer/merchant/operator zgodnie z frozen rule table
 
 ### 11.4. Auth musi byc obowiazkowe
 
@@ -535,12 +539,12 @@ Done condition:
 ### CP-07. End-to-end escrow test
 
 Minimalne scenariusze:
-- buyer + seller -> release OK
-- buyer + moderator -> refund OK
-- seller + moderator -> OK zgodnie z policy
+- buyer + operator -> release OK
+- merchant + operator -> refund OK
+- buyer + merchant -> recovery OK po timeout
 - buyer alone -> reject
-- seller alone -> reject
-- moderator alone -> reject
+- merchant alone -> reject
+- operator alone -> reject
 - signer spoza policy -> reject
 - wrong `policy_opening` -> reject
 - replay nullifier -> reject

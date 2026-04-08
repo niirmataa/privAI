@@ -238,9 +238,11 @@ Twarda zasada:
 
 Ledger musi sprawdzic co najmniej:
 - czy `tx_signing_hash` da sie odtworzyc z tx body,
+- czy kazdy input ma auth envelope (mandatory dla `FullPrivacy v1`),
+- czy `policy_opening` da sie zdekodowac do valid `SpendPolicy`,
+- czy `H_policy(canonical(policy_opening))` jest rowne `spend_policy_commit` noty,
 - czy auth artifacts odnosza sie do tego samego `tx_signing_hash`,
-- czy signer identities sa poprawne,
-- czy signer identities naleza do allowed signer set,
+- czy signer identities sa poprawne i naleza do allowed signer set,
 - czy signer count spelnia threshold,
 - czy duplicate signer material nie liczy sie wielokrotnie,
 - czy action semantics sa zgodne z policy.
@@ -248,6 +250,31 @@ Ledger musi sprawdzic co najmniej:
 To jest finalna granica:
 - proof nie zastepuje auth verification,
 - wallet/operator/orchestrator nie zastepuje ledger verification.
+
+### 14.1. FullPrivacy v1: Mandatory Auth For All Inputs
+
+Zamrozona regula:
+- na railu `FullPrivacy` kazdy input musi miec odpowiadajacy auth envelope,
+- `auth.len()` musi byc rowne `inputs.len()`,
+- pusty `auth` jest twardym bledem walidacji (`MissingAuth`),
+- typ policy jest DERYWOWANY z `policy_opening`, nie samoadeklarowany,
+- `auth[i].policy_tag` sluzy jako routing hint, ale binding musi byc zweryfikowany przez `policy_opening → spend_policy_commit`.
+
+Powod:
+- `spend_policy_commit` jest opaque hashem,
+- ledger nie potrafi rozpoznac klasy policy bez `policy_opening`,
+- jesli auth jest opcjonalny, ledger nie wie, czy input jest Single czy Escrow2of3,
+- mandatory auth eliminuje cala klase empty-auth bypass attacks.
+
+Scope:
+- ta regula dotyczy TYLKO raila `FullPrivacy` (`TransferNoteTx`),
+- `MarketplaceBatchTx` ma wlasny auth model (operator signature),
+- `OnChainLite` / `LiteTransferTx` ma wlasny experimental path.
+
+Relationship to v0 prototype mode:
+- w v0 prototype empty auth bylo tolerowane,
+- w v1 jest to twardy blad,
+- testy regresyjne musza jawnie pokrywac oba scenariusze.
 
 ## 15. Relationship To Escrow
 
@@ -276,40 +303,44 @@ Twarda zasada:
 - podpisy i approvals nie sa "zastepowane przez proof".
 - proof i auth to osobne warstwy.
 
-## 17. Current Implementation Gap
+## 17. Implementation Status
 
-Ten dokument zaklada, ze obecny projekt wymaga przejscia z:
-- signing over `tx_id`
-na:
-- signing over `tx_signing_hash`
+Przejscie z `tx_id` na `tx_signing_hash` zostalo wykonane:
+- `tx_signing_hash` jest zaimplementowane w `Transaction::tx_signing_hash()`,
+- domena: `TX_SIGNING_DOMAIN = "privai:tx-signing:v0"`,
+- preimage: canonical tx body BEZ signature bytes,
+- ledger weryfikuje auth wzgledem `tx_signing_hash`, nie `tx_id`,
+- pokrywa wszystkie 6 wariantow `Transaction`.
 
-Dopoki to nie jest wykonane:
-- auth model pozostaje architektonicznie niedomkniety,
-- threshold auth pozostaje ryzykowny,
-- final escrow nie powinno byc claimowane jako bezpiecznie zamkniete.
+Remaining gap:
+- mandatory auth for all `FullPrivacy` inputs (Option B) nie jest jeszcze wdrozone w kodzie,
+- obecny kod nadal toleruje pusty auth w prototype mode,
+- wdrozenie mandatory auth jest nastepnym krokiem execution.
 
 ## 18. Checklist
 
-- [ ] Jawnie zdefiniowac `tx_signing_hash`.
-- [ ] Rozdzielic `tx_id` od signing preimage.
-- [ ] Zdefiniowac canonical fields w signing preimage.
-- [ ] Zdefiniowac canonical signer identity binding.
-- [ ] Zdefiniowac canonical signer ordering.
-- [ ] Zdefiniowac duplicate signer rejection.
-- [ ] Zdefiniowac threshold auth package semantics.
-- [ ] Zdefiniowac `nexum-core` vs ledger split.
+- [x] Jawnie zdefiniowac `tx_signing_hash` — done: `TX_SIGNING_DOMAIN`, `Transaction::tx_signing_hash()`.
+- [x] Rozdzielic `tx_id` od signing preimage — done: `tx_id` i `tx_signing_hash` sa osobne.
+- [x] Zdefiniowac canonical fields w signing preimage — done: preimage = canonical tx body bez signatures.
+- [x] Zdefiniowac canonical signer identity binding — done: `falcon_pk_hash()` z `FALCON_PK_DOMAIN`.
+- [x] Zdefiniowac canonical signer ordering — done: by signer index in policy (Buyer=0, Merchant=1, Operator=2).
+- [x] Zdefiniowac duplicate signer rejection — done: ledger rejects duplicate pk_hash in escrow auth.
+- [x] Zdefiniowac threshold auth package semantics — done: escrow-2of3 frozen rule table.
+- [x] Zdefiniowac `nexum-core` vs ledger split — done: sections 13, 14.
 - [ ] Dodac testy regresyjne dla starego bledu cyklicznego podpisu.
 - [ ] Dodac vectors dla signing preimage.
-- [ ] Zdefiniowac relacje `tx_signing_hash` do istniejacych canonical formats (domain, field order, canonical encoding).
+- [x] Zdefiniowac relacje `tx_signing_hash` do istniejacych canonical formats — done: `PRIVAI_CANONICAL_FORMATS.md` section 4.1.
+- [ ] Wdrozyc mandatory auth for all `FullPrivacy` inputs (Option B).
 
 ## 19. Exit Criteria
 
 Faza auth/signing model jest domknieta dopiero wtedy, gdy:
-- `tx_signing_hash` istnieje i jest canonical,
-- `tx_id` nie jest juz auth signing message,
-- signer rules sa jednoznaczne,
-- threshold auth semantics sa jednoznaczne,
-- escrow ma stabilny fundament auth.
+- [x] `tx_signing_hash` istnieje i jest canonical,
+- [x] `tx_id` nie jest juz auth signing message,
+- [x] signer rules sa jednoznaczne,
+- [x] threshold auth semantics sa jednoznaczne,
+- [x] escrow ma stabilny fundament auth,
+- [ ] mandatory auth dla `FullPrivacy` jest wdrozone w kodzie (Option B).
 
 ## 20. Final Assessment
 

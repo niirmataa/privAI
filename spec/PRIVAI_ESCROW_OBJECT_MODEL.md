@@ -104,13 +104,18 @@ Off-chain / control-plane. Zarzadzany przez nexum-core. Nie trafia na chain bezp
 - `operator_pk`: Falcon public key Operatora
 - `funding_note_commit`: commitment ufundowanej escrow note (po fundingu)
 - `spend_policy_commit`: commitment nad policy 2-of-3 (musi matchowac note)
+- `policy_tag`: canonical policy tag dla escrow (np. `escrow-2of3-v1`)
+- `policy_version`: wersja policy
 - `timeout_block`: block height po ktorym recovery mode jest dozwolony
-- `release_rule`: canonical opis kto i jak moze zrobic release
-- `refund_rule`: canonical opis kto i jak moze zrobic refund
 - `fee_cap`: maksymalny dozwolony fee
 - `context_commit`: opcjonalny commitment nad kontekstem biznesowym
 - `created_at`: timestamp lub block height utworzenia
 - `snapshot_hash`: canonical hash calego snapshotu
+
+Uwaga:
+- `release_rule` i `refund_rule` nie sa osobnymi canonical fields snapshotu.
+- Canonical action rules wynikaja z `policy_tag` + `policy_version` oraz zrekonstruowanego `EscrowPolicy`.
+- Snapshot moze co najwyzej trzymac pochodna reprezentacje tych regul jako local metadata poza canonical hash, jesli control-plane tego potrzebuje.
 
 ### 5.4. Lifecycle
 
@@ -124,6 +129,8 @@ Off-chain / control-plane. Zarzadzany przez nexum-core. Nie trafia na chain bezp
 - `snapshot_hash` musi byc deterministyczny i canonical.
 - Zmiana jakiegokolwiek pola snapshotu po fundingu jest niedozwolona.
 - Wszyscy uczestnicy musza operowac na tym samym `snapshot_hash`.
+- `policy_tag`, `policy_version` i `spend_policy_commit` musza byc spojne z canonical `EscrowPolicy`.
+- Snapshot nie moze stac sie drugim source of truth dla action rules; action rules wynikaja z `EscrowPolicy` / `policy_tag`, nie z lokalnych pol snapshotu.
 
 ## 6. Object: `EscrowSpendProposal`
 
@@ -278,7 +285,7 @@ To rozdzielenie zapobiega sytuacji, gdzie ktos konstruuje policy z dowolnymi act
 ```
 EscrowSnapshot
   |
-  |-- contains: escrow_id, roles, keys, timeout, rules
+  |-- contains: escrow_id, roles, keys, timeout, policy identifiers
   |-- references: funding_note_commit (after funding)
   |-- referenced by: EscrowSpendProposal (via snapshot_hash)
   |
