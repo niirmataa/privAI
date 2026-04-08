@@ -39,7 +39,7 @@ fn make_funding_note(
         aux_opening: aux_witness.to_canonical_bytes(),
         sender_memo: Some(b"funding".to_vec()),
     };
-    let recipient_box =
+    let (recipient_box, _) =
         PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(bundle, &opened).expect("seal");
     let note = OutputNote::new(
         spend_policy.commitment(),
@@ -213,9 +213,12 @@ fn wallet_transfer_proof_and_block_flow_roundtrip() {
         .create_local_bundle(10_000, 0, Some(b"sender".to_vec()))
         .expect("sender bundle");
 
+    let (sender_sk, sender_pk) = nxms_transport::crypto::falcon_keygen().expect("sender keygen");
+    let sender_pk_hash = privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[&sender_pk]);
+
     let funding_amount = Amount14::new(77).expect("amount");
     let sender_spend_policy = SpendPolicy::Single {
-        falcon_pk_hash: [0x31; 32],
+        falcon_pk_hash: sender_pk_hash,
     };
     let (funding_note, _funding_opened_direct) = make_funding_note(
         &sender_bundle,
@@ -240,7 +243,7 @@ fn wallet_transfer_proof_and_block_flow_roundtrip() {
         .create_local_bundle(20_000, 0, Some(b"recipient".to_vec()))
         .expect("recipient bundle");
 
-    let built = sender_wallet
+    let mut built = sender_wallet
         .build_transfer_note(
             &spend,
             vec![TransferOutputPlan {
@@ -248,7 +251,6 @@ fn wallet_transfer_proof_and_block_flow_roundtrip() {
                 amount: Amount14::new(74).expect("recipient amount"),
                 ct_amt: LweCiphertext::default(),
                 witness_seed: [0x41; 32],
-                nullifier_key: [0x42; 32],
                 spend_policy: SpendPolicy::Single {
                     falcon_pk_hash: [0x51; 32],
                 },
@@ -256,9 +258,24 @@ fn wallet_transfer_proof_and_block_flow_roundtrip() {
                 sender_memo: Some(b"hello recipient".to_vec()),
             }],
             3,
-            Vec::new(),
+            vec![privai_chain::tx::InputAuth {
+                policy_tag: privai_chain::SpendPolicyTag::Single as u8,
+                signer_pks: vec![sender_pk],
+                signatures: vec![vec![]], // empty for now, signed below
+                policy_opening: Some(sender_spend_policy.to_canonical_bytes()),
+                escrow_action: None,
+            }],
         )
         .expect("build transfer");
+
+    let tx_hash = privai_chain::Transaction::TransferNote(built.tx.clone()).tx_signing_hash();
+    let sig = nxms_transport::crypto::falcon_sign_ct_prepared(&sender_sk, &tx_hash).expect("sign tx");
+    built.tx.core.auth[0].signatures = vec![sig];
+    built.proof = privai_proof::TransferProvingData::from_tx_and_witness(
+        &built.tx,
+        built.proof.witness.clone(),
+    )
+    .expect("rebuild proof after auth");
 
     let mut store = MemoryStore::new();
     let mut snapshot = LedgerSnapshot::genesis(config.chain_id);

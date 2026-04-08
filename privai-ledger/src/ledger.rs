@@ -226,88 +226,146 @@ pub fn validate_transaction(
             }
         }
 
-        // ── P0 fix: escrow inputs MUST have auth ──────────────────────────
-        // Check if any input is governed by an escrow policy.
-        // If so, it MUST have a corresponding auth entry — empty auth is forbidden.
-        // For non-escrow inputs in v0, auth is still optional (prototype mode).
-        //
-        // P1 fix: auth[i] → input[i] coverage rule.
-        // Every escrow input (by position) must be covered by auth[i] with
-        // the correct escrow policy_tag. auth.len() must be >= position of
-        // last escrow input + 1.
-        let has_escrow_input = tx.auth().iter().any(|a| {
-            a.policy_tag == privai_chain::SpendPolicyTag::Escrow2of3 as u8
-        });
+        let is_full_privacy = matches!(tx, Transaction::TransferNote(_));
+
+        if is_full_privacy {
+            // FullPrivacy Option B: mandatory auth for all inputs
+            if tx.auth().len() != tx.inputs().len() {
+                return Err(ValidationError::AuthCountMismatch);
+            }
+        } else {
+            // Legacy / Prototype checks for non-TransferNote transactions
+            let has_escrow_input = tx.auth().iter().any(|a| {
+                a.policy_tag == privai_chain::SpendPolicyTag::Escrow2of3 as u8
+            });
+            if has_escrow_input && tx.auth().len() < tx.inputs().len() {
+                return Err(ValidationError::MissingAuth);
+            }
+        }
 
         // ── Auth verification ──────────────────────────────────────────────
         // Signers sign `tx_signing_hash` (NOT `tx_id`) to break circular dependency.
-        // See: spec/PRIVAI_AUTH_SIGNING_MODEL.md section 4.2
         let tx_hash = tx.tx_signing_hash();
 
-        // P0/P1: For each input, verify auth coverage
         for (i, input) in tx.inputs().iter().enumerate() {
             let record = snapshot.notes.get(&input.note_commit)
                 .expect("input existence already validated above");
             let input_policy_commit = record.note.spend_policy_commit;
 
-            // Check if this input's auth entry exists
             let auth_entry = tx.auth().get(i);
 
-            // Determine if this input is escrow-governed.
-            // We can't know from spend_policy_commit alone (it's a hash),
-            // but if auth declares escrow tag, we enforce full escrow validation.
-            // If auth is missing for an escrow-declared input, that's P0.
             if let Some(auth) = auth_entry {
-                if auth.policy_tag == privai_chain::SpendPolicyTag::Escrow2of3 as u8 {
-                    // ── Escrow 2-of-3 auth path ──
-                    crate::escrow::validate_escrow_auth(
-                        i,
-                        auth,
-                        &input_policy_commit,
-                        tx.outputs(),
-                        &tx_hash,
-                        block_height,
-                    )?;
+                if is_full_privacy {
+                    // Option B FullPrivacy Validation
+                    // 1. Mandatory policy_opening
+                    let policy_opening_bytes = auth.policy_opening.as_ref()
+                        .ok_or(ValidationError::MissingPolicyOpening)?;
+                    
+                    // 2. Decode policy
+                    use privai_chain::decode::CanonicalDecode;
+                    let policy = privai_chain::note::SpendPolicy::from_canonical_bytes(policy_opening_bytes)
+                        .map_err(|e| ValidationError::PolicyDecode(e.to_string()))?;
+
+                    // 3. Verify spend_policy_commit
+                    let computed_commit = policy.commitment();
+                    if computed_commit != input_policy_commit {
+                        return Err(ValidationError::PolicyMismatch);
+                    }
+
+                    // 4. Check policy_tag matches derived tag
+                    let derived_tag = policy.tag();
+                    if auth.policy_tag != derived_tag as u8 {
+                        return Err(ValidationError::PolicyTagMismatch);
+                    }
+
+                    // 5. Dispatch validation based on derived policy
+                    match policy {
+                        privai_chain::note::SpendPolicy::Single { falcon_pk_hash } => {
+                            if auth.escrow_action.is_some() {
+                                return Err(ValidationError::InvalidAuth("Single policy should not have escrow_action".into()));
+                            }
+                            if auth.signer_pks.len() != 1 || auth.signatures.len() != 1 {
+                                return Err(ValidationError::InvalidSingleSignerCount(auth.signer_pks.len()));
+                            }
+                            let pk = &auth.signer_pks[0];
+                            let sig = &auth.signatures[0];
+                            
+                            if pk.is_empty() || sig.is_empty() {
+                                return Err(ValidationError::InvalidAuth(format!(
+                                    "auth[{}]: empty pk or sig", i
+                                )));
+                            }
+                            
+                            // Check signer pk_hash
+                            use privai_chain::hash::falcon_pk_hash as hash_pk;
+                            if hash_pk(pk) != falcon_pk_hash {
+                                return Err(ValidationError::InvalidAuth(format!(
+                                    "auth[{}]: signer pk hash mismatch", i
+                                )));
+                            }
+                            
+                            if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
+                                return Err(ValidationError::InvalidAuth(format!(
+                                    "auth[{}]: invalid Falcon signature", i
+                                )));
+                            }
+                        }
+                        privai_chain::note::SpendPolicy::Escrow2of3 { .. } => {
+                            crate::escrow::validate_escrow_auth(
+                                i,
+                                auth,
+                                &input_policy_commit,
+                                tx.outputs(),
+                                &tx_hash,
+                                block_height,
+                            )?;
+                        }
+                        privai_chain::note::SpendPolicy::MarketplaceSettlement { .. } => {
+                            // MarketplaceSettlement isn't part of the escrow/FullPrivacy model
+                            return Err(ValidationError::InvalidAuth("MarketplaceSettlement unsupported in FullPrivacy".into()));
+                        }
+                    }
                 } else {
-                    // ── Standard auth path (Single, MarketplaceSettlement, etc.) ──
-                    if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
-                        return Err(ValidationError::InvalidAuth(format!(
-                            "auth[{}]: missing signer_pks or signatures",
-                            i
-                        )));
-                    }
-                    if auth.signer_pks.len() != auth.signatures.len() {
-                        return Err(ValidationError::InvalidAuth(format!(
-                            "auth[{}]: signer_pks/signatures count mismatch ({} vs {})",
+                    // Legacy auth verification for non-FullPrivacy
+                    if auth.policy_tag == privai_chain::SpendPolicyTag::Escrow2of3 as u8 {
+                        crate::escrow::validate_escrow_auth(
                             i,
-                            auth.signer_pks.len(),
-                            auth.signatures.len()
-                        )));
-                    }
-                    for (j, (pk, sig)) in auth
-                        .signer_pks
-                        .iter()
-                        .zip(auth.signatures.iter())
-                        .enumerate()
-                    {
-                        if pk.is_empty() || sig.is_empty() {
+                            auth,
+                            &input_policy_commit,
+                            tx.outputs(),
+                            &tx_hash,
+                            block_height,
+                        )?;
+                    } else {
+                        if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
                             return Err(ValidationError::InvalidAuth(format!(
-                                "auth[{}][{}]: empty pk or sig",
-                                i, j
+                                "auth[{}]: missing signer_pks or signatures",
+                                i
                             )));
                         }
-                        if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
+                        if auth.signer_pks.len() != auth.signatures.len() {
                             return Err(ValidationError::InvalidAuth(format!(
-                                "auth[{}][{}]: invalid Falcon signature",
-                                i, j
+                                "auth[{}]: signer_pks/signatures count mismatch",
+                                i
                             )));
+                        }
+                        for (j, (pk, sig)) in auth.signer_pks.iter().zip(auth.signatures.iter()).enumerate() {
+                            if pk.is_empty() || sig.is_empty() {
+                                return Err(ValidationError::InvalidAuth(format!(
+                                    "auth[{}][{}]: empty pk or sig", i, j
+                                )));
+                            }
+                            if nxms_transport::crypto::falcon_verify(pk, &tx_hash, sig).is_err() {
+                                return Err(ValidationError::InvalidAuth(format!(
+                                    "auth[{}][{}]: invalid Falcon signature", i, j
+                                )));
+                            }
                         }
                     }
                 }
-            } else if has_escrow_input {
-                // P0: Input has no auth entry, but tx contains escrow inputs.
-                // Every input in an escrow tx MUST have auth.
-                return Err(ValidationError::MissingAuth);
+            } else if is_full_privacy {
+                // P0: Input has no auth entry but it's FullPrivacy
+                return Err(ValidationError::AuthCountMismatch);
             }
             // else: non-escrow tx with no auth → v0 prototype mode (allowed)
         }
@@ -655,6 +713,11 @@ mod tests {
             result.is_err(),
             "P0: escrow-bearing tx with partial auth MUST be rejected"
         );
+        if let Err(ValidationError::AuthCountMismatch) = result {
+            // expected in Option B FullPrivacy
+        } else {
+            panic!("Expected AuthCountMismatch, got {:?}", result);
+        }
     }
 
     #[test]
@@ -697,8 +760,7 @@ mod tests {
 
     #[test]
     fn p0_non_escrow_tx_without_auth_allowed_in_prototype() {
-        // In v0 prototype mode, non-escrow txs with empty auth are allowed.
-        // This test ensures the P0 fix doesn't break prototype mode.
+        // FullPrivacy Option B: non-escrow TransferNote tx with empty auth must be REJECTED.
         let mut snapshot = LedgerSnapshot::genesis(17);
 
         let note1 = sample_note(0x10);
@@ -720,15 +782,230 @@ mod tests {
                 outputs: vec![sample_note(0x30)],
                 fee: 0,
                 statement_commit: [0xF0; 32],
-                auth: vec![], // empty auth, no escrow tags → prototype allowed
+                auth: vec![], // empty auth -> must reject for TransferNoteTx
             },
         });
 
         let result = validate_transaction(&tx, &snapshot, 0, 1);
         assert!(
-            result.is_ok(),
-            "non-escrow tx without auth should be allowed in v0 prototype: {:?}",
-            result
+            result.is_err(),
+            "TransferNoteTx without auth must be rejected in FullPrivacy Option B"
+        );
+        if let Err(ValidationError::AuthCountMismatch) = result {
+            // expected
+        } else {
+            panic!("Expected AuthCountMismatch, got {:?}", result);
+        }
+    }
+
+    // ── FullPrivacy Option B Tests ───────────────────────────────────
+
+    fn setup_single_auth_test() -> (LedgerSnapshot, Transaction, privai_chain::InputAuth, Vec<u8>) {
+        use privai_chain::{InputAuth, Nullifier, SpendPolicyTag, note::SpendPolicy};
+        use privai_chain::CanonicalEncode;
+
+        let mut snapshot = LedgerSnapshot::genesis(17);
+        let (sk, pk) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let pk_hash = privai_chain::hash::falcon_pk_hash(&pk);
+        
+        let policy = SpendPolicy::Single { falcon_pk_hash: pk_hash };
+        let policy_commit = policy.commitment();
+        let policy_bytes = policy.to_canonical_bytes();
+
+        let note = OutputNote::new(
+            policy_commit,
+            privai_chain::LweCiphertext::default(),
+            [0x10; 32],
+            RecipientBox::new(vec![0x10], [0x10; 24], vec![0x11], [0x10; 16], [0x10; 16]),
+        );
+
+        snapshot.notes.insert(
+            note.note_commit,
+            NoteRecord {
+                note: note.clone(),
+                created_in_block: Some(0),
+                status: NoteStatus::Unspent,
+            },
+        );
+
+        let tx = Transaction::TransferNote(TransferNoteTx {
+            core: TxCore {
+                version: 1,
+                tx_type: TX_TYPE_TRANSFER_NOTE,
+                inputs: vec![InputRef { note_commit: note.note_commit }],
+                input_nullifiers: vec![Nullifier([0xE1; 32])],
+                outputs: vec![sample_note(0x30)],
+                fee: 0,
+                statement_commit: [0xF0; 32],
+                auth: vec![], // placeholder
+            },
+        });
+
+        let auth = InputAuth {
+            policy_tag: SpendPolicyTag::Single as u8,
+            signer_pks: vec![pk],
+            signatures: vec![], // compute later
+            policy_opening: Some(policy_bytes),
+            escrow_action: None,
+        };
+
+        (snapshot, tx, auth, sk.to_vec())
+    }
+
+    fn finalize_tx_with_auth(mut tx: Transaction, mut auth: privai_chain::InputAuth, sk: Option<&[u8]>) -> Transaction {
+        // set auth first to compute the correct signing hash
+        if let Transaction::TransferNote(ref mut t) = tx {
+            t.core.auth = vec![auth.clone()];
+        } else {
+            panic!("expected TransferNoteTx");
+        }
+
+        if let Some(secret_key) = sk {
+            let tx_hash = tx.tx_signing_hash();
+            let sig = nxms_transport::crypto::falcon_sign_ct_prepared(secret_key, &tx_hash).expect("sign");
+            auth.signatures = vec![sig];
+            if let Transaction::TransferNote(ref mut t) = tx {
+                t.core.auth = vec![auth];
+            }
+        } else {
+            if let Transaction::TransferNote(ref mut t) = tx {
+                t.core.auth = vec![auth];
+            }
+        }
+        tx
+    }
+
+    #[test]
+    fn fullprivacy_missing_policy_opening() {
+        let (snapshot, tx, mut auth, _sk) = setup_single_auth_test();
+        auth.policy_opening = None;
+        let tx = finalize_tx_with_auth(tx, auth, None);
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(matches!(result, Err(ValidationError::MissingPolicyOpening)));
+    }
+
+    #[test]
+    fn fullprivacy_policy_mismatch() {
+        use privai_chain::CanonicalEncode;
+        let (snapshot, tx, mut auth, _sk) = setup_single_auth_test();
+        // Modify policy opening to valid policy but wrong commit
+        let other_policy = privai_chain::note::SpendPolicy::Single {
+            falcon_pk_hash: [0x99; 32],
+        };
+        auth.policy_opening = Some(other_policy.to_canonical_bytes());
+        let tx = finalize_tx_with_auth(tx, auth, None);
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(matches!(result, Err(ValidationError::PolicyMismatch)));
+    }
+
+    #[test]
+    fn fullprivacy_policy_tag_mismatch() {
+        let (snapshot, tx, mut auth, _sk) = setup_single_auth_test();
+        // Change tag to Escrow2of3 while opening remains Single
+        auth.policy_tag = privai_chain::SpendPolicyTag::Escrow2of3 as u8;
+        let tx = finalize_tx_with_auth(tx, auth, None);
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(matches!(result, Err(ValidationError::PolicyTagMismatch)));
+    }
+
+    #[test]
+    fn fullprivacy_valid_single_spend() {
+        let (snapshot, tx, auth, sk) = setup_single_auth_test();
+        let tx = finalize_tx_with_auth(tx, auth, Some(&sk));
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(result.is_ok(), "Valid single FullPrivacy spend should succeed, got: {:?}", result);
+    }
+
+    #[test]
+    fn fullprivacy_invalid_single_signer_pk_hash() {
+        let (snapshot, tx, mut auth, sk) = setup_single_auth_test();
+        let (_, wrong_pk) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        auth.signer_pks = vec![wrong_pk];
+        let tx = finalize_tx_with_auth(tx, auth, Some(&sk));
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(
+            matches!(result, Err(ValidationError::InvalidAuth(ref msg)) if msg.contains("signer pk hash mismatch"))
+        );
+    }
+
+    #[test]
+    fn fullprivacy_invalid_single_signature() {
+        let (snapshot, tx, auth, _sk) = setup_single_auth_test();
+        // Give a random wrong signature
+        let (wrong_sk, _) = nxms_transport::crypto::falcon_keygen().expect("keygen");
+        let tx = finalize_tx_with_auth(tx, auth, Some(&wrong_sk));
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(
+            matches!(result, Err(ValidationError::InvalidAuth(ref msg)) if msg.contains("invalid Falcon signature"))
+        );
+    }
+
+    #[test]
+    fn fullprivacy_single_must_not_carry_escrow_action() {
+        let (snapshot, tx, mut auth, sk) = setup_single_auth_test();
+        auth.escrow_action = Some(1);
+        let tx = finalize_tx_with_auth(tx, auth, Some(&sk));
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(
+            matches!(result, Err(ValidationError::InvalidAuth(ref msg)) if msg.contains("Single policy should not have escrow_action"))
+        );
+    }
+
+    #[test]
+    fn fullprivacy_marketplacesettlement_unsupported() {
+        use privai_chain::{InputAuth, Nullifier, SpendPolicyTag, note::SpendPolicy};
+        use privai_chain::CanonicalEncode;
+
+        let mut snapshot = LedgerSnapshot::genesis(17);
+        let policy = SpendPolicy::MarketplaceSettlement {
+            buyer_pk_hash: [0; 32],
+            seller_pk_hash: [1; 32],
+            moderator_pk_hash: [2; 32],
+            timeout_block: 100,
+        };
+        let policy_commit = policy.commitment();
+        let policy_bytes = policy.to_canonical_bytes();
+
+        let note = OutputNote::new(
+            policy_commit,
+            privai_chain::LweCiphertext::default(),
+            [0x10; 32],
+            RecipientBox::new(vec![0x10], [0x10; 24], vec![0x11], [0x10; 16], [0x10; 16]),
+        );
+
+        snapshot.notes.insert(
+            note.note_commit,
+            NoteRecord {
+                note: note.clone(),
+                created_in_block: Some(0),
+                status: NoteStatus::Unspent,
+            },
+        );
+
+        let auth = InputAuth {
+            policy_tag: SpendPolicyTag::MarketplaceSettlement as u8,
+            signer_pks: vec![],
+            signatures: vec![],
+            policy_opening: Some(policy_bytes),
+            escrow_action: None,
+        };
+
+        let tx = Transaction::TransferNote(TransferNoteTx {
+            core: TxCore {
+                version: 1,
+                tx_type: TX_TYPE_TRANSFER_NOTE,
+                inputs: vec![InputRef { note_commit: note.note_commit }],
+                input_nullifiers: vec![Nullifier([0xE1; 32])],
+                outputs: vec![sample_note(0x30)],
+                fee: 0,
+                statement_commit: [0xF0; 32],
+                auth: vec![auth],
+            },
+        });
+
+        let result = validate_transaction(&tx, &snapshot, 0, 1);
+        assert!(
+            matches!(result, Err(ValidationError::InvalidAuth(ref msg)) if msg.contains("MarketplaceSettlement unsupported in FullPrivacy"))
         );
     }
 

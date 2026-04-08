@@ -327,6 +327,16 @@ mod tests {
         }
     }
 
+    fn dummy_auth() -> Vec<InputAuth> {
+        vec![InputAuth {
+            policy_tag: privai_chain::SpendPolicyTag::Single as u8,
+            signer_pks: vec![vec![0; 64]],
+            signatures: vec![vec![0; 32]],
+            policy_opening: Some(vec![1, 2, 3]),
+            escrow_action: None,
+        }]
+    }
+
     fn prepare_spendable_wallet() -> (PrivaiWallet<MemoryWalletStore>, SpendMaterial, ReceiveBundle) {
         let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let input_bundle = wallet
@@ -393,7 +403,7 @@ mod tests {
                     sample_output_plan(generated_bundle(201, None), 24),
                 ],
                 3,
-                Vec::new(),
+                dummy_auth(),
             )
             .expect("build transfer");
 
@@ -414,7 +424,7 @@ mod tests {
                 &spend,
                 vec![sample_output_plan(recipient_bundle, 70)],
                 3,
-                Vec::new(),
+                dummy_auth(),
             )
             .expect_err("must reject imbalance");
 
@@ -542,7 +552,7 @@ mod tests {
                 &spend,
                 vec![sample_output_plan(recipient_bundle, 74)],
                 3,
-                Vec::new(),
+                dummy_auth(),
             )
             .expect_err("must reject spent input");
 

@@ -49,6 +49,18 @@ pub enum ValidationError {
     InvalidOperatorSignature,
     #[error("missing auth for transaction (Zero Trust requires Falcon signature)")]
     MissingAuth,
+    #[error("auth entries count does not match inputs count")]
+    AuthCountMismatch,
+    #[error("missing policy_opening in auth")]
+    MissingPolicyOpening,
+    #[error("policy_opening does not decode to a valid policy: {0}")]
+    PolicyDecode(String),
+    #[error("policy_opening commitment does not match note's spend_policy_commit")]
+    PolicyMismatch,
+    #[error("policy_tag does not match derived policy type")]
+    PolicyTagMismatch,
+    #[error("auth requires exactly 1 signer for Single, got {0}")]
+    InvalidSingleSignerCount(usize),
     // ── Escrow-specific errors ────────────────────────────────────────
     #[error("escrow: policy_opening missing for escrow-2of3 auth")]
     EscrowMissingPolicyOpening,
