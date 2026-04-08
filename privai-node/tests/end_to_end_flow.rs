@@ -53,9 +53,9 @@ fn make_funding_note(
 
 #[test]
 fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
-    use privai_chain::{BlockTemplate, VoteType, hash::domain_hash};
-    use privai_node::config::ValidatorConfig;
     use nxms_transport::crypto::{falcon_keygen, falcon_sign_ct_prepared};
+    use privai_chain::{hash::domain_hash, BlockTemplate, VoteType};
+    use privai_node::config::ValidatorConfig;
 
     // 1. Setup 3 validatorów z kluczami Falcon
     let (sk1, pk1) = falcon_keygen().expect("keygen 1");
@@ -93,11 +93,11 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
     // Ustawiamy node 1 jako nasz local node
     config.node_pk_hash = val1.pk_hash;
     config.node_sig_pk = pk1.clone();
-    
+
     // Create 3 nodes in memory
     let mut node1 = PrivaiNode::open(config.clone(), MemoryStore::new()).expect("node1");
     node1 = node1.with_falcon_key(sk1.to_vec());
-    
+
     let mut config2 = config.clone();
     config2.node_pk_hash = val2.pk_hash;
     config2.node_sig_pk = pk2.clone();
@@ -111,9 +111,9 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
     node3 = node3.with_falcon_key(sk3.to_vec());
 
     // 2. Node 1 proponuje blok
-    let block = node1.propose_block(
-        0, 0, 1000, [0; 32], [0; 32], vec![], vec![]
-    ).expect("propose");
+    let block = node1
+        .propose_block(0, 0, 1000, [0; 32], [0; 32], vec![], vec![])
+        .expect("propose");
 
     let template = BlockTemplate {
         chain_id: block.header.chain_id,
@@ -143,10 +143,12 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
     // Zobaczmy: total stake = 30. (30 * 2) / 3 + 1 = 21. Więc wystarczą 3 głosy po 10 = 30. Ale zaraz, 2 * 10 = 20 < 21. Więc potrzeba 3 głosy.
     assert!(node1.receive_vote(vote1_prevote).is_none());
     assert!(node1.receive_vote(vote2_prevote).is_none());
-    
-    let prevote_qc = node1.receive_vote(vote3_prevote).expect("should emit Prevote QC");
+
+    let prevote_qc = node1
+        .receive_vote(vote3_prevote)
+        .expect("should emit Prevote QC");
     assert_eq!(prevote_qc.vote_type, VoteType::Prevote);
-    
+
     // 4. Nody otrzymują Prevote QC, i wysyłają PRECOMMIT
     let vote1_precommit = privai_chain::Vote {
         height: block.header.height,
@@ -156,7 +158,7 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
         validator_pk: pk1.clone(),
         falcon_sig: falcon_sign_ct_prepared(&sk1, &block.hash()).expect("sign"),
     };
-    
+
     let vote2_precommit = privai_chain::Vote {
         height: block.header.height,
         round: block.header.round,
@@ -165,7 +167,7 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
         validator_pk: pk2.clone(),
         falcon_sig: falcon_sign_ct_prepared(&sk2, &block.hash()).expect("sign"),
     };
-    
+
     let vote3_precommit = privai_chain::Vote {
         height: block.header.height,
         round: block.header.round,
@@ -178,14 +180,22 @@ fn three_node_consensus_flow_propose_prevote_precommit_finalize() {
     // Node 1 zbiera PRECOMMIT i generuje Final QC
     assert!(node1.receive_vote(vote1_precommit).is_none());
     assert!(node1.receive_vote(vote2_precommit).is_none());
-    
-    let precommit_qc = node1.receive_vote(vote3_precommit).expect("should emit Precommit QC");
+
+    let precommit_qc = node1
+        .receive_vote(vote3_precommit)
+        .expect("should emit Precommit QC");
     assert_eq!(precommit_qc.vote_type, VoteType::Precommit);
 
     // 5. Finalizacja bloku
-    node1.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
-    node2.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
-    node3.finalize_block_with_qc(&block, &precommit_qc).expect("finalize");
+    node1
+        .finalize_block_with_qc(&block, &precommit_qc)
+        .expect("finalize");
+    node2
+        .finalize_block_with_qc(&block, &precommit_qc)
+        .expect("finalize");
+    node3
+        .finalize_block_with_qc(&block, &precommit_qc)
+        .expect("finalize");
 
     // Weryfikacja: block height powinien wzrosnąć
     assert_eq!(node1.ledger().snapshot().height, 1);
@@ -325,5 +335,8 @@ fn wallet_transfer_proof_and_block_flow_roundtrip() {
         .load_block_artifacts(&block.hash())
         .expect("load artifacts")
         .expect("stored artifacts");
-    assert_eq!(stored_artifacts.execution_bundle, block.body.execution_bundle);
+    assert_eq!(
+        stored_artifacts.execution_bundle,
+        block.body.execution_bundle
+    );
 }

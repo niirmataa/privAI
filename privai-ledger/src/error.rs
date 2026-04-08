@@ -49,6 +49,33 @@ pub enum ValidationError {
     InvalidOperatorSignature,
     #[error("missing auth for transaction (Zero Trust requires Falcon signature)")]
     MissingAuth,
+    // ── Escrow-specific errors ────────────────────────────────────────
+    #[error("escrow: policy_opening missing for escrow-2of3 auth")]
+    EscrowMissingPolicyOpening,
+    #[error("escrow: escrow_action missing for escrow-2of3 auth")]
+    EscrowMissingAction,
+    #[error("escrow: invalid action byte {0:#x}")]
+    EscrowInvalidAction(u8),
+    #[error("escrow: policy_opening does not decode to a valid policy: {0}")]
+    EscrowPolicyDecode(String),
+    #[error("escrow: policy_opening decodes to non-Escrow2of3 policy type")]
+    EscrowUnsupportedPolicy,
+    #[error("escrow: policy_opening commitment does not match note's spend_policy_commit")]
+    EscrowPolicyMismatch,
+    #[error("escrow: signer pk_hash {0:?} not found in policy")]
+    EscrowUnknownSigner(Hash32),
+    #[error("escrow: duplicate signer in auth")]
+    EscrowDuplicateSigner,
+    #[error("escrow: signers not in canonical order (by policy index)")]
+    EscrowSignerOrderViolation,
+    #[error("escrow: signer combination does not match declared action")]
+    EscrowWrongSignerCombination,
+    #[error("escrow: recovery before timeout (current block {current}, required {required})")]
+    EscrowRecoveryBeforeTimeout { current: u64, required: u64 },
+    #[error("escrow: no output matches expected recipient for action")]
+    EscrowOutputTargetMismatch,
+    #[error("escrow: auth requires exactly 2 signers, got {0}")]
+    EscrowWrongSignerCount(usize),
     #[error(transparent)]
     Proof(#[from] ProofError),
 }

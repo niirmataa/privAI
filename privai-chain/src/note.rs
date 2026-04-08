@@ -15,6 +15,8 @@ use crate::primitives::{Amount14, BundleId, Flags8, Hash32, LweCiphertext, Nulli
 pub enum SpendPolicyTag {
     Single = 0x01,
     MarketplaceSettlement = 0x02,
+    /// Escrow 2-of-3 multisig (escrow-2of3-v1).
+    Escrow2of3 = 0x03,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +83,17 @@ pub enum SpendPolicy {
         moderator_pk_hash: Hash32,
         timeout_block: u64,
     },
+    /// Policy-constrained 2-of-3 multisig escrow.
+    ///
+    /// Signer set: Buyer (index 0), Merchant (index 1), Operator (index 2).
+    /// Action rules are implied by `policy_tag` (Escrow2of3) — NOT stored in fields.
+    /// See: spec/PRIVAI_ESCROW_OBJECT_MODEL.md section 8.3a
+    Escrow2of3 {
+        buyer_pk_hash: Hash32,
+        merchant_pk_hash: Hash32,
+        operator_pk_hash: Hash32,
+        timeout_block: u64,
+    },
 }
 
 impl SpendPolicy {
@@ -88,6 +101,7 @@ impl SpendPolicy {
         match self {
             Self::Single { .. } => SpendPolicyTag::Single,
             Self::MarketplaceSettlement { .. } => SpendPolicyTag::MarketplaceSettlement,
+            Self::Escrow2of3 { .. } => SpendPolicyTag::Escrow2of3,
         }
     }
 
@@ -113,6 +127,18 @@ impl CanonicalEncode for SpendPolicy {
                 write_fixed(out, buyer_pk_hash);
                 write_fixed(out, seller_pk_hash);
                 write_fixed(out, moderator_pk_hash);
+                write_u64(out, *timeout_block);
+            }
+            Self::Escrow2of3 {
+                buyer_pk_hash,
+                merchant_pk_hash,
+                operator_pk_hash,
+                timeout_block,
+            } => {
+                write_u8(out, SpendPolicyTag::Escrow2of3 as u8);
+                write_fixed(out, buyer_pk_hash);
+                write_fixed(out, merchant_pk_hash);
+                write_fixed(out, operator_pk_hash);
                 write_u64(out, *timeout_block);
             }
         }

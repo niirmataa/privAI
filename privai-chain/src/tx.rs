@@ -2,9 +2,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::canonical::{
-    CanonicalEncode, write_fixed, write_i64, write_u8, write_u64, write_vec, write_vec_bytes,
+    CanonicalEncode, write_fixed, write_i64, write_option_bytes, write_u8, write_u32, write_u64,
+    write_vec, write_vec_bytes,
 };
-use crate::hash::{STATEMENT_DOMAIN, TX_DOMAIN, domain_hash};
+use crate::hash::{STATEMENT_DOMAIN, TX_DOMAIN, TX_SIGNING_DOMAIN, domain_hash};
 use crate::note::{LiteOutputNote, OutputNote};
 use crate::primitives::{ContextId, Hash32, Nullifier};
 
@@ -41,6 +42,32 @@ pub struct InputAuth {
     pub policy_tag: u8,
     pub signer_pks: Vec<Vec<u8>>,
     pub signatures: Vec<Vec<u8>>,
+    /// Escrow: canonical encoding of the spend policy for reconstruction.
+    /// Required when policy_tag == Escrow2of3 (0x03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy_opening: Option<Vec<u8>>,
+    /// Escrow: action being authorized (EscrowAction as u8).
+    /// Required when policy_tag == Escrow2of3 (0x03).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub escrow_action: Option<u8>,
+}
+
+impl InputAuth {
+    /// Encode the signing preimage — everything EXCEPT signatures.
+    /// Used for `tx_signing_hash`, breaking the circular tx_id ↔ auth dependency.
+    pub fn encode_for_signing(&self, out: &mut Vec<u8>) {
+        write_u8(out, self.policy_tag);
+        write_vec_bytes(out, &self.signer_pks);
+        // signatures intentionally excluded
+        write_option_bytes(out, self.policy_opening.as_deref());
+        match self.escrow_action {
+            Some(a) => {
+                write_u8(out, 1);
+                write_u8(out, a);
+            }
+            None => write_u8(out, 0),
+        }
+    }
 }
 
 impl CanonicalEncode for InputAuth {
@@ -48,6 +75,14 @@ impl CanonicalEncode for InputAuth {
         write_u8(out, self.policy_tag);
         write_vec_bytes(out, &self.signer_pks);
         write_vec_bytes(out, &self.signatures);
+        write_option_bytes(out, self.policy_opening.as_deref());
+        match self.escrow_action {
+            Some(a) => {
+                write_u8(out, 1);
+                write_u8(out, a);
+            }
+            None => write_u8(out, 0),
+        }
     }
 }
 
@@ -78,6 +113,26 @@ impl TxCore {
 
     pub fn statement_hash(&self) -> Hash32 {
         domain_hash(STATEMENT_DOMAIN, &[&self.statement_commit])
+    }
+
+    /// Signing preimage: all fields EXCEPT auth signatures.
+    /// Used to compute `tx_signing_hash`, breaking the circular dependency
+    /// between `tx_id` and auth signatures.
+    pub fn signing_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_u8(&mut out, self.version);
+        write_u8(&mut out, self.tx_type);
+        write_vec(&mut out, &self.inputs);
+        write_vec(&mut out, &self.input_nullifiers);
+        write_vec(&mut out, &self.outputs);
+        write_u64(&mut out, self.fee);
+        write_fixed(&mut out, &self.statement_commit);
+        // Auth: include policy info and signer pks, exclude signatures
+        write_u32(&mut out, self.auth.len() as u32);
+        for auth in &self.auth {
+            auth.encode_for_signing(&mut out);
+        }
+        out
     }
 }
 
@@ -116,6 +171,23 @@ impl LiteTxCore {
             return Err(TxShapeError::TooManyAuthEntries);
         }
         Ok(())
+    }
+
+    /// Signing preimage for Lite transactions.
+    pub fn signing_preimage(&self) -> Vec<u8> {
+        let mut out = Vec::new();
+        write_u8(&mut out, self.version);
+        write_u8(&mut out, self.tx_type);
+        write_vec(&mut out, &self.inputs);
+        write_vec(&mut out, &self.input_nullifiers);
+        write_vec(&mut out, &self.outputs);
+        write_u64(&mut out, self.fee);
+        write_fixed(&mut out, &self.statement_commit);
+        write_u32(&mut out, self.auth.len() as u32);
+        for auth in &self.auth {
+            auth.encode_for_signing(&mut out);
+        }
+        out
     }
 }
 
@@ -309,6 +381,59 @@ impl Transaction {
 
     pub fn tx_id(&self) -> Hash32 {
         domain_hash(TX_DOMAIN, &[&self.to_canonical_bytes()])
+    }
+
+    /// Canonical signing message — signers sign THIS, not `tx_id`.
+    ///
+    /// Breaks the circular dependency: `tx_id` includes auth signatures,
+    /// but `tx_signing_hash` excludes them. Signers commit to all
+    /// transaction semantics without needing the signatures to exist yet.
+    ///
+    /// See: spec/PRIVAI_AUTH_SIGNING_MODEL.md section 4.2
+    pub fn tx_signing_hash(&self) -> Hash32 {
+        let preimage = match self {
+            Self::TransferNote(tx) => tx.core.signing_preimage(),
+            Self::Settlement(tx) => {
+                let mut p = tx.core.signing_preimage();
+                write_fixed(&mut p, &tx.settlement_id);
+                write_fixed(&mut p, &tx.marketplace_context);
+                write_u8(&mut p, tx.phase as u8);
+                write_fixed(&mut p, &tx.payload_commit);
+                p
+            }
+            Self::Model(tx) => {
+                let mut p = tx.core.signing_preimage();
+                write_fixed(&mut p, &tx.operator_pk_hash);
+                write_fixed(&mut p, &tx.model_commit);
+                write_fixed(&mut p, &tx.metadata_commit);
+                write_u8(&mut p, tx.action as u8);
+                p
+            }
+            Self::Stake(tx) => {
+                let mut p = tx.core.signing_preimage();
+                write_fixed(&mut p, &tx.validator_pk_hash);
+                write_u8(&mut p, tx.action as u8);
+                write_i64(&mut p, tx.amount_delta);
+                p
+            }
+            Self::MarketplaceBatch(tx) => {
+                let mut p = tx.core.signing_preimage();
+                tx.summary.encode(&mut p);
+                write_vec(&mut p, &tx.ticket_nullifiers);
+                // operator_sig excluded (it's a signature)
+                p
+            }
+            Self::LiteTransfer(tx) => tx.core.signing_preimage(),
+        };
+        domain_hash(TX_SIGNING_DOMAIN, &[&preimage])
+    }
+
+    /// Returns auth entries for any transaction type (including LiteTransfer).
+    pub fn auth(&self) -> &[InputAuth] {
+        match self {
+            Self::LiteTransfer(tx) => &tx.core.auth,
+            _ => &self.core().auth,
+        }
     }
 
     pub fn tx_type(&self) -> u8 {

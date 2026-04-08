@@ -61,6 +61,8 @@ fn test_reference_vectors_consensus() {
                 policy_tag: 1,
                 signer_pks: vec![vec![0xb4, 0xb5]],
                 signatures: vec![vec![0xb6]],
+                policy_opening: None,
+                escrow_action: None,
             }],
         },
     });
@@ -78,6 +80,8 @@ fn test_reference_vectors_consensus() {
                 policy_tag: 1,
                 signer_pks: vec![vec![0x84, 0x85]],
                 signatures: vec![vec![0x86, 0x87, 0x88]],
+                policy_opening: None,
+                escrow_action: None,
             }],
         },
         summary: privai_chain::small_payments::SettlementBatchSummary {
@@ -134,11 +138,11 @@ fn test_reference_vectors_consensus() {
     );
     assert_eq!(
         to_hex(&transfer_tx.tx_id()),
-        "179448cf6ec0139049b234f8a3634ed18447b3a1fccc0ee979c667246dd0fef7"
+        "2866e8d39b1077f79a2e3fcc32f7145288672faaa8d3209af6198a0e03e4d45f"
     );
     assert_eq!(
         to_hex(&batch_tx.tx_id()),
-        "a828840663776287d724d8a14d99c61606422398e37d010fbed995503151bd61"
+        "02e2e1ef0cced7a84213121c59c5be970118a51585f368553389b08dd1d2e42e"
     );
     assert_eq!(
         to_hex(&transfer_output.note_commit),
@@ -182,14 +186,14 @@ fn test_reference_vectors_consensus() {
     );
     assert_eq!(
         to_hex(&block.header.tx_root),
-        "62dcb88a0b39f133668d4f5f8f29077f03be77432f60d95f81f0b5e4e055c195"
+        "f5979146297b1d0786276e0a623dddc00edaeae71accfe53dc9d15c2f853763d"
     );
     assert_eq!(
         to_hex(&canonical_bytes(&block.header)),
-        "00070000002a000000000000000200000000000000030000000068e5cf8b010000d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d162dcb88a0b39f133668d4f5f8f29077f03be77432f60d95f81f0b5e4e055c195c86578e27ee77f0bd6e14cb07fa233d2cb59d293b596ac2c80689539b73ecec5096d155558f80bc3193f6da17240b84a33812fdd91b9aa4220c6f6996499eb21f17f4be8222d7bacaa9b0e4fce84c2c66f885334891f96c5a24a3fb58c8a5a885dfa271f95945c4c383c8fd28eb60a070bae74a69d5d9f9b3225d6716c69ae0ed5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
+        "00070000002a000000000000000200000000000000030000000068e5cf8b010000d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1d1f5979146297b1d0786276e0a623dddc00edaeae71accfe53dc9d15c2f853763dc86578e27ee77f0bd6e14cb07fa233d2cb59d293b596ac2c80689539b73ecec5096d155558f80bc3193f6da17240b84a33812fdd91b9aa4220c6f6996499eb21f17f4be8222d7bacaa9b0e4fce84c2c66f885334891f96c5a24a3fb58c8a5a885dfa271f95945c4c383c8fd28eb60a070bae74a69d5d9f9b3225d6716c69ae0ed5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d5d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d2d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d3d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4d4"
     );
     assert_eq!(
         to_hex(&block.hash()),
-        "ce1167aa6aca6a057bb7c030f92487bc7470f7770aaeb3d9150d63a83ab84411"
+        "78eaa3778771568e7f12f08d372a852f8ebaaf92cd4c04e18389eae2d9d80594"
     );
 }

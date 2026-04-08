@@ -1,6 +1,7 @@
 pub mod canonical;
 pub mod consensus;
 pub mod decode;
+pub mod escrow;
 pub mod hash;
 pub mod note;
 pub mod params;

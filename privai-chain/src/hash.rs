@@ -16,6 +16,14 @@ pub const PROOF_CERT_DOMAIN: &str = "privai:proof-cert:v0";
 pub const MERKLE_DOMAIN: &str = "privai:merkle:v0";
 pub const MERKLE_EMPTY_DOMAIN: &str = "privai:merkle-empty:v0";
 pub const EPOCH_SEED_DOMAIN: &str = "privai:epoch-seed:v0";
+pub const TX_SIGNING_DOMAIN: &str = "privai:tx-signing:v0";
+pub const FALCON_PK_DOMAIN: &str = "privai:falcon-pk:v0";
+
+/// Compute the canonical hash of a Falcon public key.
+/// Used in SpendPolicy pk_hash fields and escrow signer identification.
+pub fn falcon_pk_hash(pk: &[u8]) -> Hash32 {
+    domain_hash(FALCON_PK_DOMAIN, &[pk])
+}
 
 pub fn domain_hash(domain: &str, parts: &[&[u8]]) -> Hash32 {
     let mut hasher = Hasher::new();

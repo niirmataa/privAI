@@ -429,4 +429,56 @@ mod tests {
 
         assert_ne!(low_fee.job_id, high_fee.job_id);
     }
+
+    #[test]
+    fn escrow_spend_passes_proof_path_ignoring_auth() {
+        // Escrow spend uses the exact same proof path as a standard TransferNoteTx.
+        // The proof layer only covers note semantics (commitments, nullifiers, balance).
+        // Auth/policy/action semantics are ledger-only.
+        let (mut tx, witness) = sample_tx_and_witness();
+        
+        // Add escrow-specific auth to the transaction
+        use privai_chain::InputAuth;
+        tx.core.auth.push(InputAuth {
+            policy_tag: 0x03, // Escrow2of3
+            signer_pks: vec![vec![1; 32], vec![2; 32]],
+            signatures: vec![vec![3; 64], vec![4; 64]],
+            policy_opening: Some(vec![5, 6, 7]), // Escrow policy data
+            escrow_action: Some(0x02), // ReleaseToMerchant
+        });
+
+        // The proof builder should still accept it because it only checks note-level data
+        // and completely ignores the auth layer.
+        let proving = TransferProvingData::from_tx_and_witness(&tx, witness).expect("proving");
+        
+        // Verify statement and public inputs match what we expect
+        assert_eq!(proving.statement.commitment(), tx.core.statement_commit);
+        assert_eq!(proving.public_inputs.statement_commit, tx.core.statement_commit);
+    }
+
+    #[test]
+    fn escrow_spend_rejects_invalid_proof() {
+        // Escrow spend is rejected by the proof layer if note semantics are invalid,
+        // exactly like a standard TransferNoteTx.
+        let (mut tx, mut witness) = sample_tx_and_witness();
+        
+        // Add escrow-specific auth
+        use privai_chain::InputAuth;
+        tx.core.auth.push(InputAuth {
+            policy_tag: 0x03,
+            signer_pks: vec![vec![1; 32], vec![2; 32]],
+            signatures: vec![vec![3; 64], vec![4; 64]],
+            policy_opening: Some(vec![5, 6, 7]),
+            escrow_action: Some(0x02),
+        });
+
+        // Break the proof (e.g., mismatch output note commitment)
+        witness.outputs[0].note_commit = [0xBB; 32];
+
+        // The proof builder rejects it based on invalid note data, not auth data
+        assert!(matches!(
+            TransferProvingData::from_tx_and_witness(&tx, witness),
+            Err(TransferBuildError::OutputNoteCommitMismatch { index: 0, .. })
+        ));
+    }
 }

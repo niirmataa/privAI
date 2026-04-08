@@ -139,6 +139,8 @@ fn test_reference_vectors_marketplace() {
                 policy_tag: 1,
                 signer_pks: vec![vec![0x84, 0x85]],
                 signatures: vec![vec![0x86, 0x87, 0x88]],
+                policy_opening: None,
+                escrow_action: None,
             }],
         },
         summary: summary.clone(),
@@ -217,7 +219,7 @@ fn test_reference_vectors_marketplace() {
 
     assert_eq!(
         to_hex(&Transaction::MarketplaceBatch(batch_tx.clone()).tx_id()),
-        "c3d6f3c43f3026a0a28194e65d7e6cd4e6b45b8dc2696a38785b730e38eef32f"
+        "6504cc0eee92d71b90691190ba01e3f57fec6f7b083be0ef5a48986e0f200325"
     );
     assert_eq!(
         to_hex(&summary.settlement_root()),

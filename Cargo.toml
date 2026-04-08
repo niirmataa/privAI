@@ -1,0 +1,18 @@
+[workspace]
+resolver = "2"
+members = [
+    "nxms-escrow-orchestrator",
+    "nxms-mailbox",
+    "nxms-mailbox-client",
+    "nxms-signer",
+    "nxms-transport",
+    "privai-chain",
+    "privai-ledger",
+    "privai-node",
+    "privai-nxms",
+    "privai-proof",
+    "privai-wallet",
+]
+exclude = [
+    "nxms-monero-core",
+]
