@@ -1,0 +1,4 @@
+[submodule "external/nexum-core"]
+	path = external/nexum-core
+	url = git@github.com:niirmataa/nexum-core.git
+	branch = main
