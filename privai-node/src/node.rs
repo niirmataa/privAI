@@ -7,6 +7,7 @@ use privai_chain::{
     ProofCertificate, QuorumCertificate, Transaction, ViewChange, Vote, VoteType,
 };
 use privai_ledger::{compute_state_root, Ledger, LedgerError, LedgerStore};
+use privai_nxms::PrivaiBody;
 use privai_proof::{
     artifact::BlockProofArtifacts,
     build_execution_bundle_from_transactions,
@@ -16,7 +17,16 @@ use privai_proof::{
 };
 
 use crate::config::NodeConfig;
+use crate::escrow_stage::{EscrowStageError, EscrowStageStore, StagedEscrow, StagedProposal};
 use crate::proposer::select_proposer;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EscrowIngestOutcome {
+    FundedStored,
+    ProposalStored,
+    ApprovalStored,
+    Ignored,
+}
 
 #[derive(Debug, Error)]
 pub enum NodeError {
@@ -30,6 +40,8 @@ pub enum NodeError {
     Artifact(#[from] privai_proof::artifact::ArtifactError),
     #[error(transparent)]
     ArtifactVerify(#[from] privai_proof::ArtifactVerificationError),
+    #[error("escrow ingest: {0}")]
+    EscrowIngest(#[from] EscrowStageError),
     #[error("no validators are configured for proposer selection")]
     NoValidators,
     #[error("current node is not proposer for round {round}")]
@@ -68,6 +80,9 @@ pub struct PrivaiNode<
     // Do generowania odpornych sygnatur (Non-Custodial / Anti-Forging)
     // Zeroizing chroni klucz tajny przed odczytem z dumpów pamięci
     falcon_sk: Option<zeroize::Zeroizing<Vec<u8>>>,
+
+    // Escrow staging: control-plane store for funded/proposal/approval bodies
+    escrow_store: EscrowStageStore,
 }
 
 impl<S: LedgerStore>
@@ -162,6 +177,7 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 .as_millis() as u64,
             view_changes: HashMap::new(),
             falcon_sk: None,
+            escrow_store: EscrowStageStore::new(),
         })
     }
 
@@ -398,6 +414,62 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
             self.record_block_artifacts(block, artifacts)?;
         }
         self.import_block(block)
+    }
+
+    // ── Escrow body ingest ──────────────────────────────────────────────
+
+    pub fn handle_privai_body(
+        &mut self,
+        body: PrivaiBody,
+    ) -> Result<EscrowIngestOutcome, NodeError> {
+        match body {
+            PrivaiBody::EscrowFunded(funded) => {
+                self.escrow_store
+                    .ingest_funded(funded)
+                    .map_err(|e| NodeError::EscrowIngest(e))?;
+                Ok(EscrowIngestOutcome::FundedStored)
+            }
+            PrivaiBody::EscrowSpendProposal(proposal) => {
+                self.escrow_store
+                    .ingest_proposal(proposal)
+                    .map_err(|e| NodeError::EscrowIngest(e))?;
+                Ok(EscrowIngestOutcome::ProposalStored)
+            }
+            PrivaiBody::EscrowApproval(approval) => {
+                self.escrow_store
+                    .ingest_approval(approval)
+                    .map_err(|e| NodeError::EscrowIngest(e))?;
+                Ok(EscrowIngestOutcome::ApprovalStored)
+            }
+            _ => Ok(EscrowIngestOutcome::Ignored),
+        }
+    }
+
+    pub fn is_escrow_quorum_ready(&self, proposal_hash: &Hash32) -> bool {
+        self.escrow_store.is_quorum_ready(proposal_hash)
+    }
+
+    pub fn get_escrow_ready_approvals(
+        &self,
+        proposal_hash: &Hash32,
+    ) -> Option<Vec<privai_nxms::EscrowApprovalBody>> {
+        self.escrow_store.get_ready_approvals(proposal_hash)
+    }
+
+    pub fn get_staged_escrow(&self, escrow_id: &Hash32) -> Option<&StagedEscrow> {
+        self.escrow_store.funded_escrows.get(escrow_id)
+    }
+
+    pub fn get_staged_proposal(&self, proposal_hash: &Hash32) -> Option<&StagedProposal> {
+        self.escrow_store.get_staged_proposal(proposal_hash)
+    }
+
+    pub fn escrow_store(&self) -> &EscrowStageStore {
+        &self.escrow_store
+    }
+
+    pub fn escrow_store_mut(&mut self) -> &mut EscrowStageStore {
+        &mut self.escrow_store
     }
 
     /// PHASE 7 LIVENESS: Sprawdza timeout używając domyślnej wartości z configu (30s dla Tor).
