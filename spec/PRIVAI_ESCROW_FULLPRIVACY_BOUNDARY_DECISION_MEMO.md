@@ -83,12 +83,15 @@ To jest prawdziwy blocker:
 ## 5. Important Scope Correction
 
 Nie jest zamrozone, ze:
-- caly `FullPrivacy` musi nagle wymagac auth dla kazdego inputu,
 - mamy publicznie ujawnic `policy_tag = Escrow`,
 - mamy redefiniowac caly rail tylko po to, by domknac escrow blocker.
 
 Te pomysly padly jako robocze propozycje podczas brainstormingu.
 Nie wolno ich mylic z accepted source of truth.
+
+Doprecyzowanie:
+- rozszerzenie mandatory-auth na caly `FullPrivacy` nie bylo jeszcze jawnie zamrozone w source of truth,
+- ale moze byc uczciwie potraktowane jako **v1 maturity step** dla tego raila, jesli uznamy, ze optional-auth path byl tylko prototypowym dlugiem v0, a nie finalna semantyka prywatnego toru.
 
 ## 6. Operator Model
 
@@ -181,15 +184,18 @@ Zalety:
 - bardzo mocne privacy,
 - brak publicznego leak klasy policy,
 - ledger zawsze ma material do rozstrzygniecia.
+- wszystkie spends w `FullPrivacy` wygladaja z zewnatrz jednolicie,
+- nie wymaga nowych pol w nocie ani nowej publicznej klasy enforcementu,
+- nie wymaga zmian w canonical note payload tylko po to, by rozroznic auth-required vs open.
 
 Wady:
-- zmienia semantyke calego `FullPrivacy`,
-- podnosi rozmiar tx i koszt walidacji,
-- wychodzi poza frozen scope escrow v1.
+- podnosi rozmiar tx i koszt walidacji dla wszystkich spends na `FullPrivacy`,
+- wymaga potraktowania optional-auth path jako prototypowego dlugu v0, a nie cechy finalnej,
+- wymaga aktualizacji testow i execution assumptions dla prywatnego raila.
 
 Ocena:
-- mocne privacy-wise,
-- ale za szerokie scope.
+- obecnie najlepsza opcja privacy-wise,
+- najczystsza semantycznie, jesli `FullPrivacy` ma byc traktowane dojrzale i jednolicie.
 
 ### Option C. Escrow-specific auth-bound spend path/version
 
@@ -242,57 +248,65 @@ Wady:
 - nadal ujawnia, ze nota jest auth-required / policy-gated,
 - wymaga rozszerzenia note payload / canonical formats / state semantics,
 - jest to jawny freeze candidate, a nie tylko lokalna poprawka.
+- dopoki jedyna auth-required policy jest escrow, tworzy de facto distinguishability leak dla escrow-like notes.
 
 Ocena:
-- najlepszy obecny kompromis privacy vs wydajnosc vs frozen scope.
+- bardzo dobry fallback / bridge option,
+- ale slabszy privacy-wise od Option B.
 
-## 10. Why Option E Currently Wins
+## 10. Why Option B Currently Wins
 
-Option E eliminuje dwa toksyczne skrajnosci:
-- nie robi publicznego `Escrow` tagu,
-- nie rozlewa mandatory-auth na caly `FullPrivacy`.
+Po dodatkowej analizie privacy leak i implementation footprint Option B awansuje na miejsce pierwsze.
 
-Publicznie ujawnia tylko:
-- "ten UTXO ma nalozony zamek behawioralny",
-a nie:
-- jaki to dokladnie zamek,
-- czy to escrow,
-- kto jest signerem,
-- jaki jest policy body.
+Powody:
+- daje jeden, silny anonymity set dla spends na `FullPrivacy`,
+- nie tworzy publicznie rozroznialnych podklas `open` vs `auth_required`,
+- nie wymaga nowego canonical field / flagi w nocie,
+- nie wymaga bindingu enforcement class do `note_commit`,
+- nie zwieksza canonical surface area note modelu,
+- nie tworzy ukrytego publicznego `Escrow` tagu pod neutralna nazwa.
 
-To daje ledgerowi dokladnie tyle informacji, ile potrzebuje do twardego odrzucenia empty-auth case.
+Kluczowa obserwacja:
+- jesli tylko escrow uzywa `auth_required`, to Option E publicznie odroznia escrow-like notes od reszty,
+- a to jest sprzeczne z celem maksymalnej jednolitosci `FullPrivacy`.
 
-## 11. Technical Mapping For Option E
+Option B jest kosztowniejsza runtime'owo, ale ten koszt jest w praktyce kosztem prawdziwego auth w `FullPrivacy`, a nie tylko kosztem escrow.
+
+## 11. Technical Mapping For Option B
 
 ### 11.1. Funding
 
-Przy tworzeniu note:
-- ustawiamy minimalna klase enforcementu, np. `auth_required`,
-- ta klasa wchodzi do canonical payloadu i do `note_commit`,
-- zmiana klasy po fakcie uniewaznia binding.
+Funding note pozostaje zgodny z privacy-first note modelem:
+- brak nowego publicznego enforcement bitu,
+- brak nowego publicznego `Escrow` tagu,
+- policy body pozostaje ukryte za `spend_policy_commit`.
 
 ### 11.2. Spend
 
-Ledger:
-1. podnosi note ze stanu,
-2. odczytuje enforcement class,
-3. jesli klasa to `auth_required`, wymaga:
-   - auth envelope,
-   - `policy_opening`,
-4. hashuje `policy_opening` i sprawdza zgodnosc z `spend_policy_commit`,
-5. dopiero potem rozstrzyga:
-   - jaka jest policy,
-   - jaki signer set,
-   - jaki threshold,
-   - jaka action semantics.
+Ledger dla spends na `FullPrivacy`:
+1. wymaga auth envelope dla kazdego inputu,
+2. wymaga `policy_opening`,
+3. hashuje `policy_opening` i sprawdza zgodnosc z `spend_policy_commit`,
+4. odtwarza `tx_signing_hash`,
+5. weryfikuje auth package wzgledem reconstructed policy.
 
 ### 11.3. Effect
 
-Ledger dostaje:
-- deterministyczny sygnal "auth required",
-- bez publicznego leak "this is escrow".
+Ledger:
+- nie musi zgadywac, czy dany input wymaga auth,
+- nie musi rozrozniac publicznie klasy policy,
+- zawsze dostaje material do rozstrzygniecia ownership + policy constraints.
 
-## 12. Eventing For Operator Under Option E
+## 12. Option E As Fallback / Bridge
+
+Option E pozostaje sensowna tylko jako:
+- fallback migracyjny,
+- bridge option,
+- kompromis, jesli z jakiegos powodu chcemy zachowac optional-auth path na czesc prywatnych use cases.
+
+Nie jest juz rekomendacja pierwszego wyboru.
+
+## 13. Eventing For Operator Under Option B
 
 Minimalny flow dla operatora:
 1. Buyer funduje note on-chain.
@@ -309,36 +323,37 @@ To odcina:
 - replay trigger,
 - mailbox-only fake orchestration.
 
-## 13. Open Questions For Consensus
+## 14. Open Questions For Consensus
 
-1. Czy akceptujemy publiczna klase enforcementu jako minimalny leak?
-2. Czy nazewnictwo ma byc:
-   - `open` / `auth_required`,
-   - czy inne neutralne sformulowanie?
-3. Czy enforcement class jest:
-   - polem payloadu,
-   - flaga,
-   - czy osobnym canonical enum?
-4. Czy Option E ma byc:
-   - explicit update do `PRIVAI_CANONICAL_FORMATS.md`,
-   - explicit update do `PRIVAI_PROTOCOL_CORE.md`,
-   - explicit ledger freeze rule?
-5. Czy Option E w v1 obejmuje tylko escrow, czy otwiera droge dla innych auth-bound private policies?
+1. Czy formalnie uznajemy optional-auth path w `FullPrivacy` za prototypowy dlug v0?
+2. Czy `FullPrivacy v1` ma wprost znaczyc: "all inputs require auth envelope + policy_opening"?
+3. Czy aktualizujemy:
+   - `PRIVAI_AUTH_SIGNING_MODEL.md`
+   - `PRIVAI_PROTOCOL_CORE.md`
+   - `PRIVAI_CANONICAL_FORMATS.md`
+   tak, by to zapisac juz nie jako brainstorm, ale jako freeze candidate?
+4. Czy Option E zostawiamy jawnie jako fallback/bridge note, czy usuwamy z dalszej rekomendacji?
+5. Jak oznaczamy etap migracji testow i implementacji z optional-auth prototype do auth-required `FullPrivacy v1`?
 
-## 14. Recommendation
+## 15. Recommendation
 
 Obecna rekomendacja do konsensusu:
 
-**Option E: Generic Auth-Required Enforcement Class**
+**Option B: Auth for all `FullPrivacy` inputs**
 
 z nastepujacym framingiem:
-- to nie jest biznesowy `Escrow` tag,
-- to nie jest publiczna klasyfikacja policy body,
-- to jest minimalna klasa enforcementu potrzebna ledgerowi,
+- to nie jest redesign calego systemu,
+- to jest v1 maturity step dla `FullPrivacy`,
+- optional-auth path nalezy traktowac jako prototypowy dlug v0,
 - private policy body pozostaje ukryte za `spend_policy_commit`,
-- escrow v1 zachowuje `FullPrivacy` foundation i dostaje twardy enforcement.
+- escrow v1 dostaje twardy enforcement bez publicznego rozrozniania klas not.
 
-## 15. Bottom Line
+Option E:
+- pozostaje solidna opcja techniczna,
+- ale jako fallback / bridge,
+- nie jako rekomendacja pierwszego wyboru.
+
+## 16. Bottom Line
 
 Core `FullPrivacy` nie bylo bledem.
 Operator-as-automation jest zgodny z zamrozonym kierunkiem.
@@ -348,8 +363,9 @@ Realny problem pozostaje execution-level:
 - jak ledger ma odrzucic escrow-governed input bez auth,
 - nie wiedzac publicznie, ze to escrow.
 
-Option E daje obecnie najlepszy kompromis:
-- minimalny publiczny sygnal enforcementowy,
-- bez publicznego leak klasy escrow,
-- bez przedefiniowania calego `FullPrivacy`,
-- bez udawania, ze current optional-auth path juz wystarcza.
+Option B daje obecnie najlepszy wynik:
+- najmocniejsza prywatnosc,
+- jednolity wyglad spends na `FullPrivacy`,
+- brak nowego publicznego bitu enforcementowego,
+- brak publicznego distinguishability leak dla escrow-like notes,
+- pelne zamkniecie empty-auth blockeru.
