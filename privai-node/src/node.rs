@@ -2,12 +2,13 @@ use thiserror::Error;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use nxms_transport::wire::NxmsPayloadV2;
 use privai_chain::{
     tx::MarketplaceBatchTx, Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32,
     ProofCertificate, QuorumCertificate, Transaction, ViewChange, Vote, VoteType,
 };
 use privai_ledger::{compute_state_root, Ledger, LedgerError, LedgerStore};
-use privai_nxms::PrivaiBody;
+use privai_nxms::{PrivaiBody, ProtocolError};
 use privai_proof::{
     artifact::BlockProofArtifacts,
     build_execution_bundle_from_transactions,
@@ -16,9 +17,12 @@ use privai_proof::{
     StructuralProofVerifier,
 };
 
+use std::path::{Path, PathBuf};
+
 use crate::config::NodeConfig;
 use crate::escrow_stage::{EscrowStageError, EscrowStageStore, StagedEscrow, StagedProposal};
 use crate::proposer::select_proposer;
+use privai_nxms::EscrowApprovalBundle;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EscrowIngestOutcome {
@@ -42,6 +46,10 @@ pub enum NodeError {
     ArtifactVerify(#[from] privai_proof::ArtifactVerificationError),
     #[error("escrow ingest: {0}")]
     EscrowIngest(#[from] EscrowStageError),
+    #[error("escrow persistence: {0}")]
+    EscrowPersistence(String),
+    #[error("protocol decode: {0}")]
+    Protocol(#[from] ProtocolError),
     #[error("no validators are configured for proposer selection")]
     NoValidators,
     #[error("current node is not proposer for round {round}")]
@@ -52,6 +60,8 @@ pub enum NodeError {
     IdentityError(String),
     #[error("QC hash mismatch: expected {expected:?}, got {actual:?}")]
     QcHashMismatch { expected: Hash32, actual: Hash32 },
+    #[error("escrow bundle: {0}")]
+    EscrowBundle(String),
 }
 
 pub struct PrivaiNode<
@@ -83,6 +93,10 @@ pub struct PrivaiNode<
 
     // Escrow staging: control-plane store for funded/proposal/approval bodies
     escrow_store: EscrowStageStore,
+
+    /// Resolved path for the escrow stage snapshot file.
+    /// None when persistence is not configured (e.g. empty data_dir).
+    escrow_snapshot_path: Option<PathBuf>,
 }
 
 impl<S: LedgerStore>
@@ -162,6 +176,21 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
     ) -> Result<Self, NodeError> {
         let ledger = Ledger::open(store, config.chain_id, verifier)?;
         let current_round = ledger.snapshot().consensus_safety.current_round;
+
+        // Resolve escrow snapshot path from config.data_dir
+        let escrow_snapshot_path = if config.data_dir.is_empty() {
+            None
+        } else {
+            Some(PathBuf::from(&config.data_dir).join(EscrowStageStore::SNAPSHOT_FILENAME))
+        };
+
+        // Load persisted escrow staging state, if available
+        let escrow_store = match &escrow_snapshot_path {
+            Some(path) => EscrowStageStore::load_from_path(path)
+                .map_err(|e| NodeError::EscrowPersistence(e.to_string()))?,
+            None => EscrowStageStore::new(),
+        };
+
         Ok(Self {
             config,
             ledger,
@@ -177,7 +206,8 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 .as_millis() as u64,
             view_changes: HashMap::new(),
             falcon_sk: None,
-            escrow_store: EscrowStageStore::new(),
+            escrow_store,
+            escrow_snapshot_path,
         })
     }
 
@@ -418,6 +448,16 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     // ── Escrow body ingest ──────────────────────────────────────────────
 
+    /// Persist escrow staging state to disk, if a snapshot path is configured.
+    fn persist_escrow_store(&self) -> Result<(), NodeError> {
+        if let Some(path) = &self.escrow_snapshot_path {
+            self.escrow_store
+                .save_to_path(path)
+                .map_err(|e| NodeError::EscrowPersistence(e.to_string()))?;
+        }
+        Ok(())
+    }
+
     pub fn handle_privai_body(
         &mut self,
         body: PrivaiBody,
@@ -427,22 +467,36 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
                 self.escrow_store
                     .ingest_funded(funded)
                     .map_err(|e| NodeError::EscrowIngest(e))?;
+                self.persist_escrow_store()?;
                 Ok(EscrowIngestOutcome::FundedStored)
             }
             PrivaiBody::EscrowSpendProposal(proposal) => {
                 self.escrow_store
                     .ingest_proposal(proposal)
                     .map_err(|e| NodeError::EscrowIngest(e))?;
+                self.persist_escrow_store()?;
                 Ok(EscrowIngestOutcome::ProposalStored)
             }
             PrivaiBody::EscrowApproval(approval) => {
                 self.escrow_store
                     .ingest_approval(approval)
                     .map_err(|e| NodeError::EscrowIngest(e))?;
+                self.persist_escrow_store()?;
                 Ok(EscrowIngestOutcome::ApprovalStored)
             }
             _ => Ok(EscrowIngestOutcome::Ignored),
         }
+    }
+
+    /// Wire ingress: accepts an NXMS/2 payload, decodes it into a `PrivaiBody`,
+    /// and delegates to `handle_privai_body`. Non-escrow bodies return `Ignored`.
+    /// Malformed or non-PRIVAI payloads produce a controlled `NodeError::Protocol`.
+    pub fn handle_nxms_payload(
+        &mut self,
+        payload: &NxmsPayloadV2,
+    ) -> Result<EscrowIngestOutcome, NodeError> {
+        let body = PrivaiBody::from_payload(payload).map_err(NodeError::Protocol)?;
+        self.handle_privai_body(body)
     }
 
     pub fn is_escrow_quorum_ready(&self, proposal_hash: &Hash32) -> bool {
@@ -454,6 +508,50 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
         proposal_hash: &Hash32,
     ) -> Option<Vec<privai_nxms::EscrowApprovalBody>> {
         self.escrow_store.get_ready_approvals(proposal_hash)
+    }
+
+    /// Build a Stage A `EscrowApprovalBundle` from staged approvals for the given proposal.
+    ///
+    /// Requirements:
+    /// - proposal must exist in the staging store
+    /// - quorum must be met (>= 2 approvals)
+    /// - resulting bundle passes `validate()`
+    ///
+    /// The returned bundle has `tx_signing_hash == TX_SIGNING_HASH_STAGE_A` — it is
+    /// authorization material for Stage B, not a final ledger-ready auth package.
+    pub fn build_escrow_approval_bundle(
+        &self,
+        proposal_hash: &Hash32,
+    ) -> Result<EscrowApprovalBundle, NodeError> {
+        // 1. Proposal must exist
+        if !self.escrow_store.proposals.contains_key(proposal_hash) {
+            return Err(NodeError::EscrowBundle(format!(
+                "proposal not found: {}",
+                hex::encode(proposal_hash)
+            )));
+        }
+
+        // 2. Quorum must be met
+        let approvals = self
+            .escrow_store
+            .get_ready_approvals(proposal_hash)
+            .ok_or_else(|| {
+                NodeError::EscrowBundle(format!(
+                    "quorum not met for proposal: {}",
+                    hex::encode(proposal_hash)
+                ))
+            })?;
+
+        // 3. Build bundle with stable ordering
+        let bundle = EscrowApprovalBundle::from_approvals_sorted(*proposal_hash, &approvals)
+            .map_err(|e| NodeError::EscrowBundle(e.to_string()))?;
+
+        // 4. Validate bundle before returning
+        bundle
+            .validate()
+            .map_err(|e| NodeError::EscrowBundle(e.to_string()))?;
+
+        Ok(bundle)
     }
 
     pub fn get_staged_escrow(&self, escrow_id: &Hash32) -> Option<&StagedEscrow> {
@@ -470,6 +568,10 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     pub fn escrow_store_mut(&mut self) -> &mut EscrowStageStore {
         &mut self.escrow_store
+    }
+
+    pub fn escrow_snapshot_path(&self) -> Option<&Path> {
+        self.escrow_snapshot_path.as_deref()
     }
 
     /// PHASE 7 LIVENESS: Sprawdza timeout używając domyślnej wartości z configu (30s dla Tor).
@@ -751,6 +853,12 @@ mod tests {
 
     use super::*;
 
+    fn test_config() -> NodeConfig {
+        let mut config = NodeConfig::example();
+        config.data_dir = String::new();
+        config
+    }
+
     fn sample_note(seed: u8) -> OutputNote {
         OutputNote::new(
             [seed; 32],
@@ -870,8 +978,8 @@ mod tests {
 
     #[test]
     fn proposer_builds_block_with_derived_public_inputs_root() {
-        let config = NodeConfig::example();
-        let mut node = PrivaiNode::open(config.clone(), MemoryStore::new()).expect("node");
+        let config = test_config();
+        let mut node = PrivaiNode::open(config, MemoryStore::new()).expect("node");
         let tx = Transaction::TransferNote(TransferNoteTx {
             core: TxCore {
                 version: 0,
@@ -908,8 +1016,8 @@ mod tests {
 
     #[test]
     fn node_records_block_artifacts_sidecar() {
-        let config = NodeConfig::example();
-        let mut node = PrivaiNode::open(config.clone(), MemoryStore::new()).expect("node");
+        let config = test_config();
+        let mut node = PrivaiNode::open(config, MemoryStore::new()).expect("node");
         let (block, artifacts) = sample_block_and_artifacts(10);
 
         node.record_block_artifacts(&block, &artifacts)
@@ -936,7 +1044,7 @@ mod tests {
 
     #[test]
     fn node_rejects_artifacts_when_backend_rejects_them() {
-        let config = NodeConfig::example();
+        let config = test_config();
         let mut node = PrivaiNode::open_with_components(
             config.clone(),
             MemoryStore::new(),
@@ -964,8 +1072,8 @@ mod tests {
         let (sk2, pk2) = nxms_transport::crypto::falcon_keygen().expect("keygen");
         let (sk3, pk3) = nxms_transport::crypto::falcon_keygen().expect("keygen");
 
-        let config = NodeConfig::example();
-        let mut config_modified = config.clone();
+        let config = test_config();
+        let mut config_modified = config;
         config_modified.validators = vec![
             ValidatorConfig {
                 pk_hash: test_pk_hash(&pk1),
@@ -1048,8 +1156,8 @@ mod tests {
         let (sk3, pk3) = nxms_transport::crypto::falcon_keygen().expect("keygen");
         let (_sk4, pk4) = nxms_transport::crypto::falcon_keygen().expect("keygen");
 
-        let config = NodeConfig::example();
-        let mut config_modified = config.clone();
+        let config = test_config();
+        let mut config_modified = config;
         config_modified.validators = vec![
             ValidatorConfig {
                 pk_hash: test_pk_hash(&pk1),
@@ -1158,8 +1266,8 @@ mod tests {
             privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[pk])
         }
 
-        let config = NodeConfig::example();
-        let mut config_modified = config.clone();
+        let config = test_config();
+        let mut config_modified = config;
         config_modified.validators = vec![
             ValidatorConfig {
                 pk_hash: test_pk_hash(&pk1),

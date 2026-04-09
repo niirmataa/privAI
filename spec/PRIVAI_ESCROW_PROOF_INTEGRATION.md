@@ -192,6 +192,7 @@ Ale `tx_signing_hash` jest auth-layer artifact, nie proof-layer artifact:
 - proof path binduje statement i public inputs,
 - auth path binduje `tx_signing_hash`,
 - te dwie sciezki sa komplementarne, nie zamienne.
+- oba sa obliczane w Stage B (wallet/prover/final assembly), nie w control-plane.
 
 V1 escrow polega na obu:
 - proof gwarantuje note-level correctness,
@@ -259,6 +260,30 @@ Caveat: to jest current runtime/canonical today path. Pelna finalna semantyka `P
 Twarda zasada:
 - dopoki te pytania nie sa zamkniete, nie wolno claimowac full PQ privacy dla escrow,
 - dopoki te pytania nie sa zamkniete, v1 escrow dziala z ledger-enforced public validation + note-level proof coverage.
+
+## 13a. Stage B: Final Assembly Elements Required for Hash/Proof Path
+
+Do obliczenia finalnego `tx_signing_hash` i pokrycia proof path potrzebne sa elementy Stage B (wallet/prover/final assembly), ktore NIE sa dostepne na etapie control-plane (Stage A):
+
+| Element | Stage | Owner |
+|---------|-------|-------|
+| final nullifier (derivation z note_commit + nullifier_key) | B | wallet/prover |
+| final `statement_commit` (over TransferStatement) | B | wallet/prover |
+| final output note (`OutputNote`) | B | wallet/prover |
+| final `RecipientBox` (sealing) | B | wallet/prover |
+| final auth insertion ordering (canonical signer ordering in tx) | B | wallet/prover |
+| final `tx_signing_hash` (from canonical tx body) | B | wallet/prover |
+| final `TransferNoteTx` assembly | B | wallet/prover |
+
+Te elementy naleza do Stage B — orchestrator / control-plane (Stage A) ich nie produkuje i nie oblicza nad nimi `tx_signing_hash`.
+
+`tx_signing_hash` jest obliczany dopiero po skompletowaniu WSZYSTKICH powyzszych elementow. Zadna komorka control-plane nie ma dostepu do finalnych danych potrzebnych do tego obliczenia.
+
+Relationship to proof:
+- proof path (TransferStatement, public_inputs_hash, proof artifact) jest budowany w Stage B,
+- proof wymaga finalnych outputow, nullifierow i statement_commit,
+- te dane sa kompletne dopiero po final assembly,
+- dlatego proof integration jest inherentnie Stage B.
 
 ## 14. What We Are Not Doing Now
 

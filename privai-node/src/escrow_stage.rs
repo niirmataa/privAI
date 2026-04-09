@@ -2,8 +2,10 @@ use privai_nxms::{
     ContextId, EscrowApprovalBody, EscrowFundedBody, EscrowFundingDescriptor, EscrowSpendProposal,
     EscrowSpendProposalBody, Hash32,
 };
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fmt;
+use std::path::Path;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EscrowStageError {
@@ -12,9 +14,10 @@ pub enum EscrowStageError {
     ProposalWithoutFunding,
     ApprovalWithoutProposal,
     ApprovalMismatch,
-    InvalidProposalHash, // when proposal_hash == tx_signing_hash
     ProposalConflict,
     StagedEscrowNotFound,
+    /// Persistence I/O or serialization error.
+    Persistence(String),
 }
 
 impl fmt::Display for EscrowStageError {
@@ -25,18 +28,16 @@ impl fmt::Display for EscrowStageError {
             Self::ProposalWithoutFunding => write!(f, "proposal without prior funding"),
             Self::ApprovalWithoutProposal => write!(f, "approval without prior proposal"),
             Self::ApprovalMismatch => write!(f, "approval session mismatch"),
-            Self::InvalidProposalHash => {
-                write!(f, "proposal_hash must differ from tx_signing_hash")
-            }
             Self::ProposalConflict => write!(f, "proposal conflict"),
             Self::StagedEscrowNotFound => write!(f, "staged escrow not found"),
+            Self::Persistence(msg) => write!(f, "escrow stage persistence: {msg}"),
         }
     }
 }
 
 impl std::error::Error for EscrowStageError {}
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedEscrow {
     pub session_context: ContextId,
     pub escrow_id: Hash32,
@@ -44,11 +45,86 @@ pub struct StagedEscrow {
     pub descriptor: EscrowFundingDescriptor,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StagedProposal {
     pub session_context: ContextId,
     pub proposal: EscrowSpendProposal,
+    /// signer_pk -> approval body
     pub approvals: HashMap<Hash32, EscrowApprovalBody>,
+}
+
+/// Serializable mirror of `StagedProposal` — uses Vec tuples instead of HashMap
+/// for JSON compatibility (`[u8; 32]` cannot be a JSON map key).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SnapshotStagedProposal {
+    pub session_context: ContextId,
+    pub proposal: EscrowSpendProposal,
+    /// (hex_signer_pk, approval) tuples
+    pub approvals: Vec<(String, EscrowApprovalBody)>,
+}
+
+impl SnapshotStagedProposal {
+    pub fn from_staged(p: &StagedProposal) -> Self {
+        Self {
+            session_context: p.session_context,
+            proposal: p.proposal.clone(),
+            approvals: p
+                .approvals
+                .iter()
+                .map(|(k, v)| (hash32_to_hex(k), v.clone()))
+                .collect(),
+        }
+    }
+
+    pub fn into_staged(
+        self,
+    ) -> Result<
+        (
+            EscrowSpendProposal,
+            ContextId,
+            HashMap<Hash32, EscrowApprovalBody>,
+        ),
+        EscrowStageError,
+    > {
+        let approvals: HashMap<Hash32, EscrowApprovalBody> = self
+            .approvals
+            .into_iter()
+            .map(|(k, v)| hex_to_hash32(&k).map(|key| (key, v)))
+            .collect::<Result<_, _>>()?;
+        Ok((self.proposal, self.session_context, approvals))
+    }
+}
+
+/// Serializable snapshot of the entire escrow staging state.
+///
+/// This is the on-disk format written to `escrow_stage.json` inside the node's
+/// `data_dir`. It captures funded escrows, proposals and their approvals so that
+/// the node can restore Stage A state after a restart.
+///
+/// Uses Vec of (hex_key, value) tuples because `[u8; 32]` HashMap keys cannot
+/// be serialized directly to JSON (JSON requires string keys).
+#[derive(Debug, Default, Serialize, Deserialize)]
+pub struct EscrowStageSnapshot {
+    pub funded_escrows: Vec<(String, StagedEscrow)>,
+    pub proposals: Vec<(String, SnapshotStagedProposal)>,
+}
+
+fn hash32_to_hex(h: &Hash32) -> String {
+    hex::encode(h)
+}
+
+fn hex_to_hash32(s: &str) -> Result<Hash32, EscrowStageError> {
+    let bytes = hex::decode(s)
+        .map_err(|e| EscrowStageError::Persistence(format!("invalid hex key '{s}': {e}")))?;
+    if bytes.len() != 32 {
+        return Err(EscrowStageError::Persistence(format!(
+            "hex key '{s}' decoded to {} bytes, expected 32",
+            bytes.len()
+        )));
+    }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&bytes);
+    Ok(arr)
 }
 
 #[derive(Default)]
@@ -95,11 +171,6 @@ impl EscrowStageStore {
         body: EscrowSpendProposalBody,
     ) -> Result<(), EscrowStageError> {
         let proposal = &body.proposal;
-
-        // C. proposal_hash != tx_signing_hash
-        if proposal.proposal_hash == proposal.tx_signing_hash {
-            return Err(EscrowStageError::InvalidProposalHash);
-        }
 
         // A. Funding first
         let funded = self
@@ -161,6 +232,10 @@ impl EscrowStageStore {
         }
     }
 
+    /// Returns approvals in deterministic (ascending signer_pk) order once quorum is met.
+    ///
+    /// The returned list is always sorted by signer_pk regardless of ingestion order,
+    /// ensuring that node-side assembly never leaks HashMap ordering.
     pub fn get_ready_approvals(&self, proposal_hash: &Hash32) -> Option<Vec<EscrowApprovalBody>> {
         if self.is_quorum_ready(proposal_hash) {
             let prop = self.proposals.get(proposal_hash)?;
@@ -176,6 +251,111 @@ impl EscrowStageStore {
     pub fn get_staged_proposal(&self, proposal_hash: &Hash32) -> Option<&StagedProposal> {
         self.proposals.get(proposal_hash)
     }
+
+    /// Build a serializable snapshot of the current in-memory state.
+    pub fn to_snapshot(&self) -> EscrowStageSnapshot {
+        EscrowStageSnapshot {
+            funded_escrows: self
+                .funded_escrows
+                .iter()
+                .map(|(k, v)| (hash32_to_hex(k), v.clone()))
+                .collect(),
+            proposals: self
+                .proposals
+                .iter()
+                .map(|(k, v)| (hash32_to_hex(k), SnapshotStagedProposal::from_staged(v)))
+                .collect(),
+        }
+    }
+
+    /// Restore state from a snapshot (overwrites current in-memory state).
+    pub fn apply_snapshot(
+        &mut self,
+        snapshot: EscrowStageSnapshot,
+    ) -> Result<(), EscrowStageError> {
+        self.funded_escrows = snapshot
+            .funded_escrows
+            .into_iter()
+            .map(|(k, v)| hex_to_hash32(&k).map(|key| (key, v)))
+            .collect::<Result<_, _>>()?;
+        self.proposals = snapshot
+            .proposals
+            .into_iter()
+            .map(|(k, snap_prop)| {
+                let key = hex_to_hash32(&k)?;
+                let (proposal, session_context, approvals) = snap_prop.into_staged()?;
+                Ok((
+                    key,
+                    StagedProposal {
+                        session_context,
+                        proposal,
+                        approvals,
+                    },
+                ))
+            })
+            .collect::<Result<_, EscrowStageError>>()?;
+        Ok(())
+    }
+
+    /// Load state from a JSON file on disk.
+    ///
+    /// - Missing file → empty store, no error.
+    /// - Corrupt / unreadable file → `EscrowStageError::Persistence`.
+    pub fn load_from_path(path: &Path) -> Result<Self, EscrowStageError> {
+        match std::fs::read_to_string(path) {
+            Ok(contents) => {
+                let snapshot: EscrowStageSnapshot =
+                    serde_json::from_str(&contents).map_err(|e| {
+                        EscrowStageError::Persistence(format!(
+                            "corrupt snapshot at {}: {e}",
+                            path.display()
+                        ))
+                    })?;
+                let mut store = Self::new();
+                store.apply_snapshot(snapshot)?;
+                Ok(store)
+            }
+            Err(ref e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::new()),
+            Err(e) => Err(EscrowStageError::Persistence(format!(
+                "failed to read {}: {e}",
+                path.display()
+            ))),
+        }
+    }
+
+    /// Persist the current state to a JSON file on disk using a temp-file + rename pattern.
+    ///
+    /// This ensures the target path never holds a half-written file on the success path.
+    pub fn save_to_path(&self, path: &Path) -> Result<(), EscrowStageError> {
+        let snapshot = self.to_snapshot();
+        let json = serde_json::to_string(&snapshot)
+            .map_err(|e| EscrowStageError::Persistence(format!("serialize snapshot: {e}")))?;
+
+        // Ensure parent directory exists
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+                EscrowStageError::Persistence(format!("create dir {}: {e}", parent.display()))
+            })?;
+        }
+
+        let tmp_path = path.with_extension("tmp");
+        std::fs::write(&tmp_path, json.as_bytes()).map_err(|e| {
+            EscrowStageError::Persistence(format!("write temp file {}: {e}", tmp_path.display()))
+        })?;
+
+        std::fs::rename(&tmp_path, path).map_err(|e| {
+            EscrowStageError::Persistence(format!(
+                "rename {} -> {}: {e}",
+                tmp_path.display(),
+                path.display()
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    /// Returns the canonical filename for the escrow stage snapshot.
+    pub const SNAPSHOT_FILENAME: &'static str = "escrow_stage.json";
 }
 
 #[cfg(test)]
@@ -220,34 +400,12 @@ mod tests {
                 escrow_id: [10; 32], // Not funded
                 snapshot_hash: [40; 32],
                 action: 0,
-                tx_signing_hash: [50; 32],
             },
         };
 
         assert_eq!(
             store.ingest_proposal(proposal_body),
             Err(EscrowStageError::ProposalWithoutFunding)
-        );
-    }
-
-    #[test]
-    fn test_proposal_hash_equals_tx_signing_hash_is_rejected() {
-        let mut store = EscrowStageStore::new();
-        // Even if funded, this should fail early
-        let proposal_body = EscrowSpendProposalBody {
-            session_context: [1; 16],
-            proposal: EscrowSpendProposal {
-                proposal_hash: [30; 32],
-                escrow_id: [10; 32],
-                snapshot_hash: [40; 32],
-                action: 0,
-                tx_signing_hash: [30; 32], // SAME AS PROPOSAL HASH
-            },
-        };
-
-        assert_eq!(
-            store.ingest_proposal(proposal_body),
-            Err(EscrowStageError::InvalidProposalHash)
         );
     }
 
@@ -285,7 +443,6 @@ mod tests {
                 escrow_id: [10; 32],
                 snapshot_hash: [40; 32],
                 action: 0,
-                tx_signing_hash: [50; 32],
             },
         };
         store.ingest_proposal(proposal_body.clone()).unwrap();

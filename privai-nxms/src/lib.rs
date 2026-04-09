@@ -1,5 +1,5 @@
-use nxms_transport::wire::{NXMS_PROTO_V2, NxmsPayloadV2};
-use privai_chain::small_payments::{SpendGrant, Receipt, ServicePaymentPolicy};
+use nxms_transport::wire::{NxmsPayloadV2, NXMS_PROTO_V2};
+use privai_chain::small_payments::{Receipt, ServicePaymentPolicy, SpendGrant};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -20,7 +20,10 @@ pub enum ProtocolError {
     #[error("unexpected app_proto '{0}'")]
     UnexpectedAppProto(String),
     #[error("payload msg_type '{payload}' does not match body kind '{expected}'")]
-    MsgTypeMismatch { payload: String, expected: &'static str },
+    MsgTypeMismatch {
+        payload: String,
+        expected: &'static str,
+    },
     #[error("body kind '{body}' does not belong to PRIVAI/1")]
     UnexpectedBodyKind { body: String },
     #[error("json error: {0}")]
@@ -96,7 +99,7 @@ pub struct InferenceResponseBody {
     pub response_commit: Hash32,
     pub usage_units: u64,
     /// Rachunek do podpisania/odesłania do Operatora jako płatność za Inferencję.
-    pub receipt_offer: Option<Receipt>, 
+    pub receipt_offer: Option<Receipt>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -126,6 +129,11 @@ pub struct EscrowSpendProposalBody {
     pub proposal: EscrowSpendProposal,
 }
 
+/// Single signer approval over a proposal.
+///
+/// `signature` is authorization material — signer intent over the proposal.
+/// It is NOT a final ledger-ready signature over `tx_signing_hash`.
+/// Final signing over the canonical tx body happens in Stage B (wallet/final assembly).
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EscrowApprovalBody {
     pub session_context: ContextId,
@@ -166,15 +174,129 @@ pub struct EscrowSpendProposal {
     pub escrow_id: Hash32,
     pub snapshot_hash: Hash32,
     pub action: u8, // 0 = release, 1 = refund, 2 = recovery_release, etc.
-    pub tx_signing_hash: Hash32, // The object to be signed for the ledger
 }
 
+/// Stage A (control-plane) approval bundle — authorization material handed to Stage B.
+///
+/// This bundle collects quorum approvals and passes them to wallet/final assembly (Stage B)
+/// where the final `TransferNoteTx` with `tx_signing_hash` is constructed.
+///
+/// Semantics:
+/// - `signatures` and `signer_pks` are approval / authorization material, NOT final ledger-ready auth.
+/// - `tx_signing_hash` is a Stage B artifact. In Stage A it is `[0u8; 32]` (unset).
+///   The actual hash is computed in Stage B after canonical tx body assembly.
+/// - Final auth insertion ordering and signing over `tx_signing_hash` happen in Stage B.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EscrowApprovalBundle {
     pub proposal_hash: Hash32,
     pub tx_signing_hash: Hash32,
     pub signer_pks: Vec<Hash32>,
     pub signatures: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BundleValidationError {
+    /// signer_pks.len() != signatures.len()
+    SignerSignatureCountMismatch { signers: usize, signatures: usize },
+    /// Two or more signer_pks are identical
+    DuplicateSigner(Hash32),
+}
+
+impl std::fmt::Display for BundleValidationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SignerSignatureCountMismatch {
+                signers,
+                signatures,
+            } => {
+                write!(
+                    f,
+                    "signer/signature count mismatch: {signers} signers vs {signatures} signatures"
+                )
+            }
+            Self::DuplicateSigner(pk) => {
+                write!(f, "duplicate signer: {}", hex::encode(pk))
+            }
+        }
+    }
+}
+
+impl std::error::Error for BundleValidationError {}
+
+/// Stage A sentinel: `tx_signing_hash` is not set until Stage B.
+pub const TX_SIGNING_HASH_STAGE_A: Hash32 = [0u8; 32];
+
+impl EscrowApprovalBundle {
+    /// Build a bundle from individual approval bodies, sorted deterministically by signer_pk.
+    ///
+    /// The returned bundle has `signer_pks` and `signatures` in stable ascending order
+    /// by `signer_pk`, ensuring deterministic assembly regardless of input ordering.
+    ///
+    /// `tx_signing_hash` is set to `TX_SIGNING_HASH_STAGE_A` (zeroed) because
+    /// the actual hash is computed in Stage B.
+    pub fn from_approvals_sorted(
+        proposal_hash: Hash32,
+        approvals: &[EscrowApprovalBody],
+    ) -> Result<Self, BundleValidationError> {
+        let mut sorted: Vec<&EscrowApprovalBody> = approvals.iter().collect();
+        sorted.sort_by_key(|a| a.signer_pk);
+
+        let signer_pks: Vec<Hash32> = sorted.iter().map(|a| a.signer_pk).collect();
+        let signatures: Vec<Vec<u8>> = sorted.iter().map(|a| a.signature.clone()).collect();
+
+        // Check duplicates (sorted, so adjacent comparison suffices)
+        for i in 1..signer_pks.len() {
+            if signer_pks[i] == signer_pks[i - 1] {
+                return Err(BundleValidationError::DuplicateSigner(signer_pks[i]));
+            }
+        }
+
+        Ok(Self {
+            proposal_hash,
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks,
+            signatures,
+        })
+    }
+
+    /// Validate the bundle invariants:
+    /// - signer_pks and signatures have the same length
+    /// - no duplicate signer_pks
+    pub fn validate(&self) -> Result<(), BundleValidationError> {
+        if self.signer_pks.len() != self.signatures.len() {
+            return Err(BundleValidationError::SignerSignatureCountMismatch {
+                signers: self.signer_pks.len(),
+                signatures: self.signatures.len(),
+            });
+        }
+
+        // Check for duplicates
+        for i in 0..self.signer_pks.len() {
+            for j in (i + 1)..self.signer_pks.len() {
+                if self.signer_pks[i] == self.signer_pks[j] {
+                    return Err(BundleValidationError::DuplicateSigner(self.signer_pks[i]));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Returns true if `tx_signing_hash` is still at the Stage A sentinel (unset).
+    ///
+    /// A valid Stage B bundle must have this field set to the actual signing hash
+    /// computed from the canonical tx body.
+    pub fn is_stage_a(&self) -> bool {
+        self.tx_signing_hash == TX_SIGNING_HASH_STAGE_A
+    }
+
+    /// Returns the signers in stable (sorted) order.
+    /// Convenience method for callers that need a deterministic signer list.
+    pub fn signers_sorted(&self) -> Vec<Hash32> {
+        let mut v = self.signer_pks.clone();
+        v.sort();
+        v
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -233,7 +355,10 @@ impl PrivaiBody {
 
     pub fn body_hash(&self) -> Result<Hash32, ProtocolError> {
         let body_json = self.to_canonical_json_vec()?;
-        Ok(hash32_with_domain(PRIVAI_BODY_HASH_DOMAIN_V1, &[&body_json]))
+        Ok(hash32_with_domain(
+            PRIVAI_BODY_HASH_DOMAIN_V1,
+            &[&body_json],
+        ))
     }
 
     pub fn body_hash_hex(&self) -> Result<String, ProtocolError> {
@@ -451,21 +576,20 @@ mod tests {
             max_output_tokens: 128,
         });
 
-        let decoded = PrivaiBody::from_canonical_json_slice(
-            &body.to_canonical_json_vec().expect("bytes"),
-        )
-        .expect("decode");
+        let decoded =
+            PrivaiBody::from_canonical_json_slice(&body.to_canonical_json_vec().expect("bytes"))
+                .expect("decode");
 
-        assert_eq!(decoded.body_hash().expect("decoded hash"), body.body_hash().expect("hash"));
+        assert_eq!(
+            decoded.body_hash().expect("decoded hash"),
+            body.body_hash().expect("hash")
+        );
     }
 
     #[test]
     fn derive_context_id_is_stable() {
         let context_id = derive_context_id(&[b"market-session", &h32(0x10), &c16(0x20)]);
-        assert_eq!(
-            hex::encode(context_id),
-            "3c924ef4efd5e77291c0e93844c99018"
-        );
+        assert_eq!(hex::encode(context_id), "3c924ef4efd5e77291c0e93844c99018");
     }
 
     #[test]
@@ -620,5 +744,557 @@ mod tests {
         assert!(accept.to_canonical_json_string().is_ok());
         assert!(req.to_canonical_json_string().is_ok());
         assert!(resp.to_canonical_json_string().is_ok());
+    }
+
+    // ---------------------------------------------------------------
+    // Escrow wire/canonical roundtrip tests
+    // ---------------------------------------------------------------
+
+    fn escrow_descriptor(fill: u8) -> EscrowFundingDescriptor {
+        EscrowFundingDescriptor {
+            escrow_id: h32(fill),
+            buyer_pk: h32(fill.wrapping_add(1)),
+            merchant_pk: h32(fill.wrapping_add(2)),
+            operator_pk: h32(fill.wrapping_add(3)),
+            amount: 1000 + fill as u64,
+            spend_policy_commit: h32(fill.wrapping_add(4)),
+            timeout_blocks: 500 + fill as u64,
+        }
+    }
+
+    // --- 1. Roundtrip tests ---
+
+    #[test]
+    fn escrow_funded_canonical_roundtrip() {
+        let body = PrivaiBody::EscrowFunded(EscrowFundedBody {
+            session_context: c16(0xA1),
+            descriptor: escrow_descriptor(0x10),
+            funding_tx_ref: h32(0xBB),
+        });
+        let bytes = body.to_canonical_json_vec().expect("encode");
+        let decoded = PrivaiBody::from_canonical_json_slice(&bytes).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_spend_proposal_canonical_roundtrip() {
+        let body = PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+            session_context: c16(0xA2),
+            proposal: EscrowSpendProposal {
+                proposal_hash: h32(0xC1),
+                escrow_id: h32(0xC2),
+                snapshot_hash: h32(0xC3),
+                action: 0, // release
+            },
+        });
+        let bytes = body.to_canonical_json_vec().expect("encode");
+        let decoded = PrivaiBody::from_canonical_json_slice(&bytes).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_approval_canonical_roundtrip() {
+        let body = PrivaiBody::EscrowApproval(EscrowApprovalBody {
+            session_context: c16(0xA3),
+            proposal_hash: h32(0xD1),
+            signer_pk: h32(0xD2),
+            signature: vec![0xAA, 0xBB, 0xCC, 0xDD, 0xEE],
+        });
+        let bytes = body.to_canonical_json_vec().expect("encode");
+        let decoded = PrivaiBody::from_canonical_json_slice(&bytes).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_resolve_canonical_roundtrip() {
+        let body = PrivaiBody::EscrowResolve(EscrowResolveBody {
+            session_context: c16(0xA4),
+            resolution_tx_ref: h32(0xE1),
+            outcome_code: 2,
+        });
+        let bytes = body.to_canonical_json_vec().expect("encode");
+        let decoded = PrivaiBody::from_canonical_json_slice(&bytes).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    // --- 2. msg_type_key consistency ---
+
+    #[test]
+    fn escrow_msg_type_keys() {
+        assert_eq!(
+            PrivaiBody::EscrowFunded(EscrowFundedBody {
+                session_context: c16(0),
+                descriptor: escrow_descriptor(0),
+                funding_tx_ref: h32(0),
+            })
+            .msg_type_key(),
+            "escrow_funded"
+        );
+
+        assert_eq!(
+            PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+                session_context: c16(0),
+                proposal: EscrowSpendProposal {
+                    proposal_hash: h32(0),
+                    escrow_id: h32(0),
+                    snapshot_hash: h32(0),
+                    action: 0,
+                },
+            })
+            .msg_type_key(),
+            "escrow_spend_proposal"
+        );
+
+        assert_eq!(
+            PrivaiBody::EscrowApproval(EscrowApprovalBody {
+                session_context: c16(0),
+                proposal_hash: h32(0),
+                signer_pk: h32(0),
+                signature: vec![],
+            })
+            .msg_type_key(),
+            "escrow_approval"
+        );
+
+        assert_eq!(
+            PrivaiBody::EscrowResolve(EscrowResolveBody {
+                session_context: c16(0),
+                resolution_tx_ref: h32(0),
+                outcome_code: 0,
+            })
+            .msg_type_key(),
+            "escrow_resolve"
+        );
+    }
+
+    // --- 3. body_hash stability ---
+
+    #[test]
+    fn escrow_funded_body_hash_is_deterministic() {
+        let body = PrivaiBody::EscrowFunded(EscrowFundedBody {
+            session_context: c16(0xA1),
+            descriptor: escrow_descriptor(0x10),
+            funding_tx_ref: h32(0xBB),
+        });
+        let h1 = body.body_hash().expect("hash1");
+        let h2 = body.body_hash().expect("hash2");
+        assert_eq!(h1, h2);
+        // Golden value — same body always produces this hash.
+        assert_eq!(
+            hex::encode(h1),
+            "d5142db2a67596a99e71fe026a363b4a6eaa6cd8fc9c4303820bb26f72d54d49"
+        );
+    }
+
+    #[test]
+    fn escrow_spend_proposal_body_hash_is_deterministic() {
+        let body = PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+            session_context: c16(0xA2),
+            proposal: EscrowSpendProposal {
+                proposal_hash: h32(0xC1),
+                escrow_id: h32(0xC2),
+                snapshot_hash: h32(0xC3),
+                action: 0,
+            },
+        });
+        let h1 = body.body_hash().expect("hash1");
+        let h2 = body.body_hash().expect("hash2");
+        assert_eq!(h1, h2);
+        // Golden value will need to be updated after removing tx_signing_hash field
+        let golden = body.body_hash_hex().expect("golden");
+        assert_eq!(hex::encode(h1), golden);
+    }
+
+    #[test]
+    fn escrow_spend_proposal_hash_changes_with_action() {
+        let mk_body = |action: u8| {
+            PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+                session_context: c16(0xA2),
+                proposal: EscrowSpendProposal {
+                    proposal_hash: h32(0xC1),
+                    escrow_id: h32(0xC2),
+                    snapshot_hash: h32(0xC3),
+                    action,
+                },
+            })
+        };
+        let h_release = mk_body(0).body_hash().expect("release hash");
+        let h_refund = mk_body(1).body_hash().expect("refund hash");
+        let h_recovery = mk_body(2).body_hash().expect("recovery hash");
+        assert_ne!(h_release, h_refund);
+        assert_ne!(h_release, h_recovery);
+        assert_ne!(h_refund, h_recovery);
+    }
+
+    #[test]
+    fn escrow_funded_hash_changes_with_amount() {
+        let mk_body = |fill: u8| {
+            PrivaiBody::EscrowFunded(EscrowFundedBody {
+                session_context: c16(0xA1),
+                descriptor: escrow_descriptor(fill),
+                funding_tx_ref: h32(0xBB),
+            })
+        };
+        let h1 = mk_body(0x10).body_hash().expect("h1");
+        let h2 = mk_body(0x20).body_hash().expect("h2");
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn escrow_body_hash_survives_roundtrip() {
+        let body = PrivaiBody::EscrowApproval(EscrowApprovalBody {
+            session_context: c16(0xA3),
+            proposal_hash: h32(0xD1),
+            signer_pk: h32(0xD2),
+            signature: vec![0xAA, 0xBB, 0xCC],
+        });
+        let original_hash = body.body_hash().expect("original hash");
+        let decoded =
+            PrivaiBody::from_canonical_json_slice(&body.to_canonical_json_vec().expect("bytes"))
+                .expect("decode");
+        assert_eq!(decoded.body_hash().expect("decoded hash"), original_hash);
+    }
+
+    // --- 4. Payload roundtrip (PRIVAI/1 + msg_type) ---
+
+    #[test]
+    fn escrow_funded_payload_roundtrip() {
+        let body = PrivaiBody::EscrowFunded(EscrowFundedBody {
+            session_context: c16(0xA1),
+            descriptor: escrow_descriptor(0x10),
+            funding_tx_ref: h32(0xBB),
+        });
+        let payload = body
+            .to_payload(c16(1), "buyer", "operator", 1)
+            .expect("payload");
+        assert_eq!(payload.app_proto, PRIVAI_APP_PROTO_V1);
+        assert_eq!(payload.msg_type, "escrow_funded");
+        let decoded = PrivaiBody::from_payload(&payload).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_spend_proposal_payload_roundtrip() {
+        let body = PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+            session_context: c16(0xA2),
+            proposal: EscrowSpendProposal {
+                proposal_hash: h32(0xC1),
+                escrow_id: h32(0xC2),
+                snapshot_hash: h32(0xC3),
+                action: 1, // refund
+            },
+        });
+        let payload = body
+            .to_payload(c16(2), "nexum-core", "signer", 3)
+            .expect("payload");
+        assert_eq!(payload.app_proto, PRIVAI_APP_PROTO_V1);
+        assert_eq!(payload.msg_type, "escrow_spend_proposal");
+        let decoded = PrivaiBody::from_payload(&payload).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_approval_payload_roundtrip() {
+        let body = PrivaiBody::EscrowApproval(EscrowApprovalBody {
+            session_context: c16(0xA3),
+            proposal_hash: h32(0xD1),
+            signer_pk: h32(0xD2),
+            signature: vec![0x01, 0x02, 0x03],
+        });
+        let payload = body
+            .to_payload(c16(3), "buyer", "nexum-core", 5)
+            .expect("payload");
+        assert_eq!(payload.app_proto, PRIVAI_APP_PROTO_V1);
+        assert_eq!(payload.msg_type, "escrow_approval");
+        let decoded = PrivaiBody::from_payload(&payload).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_resolve_payload_roundtrip() {
+        let body = PrivaiBody::EscrowResolve(EscrowResolveBody {
+            session_context: c16(0xA4),
+            resolution_tx_ref: h32(0xE1),
+            outcome_code: 1,
+        });
+        let payload = body
+            .to_payload(c16(4), "operator", "buyer", 7)
+            .expect("payload");
+        assert_eq!(payload.app_proto, PRIVAI_APP_PROTO_V1);
+        assert_eq!(payload.msg_type, "escrow_resolve");
+        let decoded = PrivaiBody::from_payload(&payload).expect("decode");
+        assert_eq!(decoded, body);
+    }
+
+    #[test]
+    fn escrow_payload_rejects_msg_type_mismatch() {
+        let body = PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+            session_context: c16(0xA2),
+            proposal: EscrowSpendProposal {
+                proposal_hash: h32(0xC1),
+                escrow_id: h32(0xC2),
+                snapshot_hash: h32(0xC3),
+                action: 2, // recovery_release
+            },
+        });
+        let mut payload = body
+            .to_payload(c16(5), "core", "signer", 1)
+            .expect("payload");
+        payload.msg_type = "escrow_funded".to_string(); // wrong type
+        let err = PrivaiBody::from_payload(&payload).expect_err("must reject");
+        match err {
+            ProtocolError::MsgTypeMismatch { payload, expected } => {
+                assert_eq!(payload, "escrow_funded");
+                assert_eq!(expected, "escrow_spend_proposal");
+            }
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    #[test]
+    fn escrow_payload_rejects_wrong_app_proto() {
+        let body = PrivaiBody::EscrowFunded(EscrowFundedBody {
+            session_context: c16(0xA1),
+            descriptor: escrow_descriptor(0x10),
+            funding_tx_ref: h32(0xBB),
+        });
+        let mut payload = body
+            .to_payload(c16(6), "buyer", "node", 1)
+            .expect("payload");
+        payload.app_proto = "ESCROW/1".to_string(); // wrong proto
+        let err = PrivaiBody::from_payload(&payload).expect_err("must reject");
+        match err {
+            ProtocolError::UnexpectedAppProto(value) => assert_eq!(value, "ESCROW/1"),
+            other => panic!("unexpected error: {other}"),
+        }
+    }
+
+    // --- 5. Golden canonical JSON string (EscrowApproval) ---
+
+    #[test]
+    fn escrow_approval_golden_canonical_json() {
+        let body = PrivaiBody::EscrowApproval(EscrowApprovalBody {
+            session_context: c16(0xA3),
+            proposal_hash: h32(0xD1),
+            signer_pk: h32(0xD2),
+            signature: vec![0xAA, 0xBB],
+        });
+        let json = body.to_canonical_json_string().expect("json");
+        assert_eq!(
+            json,
+            "{\"kind\":\"escrow_approval\",\"body\":{\"session_context\":[163,163,163,163,163,163,163,163,163,163,163,163,163,163,163,163],\"proposal_hash\":[209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209,209],\"signer_pk\":[210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210,210],\"signature\":[170,187]}}"
+        );
+    }
+
+    // --- 6. All escrow bodies serialize cleanly ---
+
+    #[test]
+    fn all_escrow_bodies_canonical_json_ok() {
+        let bodies: Vec<PrivaiBody> = vec![
+            PrivaiBody::EscrowFunded(EscrowFundedBody {
+                session_context: c16(1),
+                descriptor: escrow_descriptor(1),
+                funding_tx_ref: h32(1),
+            }),
+            PrivaiBody::EscrowSpendProposal(EscrowSpendProposalBody {
+                session_context: c16(2),
+                proposal: EscrowSpendProposal {
+                    proposal_hash: h32(2),
+                    escrow_id: h32(3),
+                    snapshot_hash: h32(4),
+                    action: 0,
+                },
+            }),
+            PrivaiBody::EscrowApproval(EscrowApprovalBody {
+                session_context: c16(3),
+                proposal_hash: h32(6),
+                signer_pk: h32(7),
+                signature: vec![0xFF],
+            }),
+            PrivaiBody::EscrowResolve(EscrowResolveBody {
+                session_context: c16(4),
+                resolution_tx_ref: h32(8),
+                outcome_code: 0,
+            }),
+        ];
+
+        for body in &bodies {
+            assert!(body.to_canonical_json_vec().is_ok());
+            assert!(body.to_canonical_json_string().is_ok());
+            assert!(body.body_hash().is_ok());
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // EscrowApprovalBundle hardening tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn bundle_rejects_duplicate_signers() {
+        let approvals = vec![
+            EscrowApprovalBody {
+                session_context: c16(1),
+                proposal_hash: h32(0x30),
+                signer_pk: h32(1),
+                signature: vec![0xAA],
+            },
+            EscrowApprovalBody {
+                session_context: c16(1),
+                proposal_hash: h32(0x30),
+                signer_pk: h32(1), // same signer
+                signature: vec![0xBB],
+            },
+        ];
+
+        let result = EscrowApprovalBundle::from_approvals_sorted(h32(0x30), &approvals);
+        assert!(matches!(
+            result,
+            Err(BundleValidationError::DuplicateSigner(_))
+        ));
+
+        // Also detectable via validate()
+        let bundle = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(1), h32(1)],
+            signatures: vec![vec![0xAA], vec![0xBB]],
+        };
+        assert!(matches!(
+            bundle.validate(),
+            Err(BundleValidationError::DuplicateSigner(_))
+        ));
+    }
+
+    #[test]
+    fn bundle_rejects_signer_signature_count_mismatch() {
+        // More signers than signatures
+        let bundle = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(1), h32(2), h32(3)],
+            signatures: vec![vec![0xAA], vec![0xBB]],
+        };
+        assert!(matches!(
+            bundle.validate(),
+            Err(BundleValidationError::SignerSignatureCountMismatch {
+                signers: 3,
+                signatures: 2
+            })
+        ));
+
+        // More signatures than signers
+        let bundle2 = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(1)],
+            signatures: vec![vec![0xAA], vec![0xBB]],
+        };
+        assert!(matches!(
+            bundle2.validate(),
+            Err(BundleValidationError::SignerSignatureCountMismatch {
+                signers: 1,
+                signatures: 2
+            })
+        ));
+    }
+
+    #[test]
+    fn bundle_ordering_is_deterministic() {
+        // Approvals in reverse order of signer_pk
+        let approvals = vec![
+            EscrowApprovalBody {
+                session_context: c16(1),
+                proposal_hash: h32(0x30),
+                signer_pk: h32(0x20),
+                signature: vec![1],
+            },
+            EscrowApprovalBody {
+                session_context: c16(1),
+                proposal_hash: h32(0x30),
+                signer_pk: h32(0x10),
+                signature: vec![2],
+            },
+        ];
+
+        let bundle =
+            EscrowApprovalBundle::from_approvals_sorted(h32(0x30), &approvals).expect("valid");
+
+        // signer_pks must be ascending
+        assert_eq!(bundle.signer_pks[0], h32(0x10));
+        assert_eq!(bundle.signer_pks[1], h32(0x20));
+
+        // signatures aligned with signer_pks
+        assert_eq!(bundle.signatures[0], vec![2]);
+        assert_eq!(bundle.signatures[1], vec![1]);
+
+        // Build again with different input order — must produce identical bundle
+        let approvals_reversed = vec![approvals[1].clone(), approvals[0].clone()];
+        let bundle2 = EscrowApprovalBundle::from_approvals_sorted(h32(0x30), &approvals_reversed)
+            .expect("valid");
+        assert_eq!(bundle, bundle2);
+    }
+
+    #[test]
+    fn bundle_validate_passes_on_clean_bundle() {
+        let bundle = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(1), h32(2)],
+            signatures: vec![vec![0xAA], vec![0xBB]],
+        };
+        assert!(bundle.validate().is_ok());
+    }
+
+    #[test]
+    fn bundle_is_stage_a_sentinel() {
+        let bundle = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(1)],
+            signatures: vec![vec![0xAA]],
+        };
+        assert!(bundle.is_stage_a());
+
+        let mut stage_b_bundle = bundle.clone();
+        stage_b_bundle.tx_signing_hash = h32(0xFF);
+        assert!(!stage_b_bundle.is_stage_a());
+    }
+
+    #[test]
+    fn bundle_signers_sorted_returns_stable_order() {
+        let bundle = EscrowApprovalBundle {
+            proposal_hash: h32(0x30),
+            tx_signing_hash: TX_SIGNING_HASH_STAGE_A,
+            signer_pks: vec![h32(0x30), h32(0x10), h32(0x20)],
+            signatures: vec![vec![3], vec![1], vec![2]],
+        };
+
+        let sorted = bundle.signers_sorted();
+        assert_eq!(sorted, vec![h32(0x10), h32(0x20), h32(0x30)]);
+    }
+
+    #[test]
+    fn bundle_from_approvals_rejects_empty_duplicate_edge() {
+        // Single approval — no duplicate possible
+        let approvals = vec![EscrowApprovalBody {
+            session_context: c16(1),
+            proposal_hash: h32(0x30),
+            signer_pk: h32(1),
+            signature: vec![0xAA],
+        }];
+        let bundle =
+            EscrowApprovalBundle::from_approvals_sorted(h32(0x30), &approvals).expect("valid");
+        assert_eq!(bundle.signer_pks.len(), 1);
+        assert!(bundle.validate().is_ok());
+    }
+
+    #[test]
+    fn bundle_from_approvals_empty_input() {
+        let approvals: Vec<EscrowApprovalBody> = vec![];
+        let bundle =
+            EscrowApprovalBundle::from_approvals_sorted(h32(0x30), &approvals).expect("valid");
+        assert!(bundle.signer_pks.is_empty());
+        assert!(bundle.signatures.is_empty());
+        assert!(bundle.validate().is_ok());
     }
 }

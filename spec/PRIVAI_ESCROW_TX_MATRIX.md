@@ -38,6 +38,11 @@ Escrow tx matrix operuje w ramach nastepujacych zamrozonych regul:
 - threshold auth jest weryfikowany wzgledem policy zrekonstruowanej z `policy_opening`,
 - high-level signer/action intent jest zamrozony w `PRIVAI_ESCROW_FINAL_MODEL.md` i ten dokument go nie odwraca.
 
+Stage A / Stage B split:
+- Stage A (control-plane/proposal): proposal creation, approval collection, quorum — oblicza `proposal_hash`, ale NIE oblicza `tx_signing_hash`.
+- Stage B (wallet/prover/final assembly): finalna konstrukcja transakcji — oblicza `tx_signing_hash` dopiero po skompletowaniu wszystkich elementow tx body.
+- Ten dokument opisuje, co `tx_signing_hash` musi bindowac per action, ale nie definiuje etapu na ktorym jest obliczany — to jest w `PRIVAI_ESCROW_OBJECT_MODEL.md` sekcja 2a.
+
 ## 3. Action Inventory
 
 System escrow definiuje nastepujace akcje:
@@ -329,6 +334,38 @@ To gwarantuje:
 - podpis zlozony na `release` nie moze byc uzyty do `refund` ani `recovery_release`,
 - podpis zlozony na konkretne output commitments nie moze byc uzyty do przekierowania srodkow,
 - replay protection jest wbudowana w action binding.
+
+### 10.1. `tx_signing_hash` nie istnieje na etapie proposalu
+
+Twarda regula:
+- `tx_signing_hash` nie istnieje na etapie samego proposalu control-plane (Stage A).
+- Proposal oblicza `proposal_hash` — to jest reference do koordynacji, nie signing message.
+- `tx_signing_hash` jest obliczany dopiero w Stage B (wallet/prover/final assembly), po skompletowaniu calego canonical tx body.
+- Zadna komorka control-plane (nexum-core) nie oblicza `tx_signing_hash`.
+
+### 10.2. Pochodzenie pol finalnego tx body
+
+`tx_signing_hash` jest obliczany z canonical tx body. Pola tego body pochodza z:
+
+| Field | Source |
+|-------|--------|
+| tx version, tx class | control-plane / protocol definition |
+| action type | control-plane (proposal) |
+| input references (`input_note_commits`) | control-plane (proposal) / ledger snapshot |
+| input nullifiers | **wallet/prover** (derivation z note_commit + nullifier_key) |
+| output notes (`OutputNote`) | **wallet/prover** (final construction) |
+| `RecipientBox` | **wallet/prover** (final sealing) |
+| `statement_commit` | **wallet/prover** (over TransferStatement) |
+| fee | control-plane (proposal) |
+| `policy_opening` | control-plane / runtime (canonical policy encoding) |
+| auth ordering | **wallet/prover** (canonical signer ordering) |
+| signatures | **signer approvals** (over `tx_signing_hash` material) |
+
+Ledger recomputuje `tx_signing_hash` z tx body (bez signatures) i weryfikuje auth package wzgledem niego.
+
+Twarda zasada:
+- elementy Stage B (final nullifier, final output note, final RecipientBox, final statement_commit, final auth insertion ordering) nie sa dostepne na etapie Stage A,
+- dlatego `tx_signing_hash` nie moze istniec przed Stage B.
 
 ## 11. Relationship to `policy_opening`
 

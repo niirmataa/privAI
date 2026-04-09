@@ -40,15 +40,41 @@ Escrow object model operuje w ramach zamrozonych regul z `PRIVAI_ESCROW_FINAL_MO
 - `nexum-core` koordynuje, ledger weryfikuje,
 - obiekty dzielimy na on-chain (ledger-visible), off-chain (persistent but not on-chain) i control-plane (nexum-core orchestration).
 
+## 2a. Stage A / Stage B Boundary
+
+Escrow lifecycle jest podzielony na dwa etapy:
+
+**Stage A — control-plane / proposal:**
+- funding verification
+- snapshot management
+- proposal creation
+- approval collection / quorum
+- `proposal_hash` jest obliczany na tym etapie
+
+**Stage B — wallet / prover / final assembly:**
+- final nullifier derivation
+- final `statement_commit` computation
+- final output note construction
+- final `RecipientBox` sealing
+- final auth insertion ordering (canonical signer ordering in `TransferNoteTx`)
+- final `tx_signing_hash` computation
+- final `TransferNoteTx` assembly
+
+Twarda zasada:
+- `tx_signing_hash` nie istnieje na etapie Stage A (proposal/control-plane).
+- `tx_signing_hash` jest obliczany dopiero w Stage B, po skonstruowaniu calego canonical tx body.
+- `nexum-core` (control-plane) NIE oblicza `tx_signing_hash` — to jest odpowiedzialnosc wallet/prover/final assembly.
+- Ledger weryfikuje finalny `TransferNoteTx` z `tx_signing_hash` odtworzonym z tx body.
+
 ## 3. Object Inventory
 
-| Object | Layer | Persistence | Purpose |
-|--------|-------|-------------|---------|
-| `EscrowFundingDescriptor` | off-chain | persistent | instrukcja fundingu dla buyer wallet |
-| `EscrowSnapshot` | off-chain / control-plane | persistent | canonical state kontraktu escrow |
-| `EscrowSpendProposal` | off-chain / control-plane | persistent | konkretna propozycja wydania escrow note |
-| `EscrowApprovalBundle` | off-chain / control-plane -> on-chain | transient -> submitted | zebrane approvals do submitu na chain |
-| `EscrowPolicy` | on-chain (as commitment) | durable | policy 2-of-3 commitowana w escrow note |
+| Object | Layer | Stage | Purpose |
+|--------|-------|-------|---------|
+| `EscrowFundingDescriptor` | off-chain | A | instrukcja fundingu dla buyer wallet |
+| `EscrowSnapshot` | off-chain / control-plane | A | canonical state kontraktu escrow |
+| `EscrowSpendProposal` | off-chain / control-plane | A | konkretna propozycja wydania escrow note |
+| `EscrowApprovalBundle` | off-chain / control-plane | A | zebrane approvals; przekazywane do Stage B |
+| `EscrowPolicy` | on-chain (as commitment) | A (funding) / B (spend) | policy 2-of-3 commitowana w escrow note |
 
 ## 4. Object: `EscrowFundingDescriptor`
 
@@ -136,7 +162,11 @@ Uwaga:
 
 ### 6.1. Semantyka
 
-Off-chain canonical object opisujacy konkretna propozycje wydania escrow note. Proposal jest tym, co signerzy faktycznie podpisuja (przez `tx_signing_hash` finalnej transakcji, ale `proposal_hash` sluzy jako control-plane reference).
+Off-chain canonical object opisujacy konkretna propozycje wydania escrow note. Proposal jest kontrolna referencja (Stage A), do ktorej signerzy skladaja approvals. `tx_signing_hash` finalnej transakcji NIE istnieje jeszcze na tym etapie — jest obliczany dopiero w Stage B (wallet/prover/final assembly), po skonstruowaniu calego canonical tx body z finalnymi outputami, nullifierami, auth ordering i innymi elementami.
+
+Rozroznienie:
+- `proposal_hash` = "co chcemy zrobic" (control-plane, Stage A)
+- `tx_signing_hash` = "co faktycznie autoryzujemy" (on-chain auth, Stage B, nie istnieje na etapie proposalu)
 
 ### 6.2. Layer
 
@@ -169,7 +199,7 @@ Future extensions:
 1. nexum-core tworzy proposal na podstawie zadania strony.
 2. Proposal jest rozsylany do wymaganych signerow.
 3. Signerzy weryfikuja proposal i skladaja approvals.
-4. Po zebraniu quorum, proposal jest realizowany jako transakcja.
+4. Po zebraniu quorum, proposal jest przekazywany do Stage B (wallet/prover/final assembly).
 
 ### 6.6. Invariants
 
@@ -182,7 +212,11 @@ Future extensions:
 
 ### 7.1. Semantyka
 
-Bundle approvals zebranych od signerow przez nexum-core. To jest control-plane artifact, ktory po skompletowaniu quorum jest przeksztalcany w on-chain auth package w `TransferNoteTx`.
+Bundle approvals zebranych od signerow przez nexum-core. To jest Stage A (control-plane) artifact — quorum artifact i authorization material — ktory po skompletowaniu quorum jest przekazywany do Stage B (wallet/prover/final assembly).
+
+Stage B wykorzystuje informacje z `EscrowApprovalBundle` do zbudowania finalnego auth package i finalnego signing context, w tym finalnego canonical `tx_signing_hash`. Samo Stage A nie posiada jeszcze finalnego canonical `tx_signing_hash` — ten hash powstaje dopiero po skonstruowaniu kompletnego canonical tx body.
+
+Uwaga: na etapie Stage A bundle reprezentuje potwierdzenia woli signerow (authorization material), a nie finalny ledger-ready auth package nad juz znanym canonical signing object. Finalny auth package powstaje w Stage B.
 
 ### 7.2. Layer
 
@@ -195,7 +229,7 @@ Control-plane (nexum-core) -> on-chain (jako czesc auth w `TransferNoteTx`).
   - `signer_index`: canonical signer index w policy
   - `signer_role`: rola signera (buyer / merchant / operator) — **control-plane metadata only**, nie autorytatywne zrodlo prawdy dla weryfikacji; ledger ustala role z policy reconstructed from `policy_opening`
   - `signer_pk`: Falcon public key signera
-  - `signature`: Falcon signature nad `tx_signing_hash`
+  - `signature`: Falcon signature reprezentujacy approval signera (authorization material przekazywane do Stage B; finalny podpis nad canonical `tx_signing_hash` jest tworzony w Stage B na podstawie tego materialu)
 - `created_at`: timestamp zebrania bundle
 
 ### 7.4. V1 simplifications
@@ -209,24 +243,25 @@ Control-plane (nexum-core) -> on-chain (jako czesc auth w `TransferNoteTx`).
 1. nexum-core zbiera approval od pierwszego signera.
 2. nexum-core zbiera approval od drugiego signera.
 3. Po osiagnieciu quorum (2-of-3), nexum-core sklada `EscrowApprovalBundle`.
-4. Escrow runtime przeksztalca bundle w auth package `TransferNoteTx`.
-5. `TransferNoteTx` jest broadcastowana do sieci.
-6. Ledger weryfikuje auth package (signer membership, quorum, ordering, action binding).
+4. Bundle jest przekazywany do Stage B (wallet/prover/final assembly).
+5. Wallet/prover konstruuje finalny `TransferNoteTx` z finalnymi outputami, nullifierami, auth ordering i oblicza `tx_signing_hash`.
+6. `TransferNoteTx` jest broadcastowana do sieci.
+7. Ledger weryfikuje auth package (signer membership, quorum, ordering, action binding, `tx_signing_hash` odtworzony z tx body).
 
 ### 7.6. Invariants
 
 - Wszystkie approvals musza odnosic sie do tego samego `proposal_hash`.
-- Wszystkie signatures musza byc nad tym samym `tx_signing_hash`.
+- Wszystkie approvals reprezentuja potwierdzenie woli signerow wobec proposalu (authorization material); finalny podpis nad `tx_signing_hash` jest tworzony w Stage B.
 - Signer ordering musi byc canonical.
 - Duplicate signers musza byc odrzuceni.
-- Quorum musi byc spelnione przed submitem.
+- Quorum musi byc spelnione przed przekazaniem do Stage B.
 
 ### 7.7. Relationship to on-chain auth
 
-`EscrowApprovalBundle` jest control-plane representation tego, co na chainie staje sie auth package w `TransferNoteTx`:
+`EscrowApprovalBundle` jest Stage A (control-plane) representation authorization material, ktore w Stage B (final assembly) jest przeksztalcane w auth package w `TransferNoteTx`:
 - `signer_pks` -> auth signer identities
-- `signatures` -> auth signatures
-- `policy_opening` jest dostarczany osobno (nie jest czescia approval bundle, ale czescia auth package transakcji)
+- `signatures` (authorization material) -> przeksztalcane w Stage B w finalne auth signatures (over `tx_signing_hash` computed w Stage B)
+- `policy_opening` jest dostarczany osobno w Stage B (nie jest czescia approval bundle, ale czescia auth package transakcji)
 
 ## 8. Object: `EscrowPolicy`
 
@@ -283,49 +318,61 @@ To rozdzielenie zapobiega sytuacji, gdzie ktos konstruuje policy z dowolnymi act
 ## 9. Object Relationships
 
 ```
-EscrowSnapshot
-  |
-  |-- contains: escrow_id, roles, keys, timeout, policy identifiers
-  |-- references: funding_note_commit (after funding)
-  |-- referenced by: EscrowSpendProposal (via snapshot_hash)
-  |
-  v
-EscrowFundingDescriptor
-  |
-  |-- contains: escrow_id, receive_bundle, spend_policy_commit
-  |-- consumed by: buyer wallet to create funding note
-  |-- results in: on-chain escrow note with spend_policy_commit
-  |
-EscrowSpendProposal
-  |
-  |-- references: snapshot_hash, action, input_note_commits, output_plan
-  |-- signed by: signers (via tx_signing_hash of resulting tx)
-  |-- referenced by: EscrowApprovalBundle (via proposal_hash)
-  |
-  v
-EscrowApprovalBundle
-  |
-  |-- references: proposal_hash
-  |-- contains: signer approvals (signatures over tx_signing_hash)
-  |-- transforms into: on-chain auth package in TransferNoteTx
-  |
-  v
-TransferNoteTx (on-chain)
-  |
-  |-- contains: inputs, outputs, auth (from approval bundle), policy_opening
-  |-- verified by: ledger (policy reconstruction, threshold, action binding)
+Stage A (control-plane / proposal):
+  EscrowSnapshot
+    |
+    |-- contains: escrow_id, roles, keys, timeout, policy identifiers
+    |-- references: funding_note_commit (after funding)
+    |-- referenced by: EscrowSpendProposal (via snapshot_hash)
+    |
+    v
+  EscrowFundingDescriptor
+    |
+    |-- contains: escrow_id, receive_bundle, spend_policy_commit
+    |-- consumed by: buyer wallet to create funding note
+    |-- results in: on-chain escrow note with spend_policy_commit
+    |
+  EscrowSpendProposal
+    |
+    |-- references: snapshot_hash, action, input_note_commits, output_plan
+    |-- signed by: signers (approvals reprezentuja authorization material)
+    |-- referenced by: EscrowApprovalBundle (via proposal_hash)
+    |
+    v
+  EscrowApprovalBundle
+    |
+    |-- references: proposal_hash
+    |-- contains: signer approvals (authorization material; final auth powstaje w Stage B)
+    |-- handed to: Stage B (wallet/prover/final assembly)
+
+--- Stage A → Stage B handoff ---
+
+Stage B (wallet / prover / final assembly):
+  Final tx assembly
+    |
+    |-- constructs: final nullifier, final statement_commit,
+    |   final output note, final RecipientBox, final auth insertion ordering
+    |-- computes: tx_signing_hash (from canonical tx body)
+    |-- produces: TransferNoteTx (on-chain)
+    |
+    v
+  TransferNoteTx (on-chain)
+    |
+    |-- contains: inputs, outputs, auth (from approval bundle), policy_opening
+    |-- verified by: ledger (policy reconstruction, threshold, action binding,
+    |                tx_signing_hash recomputation)
 ```
 
 ## 10. On-chain vs Off-chain vs Control-plane
 
-| Object | On-chain | Off-chain | Control-plane |
-|--------|----------|-----------|---------------|
-| `EscrowFundingDescriptor` | — | persistent (wallet) | generated by nexum-core |
-| `EscrowSnapshot` | — | persistent | managed by nexum-core |
-| `EscrowSpendProposal` | — | persistent | managed by nexum-core |
-| `EscrowApprovalBundle` | transforms into auth package | transient | managed by nexum-core |
-| `EscrowPolicy` | as `spend_policy_commit` in note | as `policy_opening` in auth | — |
-| `TransferNoteTx` | yes (final tx) | — | submitted by escrow runtime |
+| Object | On-chain | Off-chain | Control-plane | Stage |
+|--------|----------|-----------|---------------|-------|
+| `EscrowFundingDescriptor` | — | persistent (wallet) | generated by nexum-core | A |
+| `EscrowSnapshot` | — | persistent | managed by nexum-core | A |
+| `EscrowSpendProposal` | — | persistent | managed by nexum-core | A |
+| `EscrowApprovalBundle` | transforms into auth package | transient | managed by nexum-core | A → B |
+| `EscrowPolicy` | as `spend_policy_commit` in note | as `policy_opening` in auth | — | A (funding) / B (spend) |
+| `TransferNoteTx` | yes (final tx) | — | — | B |
 
 Twarda zasada:
 - nexum-core zarzadza off-chain/control-plane objects,
@@ -334,14 +381,20 @@ Twarda zasada:
 
 ## 11. Relationship to `tx_signing_hash`
 
-- Signerzy podpisuja `tx_signing_hash` finalnej `TransferNoteTx`, nie `proposal_hash`.
-- `proposal_hash` jest control-plane reference — sluzy do koordynacji, nie do on-chain verification.
-- Ledger weryfikuje auth package wzgledem `tx_signing_hash`, nie wzgledem `proposal_hash`.
-- `tx_signing_hash` binduje action type, inputs, outputs, fee, policy-relevant fields.
+`tx_signing_hash` jest artifactem Stage B (wallet/prover/final assembly):
+- jest obliczany dopiero po skonstruowaniu calego canonical tx body z finalnymi outputami, nullifierami, auth ordering,
+- signerzy podpisuja `tx_signing_hash` finalnej `TransferNoteTx`, nie `proposal_hash`,
+- `proposal_hash` jest Stage A (control-plane) reference — sluzy do koordynacji, nie do on-chain verification,
+- Ledger weryfikuje auth package wzgledem `tx_signing_hash` odtworzonego z tx body, nie wzgledem `proposal_hash`,
+- `tx_signing_hash` binduje action type, inputs, outputs, fee, policy-relevant fields — te dane sa kompletne dopiero w Stage B.
 
 Rozroznienie:
-- `proposal_hash` = "co chcemy zrobic" (control-plane),
-- `tx_signing_hash` = "co faktycznie autoryzujemy" (on-chain auth).
+- `proposal_hash` = "co chcemy zrobic" (control-plane, Stage A)
+- `tx_signing_hash` = "co faktycznie autoryzujemy" (on-chain auth, Stage B)
+
+Twarda zasada:
+- `nexum-core` (Stage A) NIE oblicza `tx_signing_hash`.
+- `tx_signing_hash` jest domena wallet/prover/final assembly (Stage B).
 
 ## 12. Relationship to `policy_opening`
 
