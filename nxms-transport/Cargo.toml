@@ -2,6 +2,7 @@
 name = "nxms-transport"
 version = "0.1.0"
 edition = "2021"
+rust-version.workspace = true
 license = "MIT"
 description = "NXMS transport primitives (wire format + PQ crypto helpers) for Tor mailbox / P2P"
 build = "build.rs"

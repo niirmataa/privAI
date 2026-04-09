@@ -16,3 +16,6 @@ members = [
 exclude = [
     "nxms-monero-core",
 ]
+
+[workspace.package]
+rust-version = "1.94"

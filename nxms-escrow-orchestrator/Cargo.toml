@@ -2,6 +2,7 @@
 name = "nxms-escrow-orchestrator"
 version = "0.1.0"
 edition = "2024"
+rust-version.workspace = true
 license = "MIT"
 description = "NXMS escrow workflow orchestrator (production flow state + outbox/inbox/dead-letter)"
 
