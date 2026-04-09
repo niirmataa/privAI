@@ -4,8 +4,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use nxms_transport::wire::NxmsPayloadV2;
 use privai_chain::{
-    tx::MarketplaceBatchTx, Block, BlockTemplate, ConsensusReceipt, ExecutionMode, Hash32,
-    ProofCertificate, QuorumCertificate, Transaction, ViewChange, Vote, VoteType,
+    tx::MarketplaceBatchTx, Block, BlockTemplate, CanonicalDecode, ConsensusReceipt, ExecutionMode,
+    Hash32, ProofCertificate, QuorumCertificate, SpendPolicy, SpendPolicyTag, Transaction,
+    ViewChange, Vote, VoteType,
 };
 use privai_ledger::{compute_state_root, Ledger, LedgerError, LedgerStore};
 use privai_nxms::{PrivaiBody, ProtocolError};
@@ -62,6 +63,8 @@ pub enum NodeError {
     QcHashMismatch { expected: Hash32, actual: Hash32 },
     #[error("escrow bundle: {0}")]
     EscrowBundle(String),
+    #[error("escrow submit: {0}")]
+    EscrowSubmit(String),
 }
 
 pub struct PrivaiNode<
@@ -572,6 +575,245 @@ impl<S: LedgerStore, V: ProofVerifier, A: ProofArtifactStore, P: BlockArtifactVe
 
     pub fn escrow_snapshot_path(&self) -> Option<&Path> {
         self.escrow_snapshot_path.as_deref()
+    }
+
+    // ── Escrow-aware submit gate ─────────────────────────────────────────
+
+    /// Validate a wallet-built escrow `TransferNoteTx` against the staged
+    /// proposal and Stage A bundle before delegating to `submit_transaction`.
+    ///
+    /// Checks performed (in order):
+    /// 1. Proposal exists and quorum is met.
+    /// 2. `EscrowApprovalBundle` can be built from staged approvals.
+    /// 3. Transaction is `Transaction::TransferNote`.
+    /// 4. Transaction has exactly one escrow auth entry (`policy_tag == Escrow2of3`).
+    /// 5. `escrow_action` in auth matches the proposal's action.
+    /// 6. Signer PK set in auth matches Stage A bundle signer set.
+    /// 7. `policy_opening` is present in auth.
+    fn validate_escrow_transfer_note(
+        &self,
+        proposal_hash: &Hash32,
+        tx: &Transaction,
+    ) -> Result<EscrowApprovalBundle, NodeError> {
+        // 1. Proposal must exist
+        let staged = self
+            .escrow_store
+            .get_staged_proposal(proposal_hash)
+            .ok_or_else(|| {
+                NodeError::EscrowSubmit(format!(
+                    "proposal not found: {}",
+                    hex::encode(proposal_hash)
+                ))
+            })?;
+
+        // 2. Quorum must be met
+        if !self.escrow_store.is_quorum_ready(proposal_hash) {
+            return Err(NodeError::EscrowSubmit(format!(
+                "quorum not met for proposal: {}",
+                hex::encode(proposal_hash)
+            )));
+        }
+
+        // 3. Build Stage A bundle
+        let bundle = self.build_escrow_approval_bundle(proposal_hash)?;
+
+        // 4. Must be TransferNote
+        let transfer_tx = match tx {
+            Transaction::TransferNote(t) => t,
+            _ => {
+                return Err(NodeError::EscrowSubmit(
+                    "expected Transaction::TransferNote".into(),
+                ));
+            }
+        };
+
+        // 5. Find the single escrow auth entry
+        let escrow_auths: Vec<_> = transfer_tx
+            .core
+            .auth
+            .iter()
+            .filter(|a| a.policy_tag == SpendPolicyTag::Escrow2of3 as u8)
+            .collect();
+
+        if escrow_auths.len() != 1 {
+            return Err(NodeError::EscrowSubmit(format!(
+                "expected exactly 1 Escrow2of3 auth entry, found {}",
+                escrow_auths.len()
+            )));
+        }
+
+        let auth = escrow_auths[0];
+
+        // 6. policy_opening must be present and decode to Escrow2of3
+        let policy_opening_bytes = auth
+            .policy_opening
+            .as_ref()
+            .ok_or_else(|| NodeError::EscrowSubmit("escrow auth missing policy_opening".into()))?;
+
+        let decoded_policy =
+            SpendPolicy::from_canonical_bytes(policy_opening_bytes).map_err(|e| {
+                NodeError::EscrowSubmit(format!("failed to decode policy_opening: {e}"))
+            })?;
+
+        let (buyer_pk_hash, merchant_pk_hash, operator_pk_hash, timeout_block) =
+            match &decoded_policy {
+                SpendPolicy::Escrow2of3 {
+                    buyer_pk_hash,
+                    merchant_pk_hash,
+                    operator_pk_hash,
+                    timeout_block,
+                } => (
+                    *buyer_pk_hash,
+                    *merchant_pk_hash,
+                    *operator_pk_hash,
+                    *timeout_block,
+                ),
+                other => {
+                    return Err(NodeError::EscrowSubmit(format!(
+                        "policy_opening is not Escrow2of3: {:?}",
+                        other.tag()
+                    )));
+                }
+            };
+
+        // 6b. Compare decoded policy fields with staged escrow funding descriptor.
+        let staged_escrow = self
+            .escrow_store
+            .funded_escrows
+            .get(&staged.proposal.escrow_id)
+            .ok_or_else(|| {
+                NodeError::EscrowSubmit(format!(
+                    "funded escrow not found for escrow_id: {}",
+                    hex::encode(staged.proposal.escrow_id)
+                ))
+            })?;
+        let desc = &staged_escrow.descriptor;
+        if buyer_pk_hash != desc.buyer_pk {
+            return Err(NodeError::EscrowSubmit(format!(
+                "buyer_pk_hash mismatch: policy has {}, descriptor has {}",
+                hex::encode(buyer_pk_hash),
+                hex::encode(desc.buyer_pk),
+            )));
+        }
+        if merchant_pk_hash != desc.merchant_pk {
+            return Err(NodeError::EscrowSubmit(format!(
+                "merchant_pk_hash mismatch: policy has {}, descriptor has {}",
+                hex::encode(merchant_pk_hash),
+                hex::encode(desc.merchant_pk),
+            )));
+        }
+        if operator_pk_hash != desc.operator_pk {
+            return Err(NodeError::EscrowSubmit(format!(
+                "operator_pk_hash mismatch: policy has {}, descriptor has {}",
+                hex::encode(operator_pk_hash),
+                hex::encode(desc.operator_pk),
+            )));
+        }
+        if timeout_block != desc.timeout_blocks {
+            return Err(NodeError::EscrowSubmit(format!(
+                "timeout_block mismatch: policy has {}, descriptor has {}",
+                timeout_block, desc.timeout_blocks,
+            )));
+        }
+
+        // 7. escrow_action must be present and match proposal
+        let tx_action = auth
+            .escrow_action
+            .ok_or_else(|| NodeError::EscrowSubmit("escrow auth missing escrow_action".into()))?;
+
+        // Proposal action: 0 = release, 1 = refund, 2 = recovery_release
+        // EscrowAction: Release = 0x01, Refund = 0x02, RecoveryRelease = 0x03
+        let expected_action = staged.proposal.action.wrapping_add(1);
+        if tx_action != expected_action {
+            return Err(NodeError::EscrowSubmit(format!(
+                "escrow action mismatch: proposal action={}, expected tx action={}, got {}",
+                staged.proposal.action, expected_action, tx_action
+            )));
+        }
+
+        // 8. Signer PK set must match Stage A bundle
+        // tx signer_pks are full Falcon PKs; bundle signer_pks are hashed (Hash32).
+        // Hash the tx signer PKs before comparing.
+        let mut tx_signers: Vec<Hash32> = auth
+            .signer_pks
+            .iter()
+            .map(|pk| privai_chain::hash::domain_hash("privai:falcon-pk:v0", &[pk]))
+            .collect();
+        tx_signers.sort();
+
+        let mut bundle_signers = bundle.signer_pks.clone();
+        bundle_signers.sort();
+
+        if tx_signers != bundle_signers {
+            return Err(NodeError::EscrowSubmit(format!(
+                "signer set mismatch: tx signers {:?} vs bundle signers {:?}",
+                tx_signers.iter().map(hex::encode).collect::<Vec<_>>(),
+                bundle_signers.iter().map(hex::encode).collect::<Vec<_>>(),
+            )));
+        }
+
+        Ok(bundle)
+    }
+
+    /// Verify all Falcon signatures in a transaction's auth entries against
+    /// `tx_signing_hash` (the canonical non-circular signing message).
+    ///
+    /// This is the correct verification path for escrow transactions, where
+    /// `tx_signing_hash` excludes auth signatures (avoiding circular dependency).
+    fn verify_escrow_tx_signatures(tx: &Transaction) -> bool {
+        let signing_hash = tx.tx_signing_hash();
+        let auth_entries = tx.auth();
+
+        for (i, auth) in auth_entries.iter().enumerate() {
+            if auth.signer_pks.is_empty() || auth.signatures.is_empty() {
+                return false;
+            }
+            if auth.signer_pks.len() != auth.signatures.len() {
+                return false;
+            }
+            for (j, (pk, sig)) in auth
+                .signer_pks
+                .iter()
+                .zip(auth.signatures.iter())
+                .enumerate()
+            {
+                if pk.is_empty() || sig.is_empty() {
+                    return false;
+                }
+                if nxms_transport::crypto::falcon_verify(pk, &signing_hash, sig).is_err() {
+                    eprintln!(
+                        "[escrow-submit] tx auth[{}][{}]: falcon_verify failed",
+                        i, j
+                    );
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    /// Submit a wallet-built escrow `TransferNoteTx` after validating it against
+    /// the staged proposal and Stage A approval bundle.
+    ///
+    /// Returns the transaction hash on success, or a controlled error on failure.
+    pub fn submit_escrow_transfer_note(
+        &mut self,
+        proposal_hash: &Hash32,
+        tx: Transaction,
+        received_at_ms: u64,
+    ) -> Result<Hash32, NodeError> {
+        // Validate against staged proposal and bundle (immutable borrow)
+        self.validate_escrow_transfer_note(proposal_hash, &tx)?;
+
+        // Verify tx signatures against tx_signing_hash (canonical signing message)
+        if !Self::verify_escrow_tx_signatures(&tx) {
+            return Err(NodeError::EscrowSubmit(
+                "transaction signature verification failed".into(),
+            ));
+        }
+
+        // Delegate to existing submit path
+        self.submit_transaction(tx, received_at_ms)
     }
 
     /// PHASE 7 LIVENESS: Sprawdza timeout używając domyślnej wartości z configu (30s dla Tor).
