@@ -128,6 +128,7 @@ impl WalletKeys {
 /// Delegowany klucz skanowania — pozwala hint-matching + KEM decaps BEZ spendowania.
 pub struct ScanningDelegate {
     scan_root: Zeroizing<[u8; 32]>,
+    #[allow(dead_code)]
     kem_root: Zeroizing<[u8; 32]>,
 }
 

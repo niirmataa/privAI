@@ -10,9 +10,9 @@ use crate::store::WalletStore;
 use crate::wallet::PrivaiWallet;
 use privai_chain::{
     derive_aux_commit, Amount14, AuxWitness, CanonicalEncode, Hash32, InputAuth, InputRef,
-    LiteOutputNote, LiteTxCore, LiteTransferTx, LweCiphertext, OutputNote, ReceiveBundle,
-    RecipientBoxPlaintext, SpendPolicy, TransferNoteTx, TxCore,
-    TX_TYPE_LITE_TRANSFER, TX_TYPE_TRANSFER_NOTE, PRIVAI_V0,
+    LiteOutputNote, LiteTransferTx, LiteTxCore, LweCiphertext, OutputNote, ReceiveBundle,
+    RecipientBoxPlaintext, SpendPolicy, TransferNoteTx, TxCore, PRIVAI_V0, TX_TYPE_LITE_TRANSFER,
+    TX_TYPE_TRANSFER_NOTE,
 };
 use privai_proof::{
     LiteTransferStatement, TransferInputWitness, TransferOutputWitness, TransferProvingData,
@@ -93,7 +93,10 @@ impl<S: WalletStore> PrivaiWallet<S> {
         };
         let available = spend.amount.value() as u64;
         if available != required {
-            return Err(WalletError::TransferImbalance { available, required });
+            return Err(WalletError::TransferImbalance {
+                available,
+                required,
+            });
         }
 
         let mut built_outputs = Vec::with_capacity(outputs.len());
@@ -128,7 +131,8 @@ impl<S: WalletStore> PrivaiWallet<S> {
             };
             // Krok 6: seal_recipient_box derives NK from KEM shared_secret and returns it.
             // Update recipient_opening with the actual derived NK so proof witness is consistent.
-            let (recipient_box, derived_nk) = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            let (recipient_box, derived_nk) =
+                Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
             let mut recipient_opening = recipient_opening;
             recipient_opening.nullifier_key = derived_nk;
             let note = OutputNote::new(
@@ -219,22 +223,27 @@ impl<S: WalletStore> PrivaiWallet<S> {
             return Err(WalletError::SpendMaterialMismatch(spend.note_commit));
         }
 
-        let required = outputs.iter().try_fold(fee, |acc, output| {
-            acc.checked_add(output.amount)
-        });
+        let required = outputs
+            .iter()
+            .try_fold(fee, |acc, output| acc.checked_add(output.amount));
         let Some(required) = required else {
             return Err(WalletError::TransferArithmeticOverflow);
         };
         let available = spend.amount.value() as u64;
         if available != required {
-            return Err(WalletError::TransferImbalance { available, required });
+            return Err(WalletError::TransferImbalance {
+                available,
+                required,
+            });
         }
 
         let mut built_outputs = Vec::with_capacity(outputs.len());
 
         for output in outputs {
             let spend_policy_commit = output.spend_policy.commitment();
-            let amount14 = Amount14::new(output.amount as u16)
+            let narrowed = u16::try_from(output.amount)
+                .map_err(|_| WalletError::LiteOutputAmountTooLarge(output.amount))?;
+            let amount14 = Amount14::new(narrowed)
                 .map_err(|_| WalletError::LiteOutputAmountTooLarge(output.amount))?;
             let aux_witness = AuxWitness {
                 version: PRIVAI_V0,
@@ -262,7 +271,8 @@ impl<S: WalletStore> PrivaiWallet<S> {
                 sender_memo: output.sender_memo,
             };
             // Krok 6: NK is derived internally by seal_recipient_box; not stored in LiteTransfer proof.
-            let (recipient_box, _derived_nk) = Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
+            let (recipient_box, _derived_nk) =
+                Self::seal_recipient_box(&output.bundle, &recipient_opening)?;
             let note = LiteOutputNote::new(
                 output.amount,
                 spend_policy_commit,
@@ -337,7 +347,11 @@ mod tests {
         }]
     }
 
-    fn prepare_spendable_wallet() -> (PrivaiWallet<MemoryWalletStore>, SpendMaterial, ReceiveBundle) {
+    fn prepare_spendable_wallet() -> (
+        PrivaiWallet<MemoryWalletStore>,
+        SpendMaterial,
+        ReceiveBundle,
+    ) {
         let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let input_bundle = wallet
             .create_local_bundle(100, 0, Some(vec![1, 2]))
@@ -372,8 +386,9 @@ mod tests {
             aux_opening: aux_witness.to_canonical_bytes(),
             sender_memo: Some(vec![9]),
         };
-        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&input_bundle, &opened)
-            .expect("seal input box");
+        let (recipient_box, _derived_nk) =
+            PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&input_bundle, &opened)
+                .expect("seal input box");
         let input_note = OutputNote::new(
             spend_policy.commitment(),
             LweCiphertext::default(),
@@ -409,10 +424,19 @@ mod tests {
 
         assert_eq!(built.tx.core.inputs.len(), 1);
         assert_eq!(built.tx.core.outputs.len(), 2);
-        assert_eq!(built.tx.core.statement_commit, built.proof.statement.commitment());
+        assert_eq!(
+            built.tx.core.statement_commit,
+            built.proof.statement.commitment()
+        );
         assert_eq!(
             built.proof.public_inputs.output_note_commits,
-            built.tx.core.outputs.iter().map(|note| note.note_commit).collect::<Vec<_>>()
+            built
+                .tx
+                .core
+                .outputs
+                .iter()
+                .map(|note| note.note_commit)
+                .collect::<Vec<_>>()
         );
     }
 
@@ -475,7 +499,10 @@ mod tests {
         // statement_commit must be a real deterministic commitment, not zeros
         assert_ne!(built.tx.core.statement_commit, [0u8; 32]);
         let expected_statement = LiteTransferStatement::from_tx(&built.tx);
-        assert_eq!(built.tx.core.statement_commit, expected_statement.commitment());
+        assert_eq!(
+            built.tx.core.statement_commit,
+            expected_statement.commitment()
+        );
     }
 
     #[test]
@@ -502,7 +529,9 @@ mod tests {
     #[test]
     fn build_lite_transfer_note_rejects_non_spendable_input() {
         let (mut wallet, spend, recipient_bundle) = prepare_spendable_wallet();
-        wallet.mark_note_spent(spend.note_commit).expect("mark spent");
+        wallet
+            .mark_note_spent(spend.note_commit)
+            .expect("mark spent");
 
         let err = wallet
             .build_lite_transfer_note(
@@ -543,9 +572,56 @@ mod tests {
     }
 
     #[test]
+    fn build_lite_transfer_note_rejects_amount_exceeding_u16() {
+        let (wallet, spend, recipient_bundle) = prepare_spendable_wallet();
+        let overflow_amount: u64 = u16::MAX as u64 + 1;
+        let err = wallet
+            .build_lite_transfer_note(
+                &spend,
+                vec![sample_lite_output_plan(recipient_bundle, overflow_amount)],
+                0,
+                Vec::new(),
+            )
+            .expect_err("amount exceeding u16 must fail before silent truncation");
+
+        match err {
+            WalletError::LiteOutputAmountTooLarge(v) => {
+                assert_eq!(
+                    v, overflow_amount,
+                    "error must report original overflow value"
+                );
+            }
+            WalletError::TransferImbalance { .. } => {
+                // Acceptable: balance check catches it before narrowing reaches u16 boundary.
+                // This happens because available (77) < overflow_amount.
+            }
+            other => panic!("unexpected error for overflow amount: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn u16_try_from_rejects_overflow_before_amount14() {
+        // Verify that u16::try_from (used in builder) rejects values > u16::MAX,
+        // unlike `as u16` which silently truncates.
+        let overflow: u64 = u16::MAX as u64 + 1;
+        assert!(
+            u16::try_from(overflow).is_err(),
+            "u16::try_from must reject overflow"
+        );
+
+        let boundary: u64 = u16::MAX as u64;
+        assert!(
+            u16::try_from(boundary).is_ok(),
+            "u16::try_from must accept u16::MAX"
+        );
+    }
+
+    #[test]
     fn build_transfer_note_rejects_non_spendable_input() {
         let (mut wallet, spend, recipient_bundle) = prepare_spendable_wallet();
-        wallet.mark_note_spent(spend.note_commit).expect("mark spent");
+        wallet
+            .mark_note_spent(spend.note_commit)
+            .expect("mark spent");
 
         let err = wallet
             .build_transfer_note(
@@ -556,6 +632,8 @@ mod tests {
             )
             .expect_err("must reject spent input");
 
-        assert!(matches!(err, WalletError::InputNoteNotSpendable(note_commit) if note_commit == spend.note_commit));
+        assert!(
+            matches!(err, WalletError::InputNoteNotSpendable(note_commit) if note_commit == spend.note_commit)
+        );
     }
 }

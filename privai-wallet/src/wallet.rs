@@ -329,7 +329,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
     pub fn record_opened_note(
         &mut self,
         note: OutputNote,
-        opened: RecipientBoxPlaintext,
+        _opened: RecipientBoxPlaintext,
     ) -> Result<Nullifier, WalletError> {
         self.receive_note(&note)
     }
@@ -608,6 +608,7 @@ fn recipient_box_aad(recipient_box: &RecipientBox) -> Vec<u8> {
 }
 
 #[cfg(test)]
+#[allow(dead_code)]
 mod tests {
     use super::*;
     use crate::store::MemoryWalletStore;
@@ -867,7 +868,7 @@ mod tests {
 
         // Seal z opened_bad (z ZŁYM note_payload_commit)
         // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
-        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
+        let (_recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
             .expect("seal box");
 
         let spend_policy = SpendPolicy::Single {
