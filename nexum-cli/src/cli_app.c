@@ -51,6 +51,8 @@ static void usage(void) {
     printf("  nexum escrow-wait-funded --base <url> --id <escrow_id> --nick <nick> --token <tok> [--run-dir <path>] [--wait-timeout <sec>] [--poll-interval <sec>]\n");
     printf("  nexum escrow-funded-sync --base <url> --id <escrow_id> --buyer-nick <nick> --buyer-token <tok> --arbiter-nick <nick> --arbiter-token <tok> --buyer-rpc-endpoint <url> --buyer-rpc-user/... --buyer-wallet-name <wallet> --buyer-wallet-pass/... --seller-rpc-endpoint <url> --seller-rpc-user/... --seller-wallet-name <wallet> --seller-wallet-pass/... [--run-dir <path>] [--orch-bin <path>]\n");
     printf("  nexum escrow-proposal --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <token> --socks5 socks5h://127.0.0.1:9050\n");
+    printf("  nexum escrow-settle   --action release|refund --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <tok> [--tx-data-hex <hex>] [--txid <txid>] [signer options] --socks5 socks5h://127.0.0.1:9050\n");
+    printf("  nexum escrow-confirm --action release|refund --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <tok> --txid <64hex> [--idempotency-prefix <p>] [--retry-max <n>] [--retry-backoff-ms <ms>] --socks5 socks5h://127.0.0.1:9050\n");
     printf("  nexum escrow-confirm-release --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <tok> --txid <64hex> [--idempotency-prefix <p>] [--retry-max <n>] [--retry-backoff-ms <ms>] --socks5 socks5h://127.0.0.1:9050\n");
     printf("  nexum escrow-confirm-refund  --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <tok> --txid <64hex> [--idempotency-prefix <p>] [--retry-max <n>] [--retry-backoff-ms <ms>] --socks5 socks5h://127.0.0.1:9050\n");
     printf("  nexum escrow-release  --base http://xxxx.onion --id <escrow_id> --nick <nick> --token <token> [--tx-data-hex <hex>] [--txid <txid>] [--signer-wallet-password <pw>|--signer-wallet-password-file <path>|--signer-wallet-password-env <VAR>] [--signer-action-token <tok>|--signer-action-token-file <path>|--signer-action-token-env <VAR>] [--signer-sign-action-token <tok>|--signer-sign-action-token-file <path>|--signer-sign-action-token-env <VAR>] [--signer-submit-action-token <tok>|--signer-submit-action-token-file <path>|--signer-submit-action-token-env <VAR>] [--idempotency-key <key>] [--retry-max <n>] [--retry-backoff-ms <ms>] --socks5 socks5h://127.0.0.1:9050\n");
@@ -394,6 +396,53 @@ static void usage_escrow_wait_funded(void) {
     printf("  --run-dir <path>             write status_funded artifact under <path>/flow/\n");
     printf("  --wait-timeout <sec>         timeout waiting for FUNDED (default: 1800)\n");
     printf("  --poll-interval <sec>        poll interval (default: 5)\n");
+    printf("  -h, --help                   show this help\n");
+}
+
+static void usage_escrow_settle(void) {
+    printf("Usage:\n");
+    printf("  nexum escrow-settle --action release|refund --base <url> --id <escrow_id> --nick <nick> --token <tok> [options]\n");
+    printf("\nNotes:\n");
+    printf("  Unified convenience wrapper for escrow-release and escrow-refund.\n");
+    printf("  Legacy commands remain supported. `release` supports a richer signer option set than `refund`.\n");
+    printf("\nOptions:\n");
+    printf("  --action <release|refund>              action to perform (required)\n");
+    printf("  --base <url>                           escrow-http onion base (required)\n");
+    printf("  --socks5 <url>                         Tor SOCKS5H proxy (default from config)\n");
+    printf("  --id <escrow_id>                       escrow numeric id (required)\n");
+    printf("  --nick <nick>                          participant nick (required)\n");
+    printf("  --token <tok>                          participant token (required)\n");
+    printf("  --tx-data-hex <hex>                    unsigned tx data hex (required unless --txid provided)\n");
+    printf("  --txid <txid>                          pre-signed settlement txid\n");
+    printf("  --signer-action-token <tok>|...        action token (inline/file/env)\n");
+    printf("  --idempotency-key <key>                optional idempotency key for retries\n");
+    printf("  --retry-max <n>                        retries (default: 0)\n");
+    printf("  --retry-backoff-ms <ms>                retry backoff (default: 1200)\n");
+    printf("\nRelease-only Options:\n");
+    printf("  --signer-wallet-password <pw>|...      wallet password (inline/file/env)\n");
+    printf("  --signer-sign-action-token <tok>|...   split sign action token (inline/file/env)\n");
+    printf("  --signer-submit-action-token <tok>|... split submit action token (inline/file/env)\n");
+    printf("  -h, --help                             show this help\n");
+}
+
+static void usage_escrow_confirm(void) {
+    printf("Usage:\n");
+    printf("  nexum escrow-confirm --action release|refund --base <url> --id <escrow_id> --nick <nick> --token <tok> --txid <64hex> [options]\n");
+    printf("\nNotes:\n");
+    printf("  Unified convenience wrapper for txid-only release/refund confirmation.\n");
+    printf("  Dispatches to legacy `escrow-confirm-release` or `escrow-confirm-refund`.\n");
+    printf("  For signer-worker paths use `nexum escrow-release` or `nexum escrow-refund`.\n");
+    printf("\nOptions:\n");
+    printf("  --action <release|refund>    action to confirm (required)\n");
+    printf("  --base <url>                 escrow-http onion base (required)\n");
+    printf("  --socks5 <url>               Tor SOCKS5H proxy (default from config)\n");
+    printf("  --id <escrow_id>             escrow numeric id (required)\n");
+    printf("  --nick <nick>                participant nick (required)\n");
+    printf("  --token <tok>                participant token (required)\n");
+    printf("  --txid <64hex>               settlement txid (required)\n");
+    printf("  --idempotency-prefix <p>     legacy-compatible prefix (default: stagenet-live)\n");
+    printf("  --retry-max <n>              retries on transient/idempotency in-progress errors (default: 0)\n");
+    printf("  --retry-backoff-ms <ms>      retry backoff (default: 1200)\n");
     printf("  -h, --help                   show this help\n");
 }
 
@@ -1847,6 +1896,67 @@ int ff_cli_run(int argc, char **argv) {
         return cmd_escrow_proposal_show(base, socks5, escrow_id, nick, token);
     }
 
+    if (strcmp(cmd, "escrow-confirm") == 0) {
+        const char *base = cfg.base;
+        const char *socks5 = cfg.socks5;
+        const char *action = NULL;
+        const char *id_raw = NULL;
+        const char *nick = NULL;
+        const char *token = NULL;
+        const char *txid = NULL;
+        const char *idempotency_prefix = "stagenet-live";
+        int retry_max = 0;
+        unsigned retry_backoff_ms = 1200U;
+        for (int i = arg_start; i < argc; i++) {
+            if (strcmp(argv[i], "--action") == 0) action = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--base") == 0) base = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--socks5") == 0) socks5 = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--id") == 0) id_raw = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--nick") == 0) nick = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--token") == 0) token = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--txid") == 0) txid = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--idempotency-prefix") == 0) idempotency_prefix = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--retry-max") == 0) {
+                retry_max = parse_nonneg_int_cli_or_die(arg_val(&i, argc, argv), "--retry-max", 1000);
+            }
+            else if (strcmp(argv[i], "--retry-backoff-ms") == 0) {
+                const char *raw = arg_val(&i, argc, argv);
+                char *endp = NULL;
+                unsigned long parsed = strtoul(raw, &endp, 10);
+                if (endp == raw || (endp && *endp) || parsed > 120000UL) ff_die("invalid --retry-backoff-ms: %s", raw);
+                retry_backoff_ms = (unsigned)parsed;
+            } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+                usage_escrow_confirm();
+                return 0;
+            } else {
+                ff_die("unknown escrow-confirm option: %s", argv[i]);
+            }
+        }
+        if (!action || !id_raw || !nick || !token || !txid) {
+            usage_escrow_confirm();
+            ff_die("escrow-confirm requires --action --id --nick --token --txid");
+        }
+        char *endp = NULL;
+        unsigned long long escrow_id = strtoull(id_raw, &endp, 10);
+        if (endp == id_raw || (endp && *endp)) ff_die("invalid --id: %s", id_raw);
+
+        if (strcmp(action, "release") == 0) {
+            return cmd_escrow_confirm_release(
+                base, socks5, escrow_id, nick, token, txid,
+                idempotency_prefix, retry_max, retry_backoff_ms
+            );
+        } else if (strcmp(action, "refund") == 0) {
+            return cmd_escrow_confirm_refund(
+                base, socks5, escrow_id, nick, token, txid,
+                idempotency_prefix, retry_max, retry_backoff_ms
+            );
+        } else {
+            usage_escrow_confirm();
+            ff_die("invalid --action: %s (expected release or refund)", action);
+            return 1;
+        }
+    }
+
     if (strcmp(cmd, "escrow-confirm-release") == 0) {
         const char *base = cfg.base;
         const char *socks5 = cfg.socks5;
@@ -1939,6 +2049,129 @@ int ff_cli_run(int argc, char **argv) {
             base, socks5, escrow_id, nick, token, txid,
             idempotency_prefix, retry_max, retry_backoff_ms
         );
+    }
+
+    if (strcmp(cmd, "escrow-settle") == 0) {
+        const char *base = cfg.base;
+        const char *socks5 = cfg.socks5;
+        const char *action = NULL;
+        const char *id_raw = NULL;
+        const char *nick = NULL;
+        const char *token = NULL;
+        const char *tx_data_hex = NULL;
+        const char *txid = NULL;
+        const char *signer_wallet_password = NULL;
+        const char *signer_wallet_password_file = NULL;
+        const char *signer_wallet_password_env = NULL;
+        const char *signer_action_token = NULL;
+        const char *signer_action_token_file = NULL;
+        const char *signer_action_token_env = NULL;
+        const char *signer_sign_action_token = NULL;
+        const char *signer_sign_action_token_file = NULL;
+        const char *signer_sign_action_token_env = NULL;
+        const char *signer_submit_action_token = NULL;
+        const char *signer_submit_action_token_file = NULL;
+        const char *signer_submit_action_token_env = NULL;
+        const char *idempotency_key = NULL;
+        int retry_max = 0;
+        unsigned retry_backoff_ms = 1200;
+
+        for (int i = arg_start; i < argc; i++) {
+            if (strcmp(argv[i], "--action") == 0) action = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--base") == 0) base = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--socks5") == 0) socks5 = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--id") == 0) id_raw = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--nick") == 0) nick = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--token") == 0) token = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--tx-data-hex") == 0) tx_data_hex = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--txid") == 0) txid = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-wallet-password") == 0) signer_wallet_password = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-wallet-password-file") == 0) signer_wallet_password_file = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-wallet-password-env") == 0) signer_wallet_password_env = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-action-token") == 0) signer_action_token = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-action-token-file") == 0) signer_action_token_file = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-action-token-env") == 0) signer_action_token_env = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-sign-action-token") == 0) signer_sign_action_token = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-sign-action-token-file") == 0) signer_sign_action_token_file = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-sign-action-token-env") == 0) signer_sign_action_token_env = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-submit-action-token") == 0) signer_submit_action_token = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-submit-action-token-file") == 0) signer_submit_action_token_file = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--signer-submit-action-token-env") == 0) signer_submit_action_token_env = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--idempotency-key") == 0) idempotency_key = arg_val(&i, argc, argv);
+            else if (strcmp(argv[i], "--retry-max") == 0) {
+                retry_max = parse_nonneg_int_cli_or_die(arg_val(&i, argc, argv), "--retry-max", 1000);
+            }
+            else if (strcmp(argv[i], "--retry-backoff-ms") == 0) {
+                const char *raw = arg_val(&i, argc, argv);
+                char *endp = NULL;
+                unsigned long parsed = strtoul(raw, &endp, 10);
+                if (endp == raw || (endp && *endp) || parsed > 120000UL) {
+                    ff_die("invalid --retry-backoff-ms: %s", raw);
+                }
+                retry_backoff_ms = (unsigned)parsed;
+            } else if (strcmp(argv[i], "-h") == 0 || strcmp(argv[i], "--help") == 0) {
+                usage_escrow_settle();
+                return 0;
+            } else {
+                ff_die("unknown escrow-settle option: %s", argv[i]);
+            }
+        }
+
+        if (!action) {
+            usage_escrow_settle();
+            ff_die("escrow-settle requires --action");
+        }
+        if (!id_raw || !nick || !token) {
+            usage_escrow_settle();
+            ff_die("escrow-settle requires --id --nick --token");
+        }
+        if (!tx_data_hex && !txid) {
+            usage_escrow_settle();
+            ff_die("escrow-settle requires at least one of --tx-data-hex or --txid");
+        }
+
+        char *endp = NULL;
+        unsigned long long escrow_id = strtoull(id_raw, &endp, 10);
+        if (endp == id_raw || (endp && *endp)) ff_die("invalid --id: %s", id_raw);
+
+        if (strcmp(action, "release") == 0) {
+            char *signer_wallet_password_owned = resolve_cli_secret_opt(
+                signer_wallet_password,
+                signer_wallet_password_file,
+                signer_wallet_password_env,
+                "escrow-settle release signer wallet password",
+                "--signer-wallet-password | --signer-wallet-password-file | --signer-wallet-password-env");
+            const char *signer_wallet_password_eff =
+                signer_wallet_password_owned ? signer_wallet_password_owned : signer_wallet_password;
+            
+            int rc = cmd_escrow_release(
+                base, socks5, escrow_id, nick, token,
+                tx_data_hex, txid, signer_wallet_password_eff,
+                signer_action_token, signer_action_token_file, signer_action_token_env,
+                signer_sign_action_token, signer_sign_action_token_file, signer_sign_action_token_env,
+                signer_submit_action_token, signer_submit_action_token_file, signer_submit_action_token_env,
+                idempotency_key, retry_max, retry_backoff_ms
+            );
+            secure_free_str(&signer_wallet_password_owned);
+            return rc;
+        } else if (strcmp(action, "refund") == 0) {
+            if (signer_wallet_password || signer_wallet_password_file || signer_wallet_password_env ||
+                signer_sign_action_token || signer_sign_action_token_file || signer_sign_action_token_env ||
+                signer_submit_action_token || signer_submit_action_token_file || signer_submit_action_token_env) {
+                usage_escrow_settle();
+                ff_die("escrow-settle --action refund does not support release-only signer options (e.g. wallet password, split tokens)");
+            }
+            return cmd_escrow_refund(
+                base, socks5, escrow_id, nick, token,
+                tx_data_hex, txid,
+                signer_action_token, signer_action_token_file, signer_action_token_env,
+                idempotency_key, retry_max, retry_backoff_ms
+            );
+        } else {
+            usage_escrow_settle();
+            ff_die("invalid --action: %s (expected release or refund)", action);
+            return 1;
+        }
     }
 
     if (strcmp(cmd, "escrow-release") == 0) {

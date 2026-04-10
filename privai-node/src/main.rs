@@ -33,6 +33,7 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         timestamp_ms: u64,
     },
+    RunMailbox,
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -100,6 +101,66 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     VoteType::Precommit
                 );
             };
+            return Ok(());
+        }
+        Command::RunMailbox => {
+            let config_path = cli
+                .config
+                .unwrap_or_else(|| PathBuf::from("privai-node.example.toml"));
+            let config = NodeConfig::load(&config_path).unwrap_or_else(|_| NodeConfig::example());
+
+            if !config.mailbox.enabled {
+                eprintln!("Mailbox is disabled in configuration.");
+                return Ok(());
+            }
+
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()?;
+
+            if cli.use_rocksdb {
+                let rocksdb_path = PathBuf::from(&config.data_dir).join("rocksdb");
+                let store = RocksDBStore::new(&rocksdb_path)?;
+                store.ensure_initialized()?;
+                let mut node = PrivaiNode::open(config.clone(), store)?;
+                if let Some(vault_path) = &cli.vault {
+                    node.load_identity(vault_path)?;
+                }
+
+                let adapter = privai_node::mailbox_pull::NxmsMailboxAdapter::from_node_config(node.config());
+                let adapter = match adapter {
+                    Some(a) => a,
+                    None => {
+                        eprintln!("Invalid mailbox configuration or missing keys.");
+                        return Ok(());
+                    }
+                };
+                
+                eprintln!("Starting mailbox loop...");
+                rt.block_on(async move {
+                    privai_node::mailbox_pull::run_mailbox_pull_loop(&adapter, &mut node, &node.config().mailbox).await;
+                });
+            } else {
+                let store = FileSystemStore::new(&config.data_dir);
+                let mut node = PrivaiNode::open(config.clone(), store)?;
+                if let Some(vault_path) = &cli.vault {
+                    node.load_identity(vault_path)?;
+                }
+
+                let adapter = privai_node::mailbox_pull::NxmsMailboxAdapter::from_node_config(node.config());
+                let adapter = match adapter {
+                    Some(a) => a,
+                    None => {
+                        eprintln!("Invalid mailbox configuration or missing keys.");
+                        return Ok(());
+                    }
+                };
+                
+                eprintln!("Starting mailbox loop...");
+                rt.block_on(async move {
+                    privai_node::mailbox_pull::run_mailbox_pull_loop(&adapter, &mut node, &node.config().mailbox).await;
+                });
+            }
             return Ok(());
         }
     }

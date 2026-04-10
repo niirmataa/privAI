@@ -39,7 +39,7 @@ use std::time::Duration;
 use nxms_transport::wire::NxmsPayloadV2;
 use thiserror::Error;
 
-use crate::config::MailboxPullConfig;
+use crate::config::{MailboxPullConfig, NodeConfig};
 use crate::node::{EscrowIngestOutcome, NodeError, PrivaiNode};
 use privai_ledger::LedgerStore;
 use privai_proof::store::ProofArtifactStore;
@@ -285,6 +285,34 @@ impl NxmsMailboxAdapter {
     pub fn with_kem_sk(mut self, kem_sk: Vec<u8>) -> Self {
         self.node_kem_sk = kem_sk;
         self
+    }
+
+    /// Safely build from full `NodeConfig`.
+    ///
+    /// Returns `None` if `config.mailbox.enabled` is false or if
+    /// required fields are missing. Ensures `node_kem_sk` is properly loaded
+    /// and is not empty or a placeholder (all-zeros) value.
+    pub fn from_node_config(config: &NodeConfig) -> Option<Self> {
+        if !config.mailbox.enabled {
+            return None;
+        }
+        if config.mailbox.mailbox_url.is_empty()
+            || config.mailbox.inbox_id.is_empty()
+            || config.mailbox.sender_sig_pk.is_none()
+        {
+            return None;
+        }
+
+        // Reject empty or placeholder (all-zeros) KEM secret.
+        if config.node_kem_sk.is_empty()
+            || config.node_kem_sk.iter().all(|&b| b == 0)
+        {
+            return None;
+        }
+
+        Self::from_config(&config.mailbox).map(|adapter| {
+            adapter.with_kem_sk(config.node_kem_sk.clone())
+        })
     }
 }
 
@@ -637,6 +665,89 @@ mod tests {
         assert_eq!(report.decode_errors, 0);
         assert_eq!(report.ingest_errors, 0);
         assert_eq!(source.acked_receipts(), vec!["non-escrow-1".to_string()]);
+    }
+
+    #[test]
+    fn adapter_from_node_config_disabled_mailbox_returns_none() {
+        let mut config = test_node_config();
+        config.mailbox.enabled = false;
+        config.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        config.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config.node_kem_sk = vec![2; 32];
+        
+        let adapter = NxmsMailboxAdapter::from_node_config(&config);
+        assert!(adapter.is_none());
+    }
+
+    #[test]
+    fn adapter_from_node_config_valid_populates_kem_key() {
+        let mut config = test_node_config();
+        config.mailbox.enabled = true;
+        config.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        config.mailbox.inbox_id = "inbox".to_string();
+        config.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config.node_kem_sk = vec![2; 32];
+
+        let adapter = NxmsMailboxAdapter::from_node_config(&config).expect("adapter");
+        assert_eq!(adapter.node_kem_sk, vec![2; 32]);
+        assert_eq!(adapter.sender_sig_pk, vec![1; 32]);
+    }
+
+    #[test]
+    fn adapter_from_node_config_missing_required_fields_rejected() {
+        let mut config = test_node_config();
+        config.mailbox.enabled = true;
+        // missing URL
+        config.mailbox.mailbox_url = "".to_string();
+        config.mailbox.inbox_id = "inbox".to_string();
+        config.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config.node_kem_sk = vec![2; 32];
+        
+        assert!(NxmsMailboxAdapter::from_node_config(&config).is_none());
+
+        let mut config2 = test_node_config();
+        config2.mailbox.enabled = true;
+        config2.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        config2.mailbox.inbox_id = "inbox".to_string();
+        // missing sender_sig_pk
+        config2.mailbox.sender_sig_pk = None;
+        config2.node_kem_sk = vec![2; 32];
+        
+        assert!(NxmsMailboxAdapter::from_node_config(&config2).is_none());
+
+        let mut config3 = test_node_config();
+        config3.mailbox.enabled = true;
+        config3.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        // missing inbox_id
+        config3.mailbox.inbox_id = "".to_string();
+        config3.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config3.node_kem_sk = vec![2; 32];
+        
+        assert!(NxmsMailboxAdapter::from_node_config(&config3).is_none());
+    }
+
+    #[test]
+    fn adapter_from_node_config_empty_kem_sk_rejected() {
+        let mut config = test_node_config();
+        config.mailbox.enabled = true;
+        config.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        config.mailbox.inbox_id = "inbox".to_string();
+        config.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config.node_kem_sk = Vec::new(); // empty
+
+        assert!(NxmsMailboxAdapter::from_node_config(&config).is_none());
+    }
+
+    #[test]
+    fn adapter_from_node_config_placeholder_kem_sk_rejected() {
+        let mut config = test_node_config();
+        config.mailbox.enabled = true;
+        config.mailbox.mailbox_url = "http://xyz.onion".to_string();
+        config.mailbox.inbox_id = "inbox".to_string();
+        config.mailbox.sender_sig_pk = Some(vec![1; 32]);
+        config.node_kem_sk = vec![0; 32]; // placeholder / default
+
+        assert!(NxmsMailboxAdapter::from_node_config(&config).is_none());
     }
 
     #[tokio::test]

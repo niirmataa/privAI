@@ -36,3 +36,25 @@ The CLI now prefers a prepared Falcon signer context for hot signing paths:
 - raw encoded secret-key signing remains only as a fallback path
 
 That keeps the runtime path aligned with the audited CT direction without changing wire semantics.
+
+## Escrow helpers
+
+For operator and emergency workflows, a unified `escrow-confirm` wrapper is available:
+```sh
+# Convenience wrapper for legacy release confirmation
+nexum escrow-confirm --action release --base <url> --id <escrow_id> --nick <nick> --token <tok> --txid <64hex>
+
+# Convenience wrapper for legacy refund confirmation
+nexum escrow-confirm --action refund --base <url> --id <escrow_id> --nick <nick> --token <tok> --txid <64hex>
+```
+Legacy commands `escrow-confirm-release` and `escrow-confirm-refund` are fully preserved.
+
+For settlement submission flows, a unified `escrow-settle` wrapper is available:
+```sh
+# Wrapper for release settlement, including signer-specific arguments
+nexum escrow-settle --action release --base <url> --id <escrow_id> --nick <nick> --token <tok> --tx-data-hex <hex> --signer-wallet-password-env PW
+
+# Wrapper for refund settlement, restricted to refund-applicable arguments
+nexum escrow-settle --action refund --base <url> --id <escrow_id> --nick <nick> --token <tok> --tx-data-hex <hex> --signer-action-token-env TOK
+```
+Legacy commands `escrow-release` and `escrow-refund` are fully preserved.

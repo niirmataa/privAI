@@ -130,7 +130,7 @@ impl NodeConfig {
             }],
             consensus_timeout_ms: DEFAULT_CONSENSUS_TIMEOUT_MS,
             node_kem_pk: vec![0; 32], // placeholder
-            node_kem_sk: vec![0; 32], // placeholder
+            node_kem_sk: Vec::new(), // NOT a valid key — load_identity() required for mailbox startup
             node_sig_pk: vec![0; 32], // placeholder
             node_sig_sk: vec![0; 32], // placeholder
             mailbox: MailboxPullConfig::default(),
