@@ -11,6 +11,7 @@ anyhow = "1"
 base64 = "0.22"
 clap = { version = "4.5", features = ["derive"] }
 hex = "0.4"
+nxms-mailbox-client = { path = "../nxms-mailbox-client" }
 nxms-transport = { path = "../nxms-transport", default-features = false, features = ["crypto"] }
 privai-chain = { path = "../privai-chain" }
 privai-ledger = { path = "../privai-ledger" }

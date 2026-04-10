@@ -720,8 +720,8 @@ impl Default for ConnectionPoolConfig {
 }
 
 /// Szyfruje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
-/// Format: [24-byte nonce][ciphertext][16-byte tag]
-fn encrypt_frame(data: &[u8], seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+/// Format: [8-byte seq][24-byte nonce][ciphertext][16-byte tag]
+pub fn encrypt_frame(data: &[u8], seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::{random_xchacha20poly1305_nonce, xchacha20poly1305_encrypt};
 
     let nonce = random_xchacha20poly1305_nonce();
@@ -738,7 +738,7 @@ fn encrypt_frame(data: &[u8], seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<
 }
 
 /// Odszyfrowuje ramkę XChaCha20-Poly1305 z shared secret (FrodoKEM).
-fn decrypt_frame(encrypted: &[u8], expected_seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
+pub fn decrypt_frame(encrypted: &[u8], expected_seq: u64, shared_secret: &[u8; 32]) -> Result<Vec<u8>, NetError> {
     use nxms_transport::crypto::xchacha20poly1305_decrypt;
 
     if encrypted.len() < 8 + 24 + 16 {

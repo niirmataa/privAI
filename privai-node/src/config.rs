@@ -28,6 +28,57 @@ impl ValidatorConfig {
 /// Dodajemy bufor na processing + sieć.
 pub const DEFAULT_CONSENSUS_TIMEOUT_MS: u64 = 30_000;
 
+/// Default mailbox poll interval (5 seconds).
+pub const DEFAULT_MAILBOX_POLL_INTERVAL_MS: u64 = 5_000;
+
+/// Default mailbox pull batch size.
+pub const DEFAULT_MAILBOX_BATCH_SIZE: u32 = 10;
+
+/// Configuration for the NXMS mailbox pull loop (control-plane path).
+///
+/// This is separate from validator session transport (Model A).
+/// The mailbox path carries escrow/marketplace/proof control-plane
+/// messages via `nxms-mailbox-client` store-and-forward over Tor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MailboxPullConfig {
+    /// Enable the mailbox pull loop. Disabled by default.
+    pub enabled: bool,
+    /// Base URL of the nxms-mailbox server (e.g. "http://xyz.onion:8080").
+    pub mailbox_url: String,
+    /// Inbox identifier for this node (the `to` field in pull requests).
+    pub inbox_id: String,
+    /// Bearer token for the pull endpoint (optional, depends on mailbox config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pull_token: Option<String>,
+    /// Bearer token for the ack endpoint (optional, depends on mailbox config).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ack_token: Option<String>,
+    /// Sender Falcon PK (full 1793B) for envelope signature verification.
+    /// Required for production envelope decryption. Not needed in tests
+    /// when using a fake `MailboxSource`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sender_sig_pk: Option<Vec<u8>>,
+    /// Poll interval in milliseconds.
+    pub poll_interval_ms: u64,
+    /// Max messages to pull per tick.
+    pub batch_size: u32,
+}
+
+impl Default for MailboxPullConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            mailbox_url: String::new(),
+            inbox_id: String::new(),
+            pull_token: None,
+            ack_token: None,
+            sender_sig_pk: None,
+            poll_interval_ms: DEFAULT_MAILBOX_POLL_INTERVAL_MS,
+            batch_size: DEFAULT_MAILBOX_BATCH_SIZE,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
     pub chain_id: u32,
@@ -47,6 +98,9 @@ pub struct NodeConfig {
     pub node_sig_pk: Vec<u8>,
     /// Klucz prywatny Falcon węzła — do podpisywania handshake P2P.
     pub node_sig_sk: Vec<u8>,
+    /// NXMS mailbox pull loop configuration (control-plane path).
+    #[serde(default)]
+    pub mailbox: MailboxPullConfig,
 }
 
 impl NodeConfig {
@@ -79,6 +133,7 @@ impl NodeConfig {
             node_kem_sk: vec![0; 32], // placeholder
             node_sig_pk: vec![0; 32], // placeholder
             node_sig_sk: vec![0; 32], // placeholder
+            mailbox: MailboxPullConfig::default(),
         }
     }
 

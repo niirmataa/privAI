@@ -1,6 +1,7 @@
 pub mod config;
 pub mod consensus_loop;
 pub mod gossip;
+pub mod mailbox_pull;
 pub mod escrow_stage;
 pub mod identity_provider;
 pub mod mempool;
@@ -11,7 +12,14 @@ mod session_impl;
 pub mod session_transport;
 pub mod state_sync;
 
-pub use config::{NodeConfig, ValidatorConfig, DEFAULT_CONSENSUS_TIMEOUT_MS};
+pub use config::{
+    MailboxPullConfig, NodeConfig, ValidatorConfig, DEFAULT_CONSENSUS_TIMEOUT_MS,
+    DEFAULT_MAILBOX_BATCH_SIZE, DEFAULT_MAILBOX_POLL_INTERVAL_MS,
+};
+pub use mailbox_pull::{
+    MailboxPullError, MailboxSource, MailboxTickReport, NxmsMailboxAdapter, PulledPayload,
+    mailbox_ingest_tick, run_mailbox_pull_loop,
+};
 pub use consensus_loop::{ConsensusLoop, ConsensusLoopError};
 pub use escrow_stage::{
     EscrowStageError, EscrowStageSnapshot, EscrowStageStore, SnapshotStagedProposal, StagedEscrow,

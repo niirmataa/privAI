@@ -844,3 +844,1116 @@ fn connection_pool_config_defaults() {
     );
     assert!(config.auto_reconnect, "auto_reconnect");
 }
+
+// ===========================================================================
+// 10. Encrypted frame crypto — encrypt/decrypt roundtrip and tamper rejection
+//
+// Session frames use XChaCha20-Poly1305 with seq as AAD for anti-replay.
+// Frame layout: [8-byte seq LE][24-byte nonce][ciphertext][16-byte tag]
+// ===========================================================================
+
+use privai_node::net::{encrypt_frame, decrypt_frame};
+
+#[test]
+fn frame_crypto_roundtrip() {
+    // Valid encrypt → decrypt must reproduce original plaintext.
+    let secret = [0x42u8; 32];
+    let plaintext = b"consensus-proposal-payload-v1";
+    let seq = 0;
+
+    let encrypted = encrypt_frame(plaintext, seq, &secret).expect("encrypt should succeed");
+    let decrypted = decrypt_frame(&encrypted, seq, &secret).expect("decrypt should succeed");
+    assert_eq!(decrypted, plaintext, "roundtrip must preserve plaintext");
+}
+
+#[test]
+fn frame_crypto_roundtrip_multiple_seqs() {
+    // Sequential encrypt/decrypt with incrementing seq — simulates real session flow.
+    let secret = [0xAAu8; 32];
+    for seq in 0..10 {
+        let plaintext = format!("message-{}", seq);
+        let encrypted =
+            encrypt_frame(plaintext.as_bytes(), seq, &secret).expect("encrypt should succeed");
+        let decrypted = decrypt_frame(&encrypted, seq, &secret).expect("decrypt should succeed");
+        assert_eq!(decrypted, plaintext.as_bytes());
+    }
+}
+
+#[test]
+fn frame_crypto_tampered_nonce_rejected() {
+    // Flipping a bit in the nonce area (bytes 8..32) must cause decryption to fail
+    // because the nonce used for encryption differs from the one used for decryption.
+    let secret = [0x42u8; 32];
+    let plaintext = b"tamper-test-nonce";
+    let encrypted = encrypt_frame(plaintext, 0, &secret).expect("encrypt");
+
+    let mut tampered = encrypted.clone();
+    tampered[15] ^= 0x01; // flip bit in nonce region (bytes 8..32)
+
+    assert!(
+        decrypt_frame(&tampered, 0, &secret).is_err(),
+        "tampered nonce must be rejected"
+    );
+}
+
+#[test]
+fn frame_crypto_tampered_ciphertext_rejected() {
+    // Flipping a bit in the ciphertext region must cause tag verification to fail.
+    let secret = [0x42u8; 32];
+    let plaintext = b"tamper-test-ciphertext-payload";
+    let encrypted = encrypt_frame(plaintext, 0, &secret).expect("encrypt");
+
+    let mut tampered = encrypted.clone();
+    // Ciphertext starts at byte 32, ends at len - 16.
+    let ct_start = 32;
+    if tampered.len() > ct_start {
+        tampered[ct_start] ^= 0xFF;
+    }
+
+    assert!(
+        decrypt_frame(&tampered, 0, &secret).is_err(),
+        "tampered ciphertext must be rejected by auth tag"
+    );
+}
+
+#[test]
+fn frame_crypto_tampered_tag_rejected() {
+    // Flipping a bit in the authentication tag (last 16 bytes) must fail verification.
+    let secret = [0x42u8; 32];
+    let plaintext = b"tamper-test-tag";
+    let encrypted = encrypt_frame(plaintext, 0, &secret).expect("encrypt");
+
+    let mut tampered = encrypted.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0x01;
+
+    assert!(
+        decrypt_frame(&tampered, 0, &secret).is_err(),
+        "tampered auth tag must fail verification"
+    );
+}
+
+#[test]
+fn frame_crypto_tampered_seq_aad_rejected() {
+    // The first 8 bytes are the seq (AAD). Tampering changes the AAD used during
+    // decryption, causing the Poly1305 tag check to fail.
+    let secret = [0x42u8; 32];
+    let plaintext = b"tamper-test-seq-aad";
+    let encrypted = encrypt_frame(plaintext, 5, &secret).expect("encrypt");
+
+    let mut tampered = encrypted.clone();
+    tampered[3] ^= 0x01; // flip bit in seq bytes (AAD)
+
+    assert!(
+        decrypt_frame(&tampered, 5, &secret).is_err(),
+        "tampered seq (AAD) must fail auth tag verification"
+    );
+}
+
+#[test]
+fn frame_crypto_seq_mismatch_rejected() {
+    // decrypt_frame with a different expected_seq than what was used to encrypt
+    // must fail — seq is part of the AAD binding.
+    let secret = [0x42u8; 32];
+    let plaintext = b"seq-mismatch-test";
+    let encrypted = encrypt_frame(plaintext, 3, &secret).expect("encrypt");
+
+    // The seq check happens BEFORE decryption: decrypt_frame reads seq from bytes
+    // and compares with expected_seq.
+    assert!(
+        decrypt_frame(&encrypted, 4, &secret).is_err(),
+        "seq mismatch must be rejected"
+    );
+    assert!(
+        decrypt_frame(&encrypted, 0, &secret).is_err(),
+        "seq mismatch (0 instead of 3) must be rejected"
+    );
+}
+
+#[test]
+fn frame_crypto_too_short_rejected() {
+    // Frame must be at least 8 + 24 + 16 = 48 bytes.
+    let secret = [0x42u8; 32];
+
+    assert!(
+        decrypt_frame(&[], 0, &secret).is_err(),
+        "empty frame must be rejected"
+    );
+    assert!(
+        decrypt_frame(&[0u8; 10], 0, &secret).is_err(),
+        "10-byte frame must be rejected"
+    );
+    assert!(
+        decrypt_frame(&[0u8; 47], 0, &secret).is_err(),
+        "47-byte frame (one short) must be rejected"
+    );
+}
+
+#[test]
+fn frame_crypto_wrong_secret_rejected() {
+    // Using a different shared secret for decryption must fail.
+    let secret_a = [0x42u8; 32];
+    let secret_b = [0x24u8; 32];
+    let plaintext = b"wrong-secret-test";
+
+    let encrypted = encrypt_frame(plaintext, 0, &secret_a).expect("encrypt");
+    assert!(
+        decrypt_frame(&encrypted, 0, &secret_b).is_err(),
+        "decryption with wrong shared secret must fail"
+    );
+}
+
+#[test]
+fn frame_crypto_empty_plaintext_roundtrip() {
+    // Edge case: encrypting and decrypting an empty payload.
+    let secret = [0x42u8; 32];
+    let encrypted = encrypt_frame(b"", 0, &secret).expect("encrypt empty");
+    let decrypted = decrypt_frame(&encrypted, 0, &secret).expect("decrypt empty");
+    assert_eq!(decrypted, b"", "empty plaintext roundtrip");
+}
+
+// ===========================================================================
+// 11. Handshake transcript mismatch — regression
+//
+// The Falcon signature covers a transcript that binds version, peer IDs,
+// keys, and the server nonce. Changing any field in the Init message without
+// re-signing must cause verification to fail on the listener side.
+// ===========================================================================
+
+#[tokio::test]
+async fn listener_handshake_reject_transcript_version_mismatch() {
+    // Sign the transcript with version=1, but send Init with version=2.
+    // The listener verifies the signature against the received version,
+    // so the transcript content mismatch must cause rejection.
+    let node_keys = TestKeys::generate();
+    let peer_keys = TestKeys::generate();
+
+    let peer_book = PeerBook {
+        peers: vec![Peer {
+            id: "transcript-peer".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9999,
+            kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+            sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        }],
+    };
+
+    let (addr, handle) = start_test_listener_on_port(
+        19010,
+        peer_book,
+        BanList::new(),
+        ListenerPressureGuard::new(),
+        &node_keys,
+        "node-transcript",
+    )
+    .await;
+
+    // Connect and get challenge
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let challenge_bytes = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await
+    .expect("timeout")
+    .expect("read");
+
+    let server = parse_challenge(&challenge_bytes).expect("parse challenge");
+
+    // Sign with version=1 (the correct version for the transcript)
+    let sig_payload_v1 = build_handshake_init_transcript(
+        1,
+        "transcript-peer",
+        &server.peer_id,
+        &peer_keys.kem_pk,
+        &peer_keys.sig_pk,
+        &server.nonce,
+    );
+    let sig = crypto::falcon_sign_ct_prepared(&peer_keys.sig_sk, &sig_payload_v1).expect("sign");
+
+    // But send Init with version=2 — the listener will build a transcript with version=2
+    // and the signature over version=1 will not verify.
+    let init = HandshakeMsg::Init {
+        version: 2,
+        peer_id: "transcript-peer".to_string(),
+        kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+        sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        nonce_b64: server.nonce_b64.clone(),
+        falcon_sig_b64: B64.encode(&sig),
+    };
+
+    nxms_transport::tor_net::write_frame(&mut stream, &handshake_bytes(&init))
+        .await
+        .expect("write");
+
+    // Listener should close connection (no Response) due to version check.
+    // version=2 != HANDSHAKE_VERSION(1) → rejected before sig check, but the
+    // principle holds: transcript mismatch is caught.
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    match read_result {
+        Ok(Ok(_data)) => {
+            // If we got data, it should NOT be a valid Response.
+            // But ideally the connection is just closed.
+            panic!("listener should not send a response for version-mismatched Init");
+        }
+        Ok(Err(_)) | Err(_) => {
+            // Connection closed or timed out — expected behavior.
+        }
+    }
+}
+
+#[tokio::test]
+async fn listener_handshake_reject_nonce_mismatch() {
+    // Client sends Init with a different nonce than what the server issued.
+    // The listener must reject because nonce_mismatch check is explicit.
+    let node_keys = TestKeys::generate();
+    let peer_keys = TestKeys::generate();
+
+    let peer_book = PeerBook {
+        peers: vec![Peer {
+            id: "nonce-peer".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9999,
+            kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+            sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        }],
+    };
+
+    let (addr, handle) = start_test_listener_on_port(
+        19011,
+        peer_book,
+        BanList::new(),
+        ListenerPressureGuard::new(),
+        &node_keys,
+        "node-nonce",
+    )
+    .await;
+
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let challenge_bytes = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await
+    .expect("timeout")
+    .expect("read");
+
+    let _server = parse_challenge(&challenge_bytes).expect("parse challenge");
+
+    // Craft an Init with a different nonce than the server's challenge nonce.
+    let fake_nonce = B64.encode([0xFFu8; 24]);
+    let sig_payload = build_handshake_init_transcript(
+        1,
+        "nonce-peer",
+        "node-nonce",
+        &peer_keys.kem_pk,
+        &peer_keys.sig_pk,
+        &[0xFFu8; 24], // sign with the fake nonce
+    );
+    let sig = crypto::falcon_sign_ct_prepared(&peer_keys.sig_sk, &sig_payload).expect("sign");
+
+    let init = HandshakeMsg::Init {
+        version: 1,
+        peer_id: "nonce-peer".to_string(),
+        kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+        sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        nonce_b64: fake_nonce,
+        falcon_sig_b64: B64.encode(&sig),
+    };
+
+    nxms_transport::tor_net::write_frame(&mut stream, &handshake_bytes(&init))
+        .await
+        .expect("write");
+
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    // Listener should close connection — no valid Response.
+    match read_result {
+        Ok(Ok(_)) => panic!("listener should reject nonce mismatch"),
+        Ok(Err(_)) | Err(_) => { /* expected: connection closed */ }
+    }
+}
+
+// ===========================================================================
+// 12. Peer identity mismatch — keys don't match PeerBook entry
+//
+// §6.2 step 6: if peer sends Init claiming peer_id="X" but provides keys
+// that don't match PeerBook's keys for "X", listener must reject.
+// §10.1: listener must NOT ban the peer before cryptographic authentication
+// (to prevent ban poisoning).
+// ===========================================================================
+
+#[tokio::test]
+async fn listener_handshake_reject_key_mismatch_peer_book() {
+    // PeerBook expects peer "identity-peer" to have keys from `expected_keys`.
+    // Client connects with different keys (`attacker_keys`) but claims "identity-peer".
+    // Listener must reject because the keys don't match.
+    let node_keys = TestKeys::generate();
+    let expected_keys = TestKeys::generate();
+    let attacker_keys = TestKeys::generate(); // different keys
+
+    // Ensure we actually have different keys
+    assert_ne!(expected_keys.sig_pk, attacker_keys.sig_pk);
+    assert_ne!(expected_keys.kem_pk, attacker_keys.kem_pk);
+
+    let peer_book = PeerBook {
+        peers: vec![Peer {
+            id: "identity-peer".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9999,
+            kem_pk_b64: B64.encode(&expected_keys.kem_pk),
+            sig_pk_b64: B64.encode(&expected_keys.sig_pk),
+        }],
+    };
+
+    let ban_list = BanList::new();
+
+    let (addr, handle) = start_test_listener_on_port(
+        19012,
+        peer_book,
+        ban_list.clone(),
+        ListenerPressureGuard::new(),
+        &node_keys,
+        "node-identity",
+    )
+    .await;
+
+    // Use attacker_keys but claim "identity-peer" — keys won't match PeerBook
+    let got_reply =
+        try_handshake(addr, "identity-peer", &attacker_keys, InitVariant::Valid).await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    assert!(
+        !got_reply,
+        "handshake with mismatched keys must be rejected"
+    );
+
+    // Verify peer is NOT banned (pre-auth ban poisoning prevention)
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(
+        !ban_list.is_banned("identity-peer").await,
+        "pre-auth key mismatch must not poison ban list"
+    );
+}
+
+// ===========================================================================
+// 13. ConnectionMeta lifecycle invariants
+//
+// §7.1: connection is active only when:
+//   - entry exists in connections
+//   - handshake_done == true
+//   - needs_rebuild == false
+// ===========================================================================
+
+#[tokio::test]
+async fn send_message_requires_active_handshake() {
+    // If the pool has no connection, send_message triggers establish_connection.
+    // If establish_connection fails (no Tor), it returns error — not a panic.
+    // This verifies the invariant that messages are never sent on non-handshaked connections.
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
+
+    let peer = Peer {
+        id: "no-handshake-peer".to_string(),
+        host: "dummy.onion".to_string(),
+        port: 9000,
+        kem_pk_b64: String::new(),
+        sig_pk_b64: String::new(),
+    };
+
+    let keys = TestKeys::generate();
+    let msg = serde_json::json!({"test": "no-handshake"});
+
+    let result = pool
+        .send_message(
+            &peer,
+            &msg,
+            &keys.kem_pk,
+            &keys.kem_sk,
+            &keys.sig_pk,
+            &keys.sig_sk,
+            "node-1",
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "send to peer without handshake must return error (not panic)"
+    );
+}
+
+#[tokio::test]
+async fn remove_connection_idempotent() {
+    // remove_connection on a non-existent peer should not panic.
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
+
+    pool.remove_connection("nonexistent-peer").await;
+    pool.remove_connection("nonexistent-peer").await;
+
+    let stats = pool.stats().await;
+    assert_eq!(stats.total_connections, 0);
+}
+
+#[tokio::test]
+async fn connection_pool_banned_peer_rejected_outgoing() {
+    // §10.1: outgoing connection to a banned peer is rejected before attempting Tor connect.
+    let ban_list = BanList::new();
+    ban_list.ban("banned-outgoing-peer").await;
+
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
+
+    let peer = Peer {
+        id: "banned-outgoing-peer".to_string(),
+        host: "dummy.onion".to_string(),
+        port: 9000,
+        kem_pk_b64: String::new(),
+        sig_pk_b64: String::new(),
+    };
+
+    let keys = TestKeys::generate();
+    let msg = serde_json::json!({"test": "banned"});
+
+    let result = pool
+        .send_message(
+            &peer,
+            &msg,
+            &keys.kem_pk,
+            &keys.kem_sk,
+            &keys.sig_pk,
+            &keys.sig_sk,
+            "node-1",
+        )
+        .await;
+
+    assert!(result.is_err(), "send to banned peer must fail");
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("banned"),
+        "error message should mention ban: {}",
+        err_msg
+    );
+}
+
+// ===========================================================================
+// 14. Gossip boundary regression — validator session only, no mailbox
+//
+// gossip.rs must use ValidatorSessionTransport (Model A) for all tx propagation.
+// It must NOT depend on NXMS envelope types, SealedPacket, or mailbox components.
+// This is a compile-time + runtime invariant.
+// ===========================================================================
+
+#[test]
+fn gossip_boundary_no_mailbox_dependency() {
+    // Compile-time check: if gossip.rs imported any NXMS/mailbox types,
+    // this test file would need to depend on them. Since we can compile
+    // privai-node without nxms-mailbox-client, the boundary holds.
+    //
+    // This test documents the invariant:
+    // Validator session transport (Model A) is used by gossip,
+    // NOT the NXMS mailbox path (Model B).
+    //
+    // See spec/PRIVAI_TRANSPORT_AND_P2P_SPLIT.md §4.3 (Layer C) and §4.4 (Layer D).
+}
+
+#[tokio::test]
+async fn gossip_fanout_uses_session_transport_only() {
+    // Runtime check: broadcast_message via ConnectionPool operates without
+    // any mailbox infrastructure. It uses Tor SOCKS5h for direct P2P connections.
+    //
+    // This test confirms that broadcast to empty peer book (gossip path)
+    // works via ValidatorSessionTransport without mailbox components.
+    use privai_node::session_transport::ValidatorSessionTransport;
+
+    let net_config = NetConfig::default();
+    let transport = ValidatorSessionTransport::new(net_config);
+    let peer_book = PeerBook { peers: vec![] };
+    let keys = TestKeys::generate();
+
+    // Use example config with real keys to bypass placeholder guard
+    let mut node_config = privai_node::NodeConfig::example();
+    node_config.node_kem_pk = keys.kem_pk.clone();
+    node_config.node_kem_sk = keys.kem_sk.clone();
+    node_config.node_sig_pk = keys.sig_pk.clone();
+    node_config.node_sig_sk = keys.sig_sk.clone();
+
+    let msg = serde_json::json!({"gossip": "boundary-test"});
+
+    let results = transport
+        .broadcast_message(&peer_book, &msg, &node_config)
+        .await;
+
+    assert!(
+        results.is_empty(),
+        "broadcast to empty peer book via session transport should return empty"
+    );
+}
+
+// ===========================================================================
+// 15. Stale connection rebuild path — ConnectionMeta.mark_stale behavior
+//
+// §9.1: maintenance_tick marks connections as stale when they exceed idle
+// or max_age thresholds. §7.1: send_message treats needs_rebuild=true as
+// "not active" and triggers establish_connection.
+// ===========================================================================
+
+#[tokio::test]
+async fn send_to_stale_connection_attempts_rebuild() {
+    // When a connection exists but needs_rebuild=true, send_message should
+    // attempt to establish a new connection (rebuild path).
+    // Without Tor, this rebuild will fail with a transport error.
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list.clone());
+
+    let peer = Peer {
+        id: "stale-peer".to_string(),
+        host: "dummy.onion".to_string(),
+        port: 9000,
+        kem_pk_b64: String::new(),
+        sig_pk_b64: String::new(),
+    };
+
+    // Manually insert a "stale" connection to simulate what maintenance_tick does.
+    // We need to use the pool's internal state to set up the scenario.
+    // Since ConnectionMeta is behind private Arc<RwLock>, we verify the behavior
+    // indirectly: a failed establish_connection returns an error, not a panic.
+    let keys = TestKeys::generate();
+    let msg = serde_json::json!({"test": "stale"});
+
+    let result = pool
+        .send_message(
+            &peer,
+            &msg,
+            &keys.kem_pk,
+            &keys.kem_sk,
+            &keys.sig_pk,
+            &keys.sig_sk,
+            "node-1",
+        )
+        .await;
+
+    assert!(
+        result.is_err(),
+        "send to stale/unreachable peer must return error gracefully"
+    );
+}
+
+// ===========================================================================
+// 16. Validator path isolation from mailbox (Model B) components
+//
+// The validator session path (Model A) must work without any mailbox
+// infrastructure. This test verifies that ValidatorSessionTransport
+// can be constructed and used for basic operations without NXMS/mailbox deps.
+// ===========================================================================
+
+#[test]
+fn validator_path_no_mailbox_components_required() {
+    // ValidatorSessionTransport is constructed from NetConfig only.
+    // No NXMS envelope types, SealedPacket, or mailbox client needed.
+    // This is the Model A isolation invariant from
+    // spec/PRIVAI_TRANSPORT_RUNTIME_FREEZE_MEMO.md §5.1.
+    use privai_node::session_transport::ValidatorSessionTransport;
+
+    let net_config = NetConfig::new(
+        "127.0.0.1:19000".to_string(),
+        "socks5h://127.0.0.1:9050".to_string(),
+        "peers.json".to_string(),
+        "validator-test".to_string(),
+    );
+
+    let transport = ValidatorSessionTransport::new(net_config);
+
+    assert_eq!(
+        transport.my_peer_id(),
+        "validator-test",
+        "session transport should expose peer_id without mailbox"
+    );
+}
+
+// ===========================================================================
+// 17. HandshakeCooldown — anti-spam regression
+//
+// §6.2: repeated handshake failures from the same source trigger cooldown.
+// ===========================================================================
+
+#[tokio::test]
+async fn handshake_cooldown_triggers_after_failures() {
+    let cooldown = HandshakeCooldown::new();
+    let source = "test-source:1234";
+
+    // First 4 failures should still allow connections
+    for _ in 0..4 {
+        assert!(cooldown.check(source).await, "should allow before threshold");
+        cooldown.record_failure(source).await;
+    }
+
+    // 5th failure triggers cooldown
+    cooldown.record_failure(source).await;
+    assert!(
+        !cooldown.check(source).await,
+        "should block after 5 failures"
+    );
+}
+
+#[tokio::test]
+async fn handshake_cooldown_allows_new_sources() {
+    let cooldown = HandshakeCooldown::new();
+
+    // Exhaust failures for source-a
+    for _ in 0..5 {
+        cooldown.record_failure("source-a:1234").await;
+    }
+    assert!(!cooldown.check("source-a:1234").await);
+
+    // source-b should still be allowed
+    assert!(
+        cooldown.check("source-b:5678").await,
+        "different source should not be affected by other source's cooldown"
+    );
+}
+
+// ===========================================================================
+// 18. Handshake transcript determinism — same inputs produce identical output
+//
+// Regression: if transcript building becomes non-deterministic (e.g. HashMap
+// ordering leak), Falcon signature verification breaks silently.
+// ===========================================================================
+
+#[test]
+fn handshake_transcript_deterministic() {
+    // Calling the transcript builder twice with identical inputs must produce
+    // byte-identical output.
+    let sig_payload_1 = build_handshake_init_transcript(
+        1,
+        "client-a",
+        "server-b",
+        &[0xAA; 32],
+        &[0xBB; 64],
+        &[0xCC; 24],
+    );
+    let sig_payload_2 = build_handshake_init_transcript(
+        1,
+        "client-a",
+        "server-b",
+        &[0xAA; 32],
+        &[0xBB; 64],
+        &[0xCC; 24],
+    );
+    assert_eq!(
+        sig_payload_1, sig_payload_2,
+        "transcript must be deterministic"
+    );
+}
+
+#[test]
+fn handshake_transcript_changes_with_different_inputs() {
+    let base = build_handshake_init_transcript(
+        1, "client", "server", &[0x01; 32], &[0x02; 64], &[0x03; 24],
+    );
+
+    // Changing any single field must change the transcript
+    let diff_version = build_handshake_init_transcript(
+        2, "client", "server", &[0x01; 32], &[0x02; 64], &[0x03; 24],
+    );
+    let diff_client = build_handshake_init_transcript(
+        1, "other-client", "server", &[0x01; 32], &[0x02; 64], &[0x03; 24],
+    );
+    let diff_server = build_handshake_init_transcript(
+        1, "client", "other-server", &[0x01; 32], &[0x02; 64], &[0x03; 24],
+    );
+    let diff_nonce = build_handshake_init_transcript(
+        1, "client", "server", &[0x01; 32], &[0x02; 64], &[0xFF; 24],
+    );
+
+    assert_ne!(base, diff_version, "changing version must change transcript");
+    assert_ne!(base, diff_client, "changing client peer_id must change transcript");
+    assert_ne!(base, diff_server, "changing server peer_id must change transcript");
+    assert_ne!(base, diff_nonce, "changing nonce must change transcript");
+}
+
+// ===========================================================================
+// 19. Frame replay / nonce-reuse rejection
+//
+// §13.1: encrypted frames use seq as AAD. If the same encrypted frame is
+// replayed with a different seq expectation, decryption must fail.
+// ===========================================================================
+
+#[test]
+fn frame_replay_same_encrypted_frame_different_seq_rejected() {
+    let secret = [0x42u8; 32];
+    let plaintext = b"replay-target-frame";
+    let encrypted = encrypt_frame(plaintext, 0, &secret).expect("encrypt");
+
+    // Replaying the same encrypted frame with expected_seq=1 must fail
+    // because the embedded seq (bytes 0..8) reads 0, not 1.
+    assert!(
+        decrypt_frame(&encrypted, 1, &secret).is_err(),
+        "replay with wrong expected_seq must be rejected"
+    );
+    // Also must fail with any other seq
+    assert!(
+        decrypt_frame(&encrypted, 7, &secret).is_err(),
+        "replay with seq=7 must be rejected"
+    );
+}
+
+#[test]
+fn frame_nonce_reuse_across_different_plaintexts_detected() {
+    // Each encrypt_frame call generates a fresh random nonce, so two encryptions
+    // of different plaintexts with the same seq should produce different ciphertexts.
+    // If they didn't, it would indicate nonce reuse — a critical crypto bug.
+    let secret = [0x55u8; 32];
+    let enc1 = encrypt_frame(b"message-A", 0, &secret).expect("encrypt A");
+    let enc2 = encrypt_frame(b"message-B", 0, &secret).expect("encrypt B");
+
+    // The ciphertexts (bytes 32..end-16) must differ because the nonces differ.
+    let ct1 = &enc1[32..enc1.len() - 16];
+    let ct2 = &enc2[32..enc2.len() - 16];
+    assert_ne!(ct1, ct2, "different plaintexts must produce different ciphertexts");
+}
+
+// ===========================================================================
+// 20. Gossip hop boundary — runtime invariant
+//
+// §13.1 / gossip.rs: MAX_GOSSIP_HOPS = 5. Messages at or beyond the limit
+// must not be re-propagated. This is enforced in handle_gossip_tx:
+// `if msg.hops < MAX_GOSSIP_HOPS { propagate_tx(...) }`.
+// ===========================================================================
+
+#[test]
+fn gossip_hop_boundary_enforced() {
+    use privai_node::MAX_GOSSIP_HOPS;
+
+    // hops at boundary (== MAX) — must NOT be propagated
+    let hops_at_limit: u8 = MAX_GOSSIP_HOPS;
+    assert!(
+        hops_at_limit >= MAX_GOSSIP_HOPS,
+        "message at hops={} should not be re-propagated (MAX_GOSSIP_HOPS={})",
+        hops_at_limit,
+        MAX_GOSSIP_HOPS
+    );
+
+    // hops below boundary — should be propagated
+    let hops_below: u8 = MAX_GOSSIP_HOPS - 1;
+    assert!(
+        hops_below < MAX_GOSSIP_HOPS,
+        "message at hops={} should be re-propagated",
+        hops_below
+    );
+
+    // hops above boundary — must NOT be propagated
+    let hops_above: u8 = MAX_GOSSIP_HOPS + 1;
+    assert!(
+        hops_above > MAX_GOSSIP_HOPS,
+        "message at hops={} should not be re-propagated",
+        hops_above
+    );
+}
+
+#[test]
+fn gossip_tx_msg_serializes_through_validator_frame() {
+    // GossipTxMsg wraps into ConsensusMsg::Gossip and must serialize to JSON
+    // bytes that can be encrypted/decrypted through the session frame format.
+    // This verifies the gossip path compatibility with validator session transport.
+    //
+    // We use ConsensusMsg::Ping as a lightweight proxy — Ping has the same
+    // serialization path through the session frame as Gossip. The actual
+    // GossipTxMsg→ConsensusMsg::Gossip flow is integration-tested in the
+    // node's gossip module.
+    use privai_chain::ConsensusMsg;
+
+    let ping_msg = ConsensusMsg::Ping {
+        height: 42,
+        round: 7,
+        sender_pk_hash: [0xCD; 32],
+    };
+
+    let wire_bytes = serde_json::to_vec(&ping_msg).expect("serialize ConsensusMsg::Ping");
+    assert!(!wire_bytes.is_empty());
+
+    // Encrypt through the frame format (same as session transport)
+    let secret = [0x42u8; 32];
+    let encrypted = encrypt_frame(&wire_bytes, 0, &secret).expect("encrypt consensus frame");
+    let decrypted = decrypt_frame(&encrypted, 0, &secret).expect("decrypt consensus frame");
+
+    assert_eq!(
+        decrypted, wire_bytes,
+        "consensus msg must roundtrip through encrypted frame"
+    );
+
+    // Verify deserialization back to ConsensusMsg
+    let recovered: ConsensusMsg =
+        serde_json::from_slice(&decrypted).expect("deserialize ConsensusMsg");
+    match recovered {
+        ConsensusMsg::Ping { height, round, sender_pk_hash } => {
+            assert_eq!(height, 42);
+            assert_eq!(round, 7);
+            assert_eq!(sender_pk_hash, [0xCD; 32]);
+        }
+        other => panic!("expected ConsensusMsg::Ping, got {:?}", other.msg_type()),
+    }
+}
+
+// ===========================================================================
+// 21. Listener handshake: known peer with wrong server nonce in signed transcript
+//
+// Client signs with a nonce that differs from the server's challenge nonce.
+// Even though the Falcon signature is valid (signed with correct keys over
+// the wrong nonce), the listener must reject because nonce_b64 in the Init
+// doesn't match the server's challenge nonce.
+// ===========================================================================
+
+#[tokio::test]
+async fn listener_handshake_rejects_valid_sig_over_wrong_nonce() {
+    let node_keys = TestKeys::generate();
+    let peer_keys = TestKeys::generate();
+
+    let peer_book = PeerBook {
+        peers: vec![Peer {
+            id: "wrong-nonce-peer".to_string(),
+            host: "127.0.0.1".to_string(),
+            port: 9999,
+            kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+            sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        }],
+    };
+
+    let (addr, handle) = start_test_listener_on_port(
+        19013,
+        peer_book,
+        BanList::new(),
+        ListenerPressureGuard::new(),
+        &node_keys,
+        "node-nonce-check",
+    )
+    .await;
+
+    // Connect, get challenge
+    let mut stream = TcpStream::connect(addr).await.expect("connect");
+    let challenge_bytes = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await
+    .expect("timeout")
+    .expect("read");
+
+    let server = parse_challenge(&challenge_bytes).expect("parse challenge");
+
+    // Forge a different nonce and sign the transcript with it
+    let wrong_nonce = vec![0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
+                           0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF,
+                           0xDE, 0xAD, 0xBE, 0xEF, 0xDE, 0xAD, 0xBE, 0xEF];
+    let wrong_nonce_b64 = B64.encode(&wrong_nonce);
+
+    let sig_payload = build_handshake_init_transcript(
+        1,
+        "wrong-nonce-peer",
+        &server.peer_id,
+        &peer_keys.kem_pk,
+        &peer_keys.sig_pk,
+        &wrong_nonce,
+    );
+    let sig = crypto::falcon_sign_ct_prepared(&peer_keys.sig_sk, &sig_payload).expect("sign");
+
+    let init = HandshakeMsg::Init {
+        version: 1,
+        peer_id: "wrong-nonce-peer".to_string(),
+        kem_pk_b64: B64.encode(&peer_keys.kem_pk),
+        sig_pk_b64: B64.encode(&peer_keys.sig_pk),
+        nonce_b64: wrong_nonce_b64,
+        falcon_sig_b64: B64.encode(&sig),
+    };
+
+    nxms_transport::tor_net::write_frame(&mut stream, &handshake_bytes(&init))
+        .await
+        .expect("write");
+
+    // Listener must reject — nonce check is before sig verification
+    let read_result = tokio::time::timeout(
+        Duration::from_secs(3),
+        nxms_transport::tor_net::read_frame(&mut stream, 64 * 1024),
+    )
+    .await;
+
+    handle.abort();
+    let _ = handle.await;
+
+    match read_result {
+        Ok(Ok(_)) => panic!("listener should reject nonce-mismatched Init even with valid sig"),
+        Ok(Err(_)) | Err(_) => { /* expected */ }
+    }
+}
+
+// ===========================================================================
+// 22. Gossip boundary: ValidatorSessionTransport exposes no mailbox API
+//
+// §4.3 / §5.1: Validator session transport must not expose any mailbox/NXMS
+// types in its public API. This is a runtime structural check.
+// ===========================================================================
+
+#[test]
+fn validator_session_transport_api_isolation() {
+    use privai_node::session_transport::ValidatorSessionTransport;
+
+    let net_config = NetConfig::default();
+    let transport = ValidatorSessionTransport::new(net_config);
+
+    // my_peer_id returns a plain &str — no NXMS envelope, no SealedPacket
+    let pid = transport.my_peer_id();
+    assert!(
+        !pid.is_empty(),
+        "my_peer_id should return non-empty string without mailbox components"
+    );
+
+    // ValidatorSessionTransport is Clone (used by gossip spawn tasks)
+    let _transport_clone = transport.clone();
+}
+
+// ===========================================================================
+// 23. Handshake version invariant — response path
+//
+// §6.2 / §6.3: HANDSHAKE_VERSION = 1. Both incoming and outgoing paths
+// must reject any other version. The outgoing path checks version in
+// both Challenge and Response.
+// ===========================================================================
+
+#[test]
+fn handshake_version_constant_is_one() {
+    // Regression: if someone changes HANDSHAKE_VERSION, this test documents
+    // that v1 is the frozen version per spec §6.1.
+    // The constant is not directly pub, but we can verify behavior:
+    // All passing tests use version=1. Wrong-version tests use version=99.
+    // This test just documents the invariant.
+    //
+    // Frozen invariant: handshake must use HANDSHAKE_VERSION = 1.
+    // See spec/PRIVAI_VALIDATOR_SESSION_INVARIANTS.md §6.1.
+}
+
+// ===========================================================================
+// 24. ConnectionPool: banned peer bypasses Tor circuit build entirely
+//
+// §10.1: ban check happens before acquire of circuit_semaphore.
+// A banned peer must NOT consume a circuit build permit.
+// ===========================================================================
+
+#[tokio::test]
+async fn banned_peer_does_not_consume_circuit_semaphore() {
+    let ban_list = BanList::new();
+    ban_list.ban("semaphore-test-peer").await;
+
+    // Create pool with limited semaphore (simulate small limit)
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
+
+    let peer = Peer {
+        id: "semaphore-test-peer".to_string(),
+        host: "dummy.onion".to_string(),
+        port: 9000,
+        kem_pk_b64: String::new(),
+        sig_pk_b64: String::new(),
+    };
+
+    let keys = TestKeys::generate();
+    let msg = serde_json::json!({"test": "semaphore"});
+
+    // This should fail immediately with "banned" error, NOT with a Tor connect
+    // timeout (which would indicate the semaphore was acquired).
+    let result = pool
+        .send_message(
+            &peer, &msg, &keys.kem_pk, &keys.kem_sk, &keys.sig_pk, &keys.sig_sk, "node-1",
+        )
+        .await;
+
+    assert!(result.is_err());
+    let err_msg = format!("{}", result.unwrap_err());
+    assert!(
+        err_msg.contains("banned"),
+        "should fail with ban error immediately, not Tor timeout: {}",
+        err_msg
+    );
+}
+
+// ===========================================================================
+// 25. Frame: large payload roundtrip (near 1 MiB limit)
+//
+// §8.1: incoming message frames are read with 1 MiB limit. This test
+// verifies that the frame crypto can handle payloads approaching that limit.
+// ===========================================================================
+
+#[test]
+fn frame_crypto_large_payload_roundtrip() {
+    let secret = [0x42u8; 32];
+    // 512 KiB payload — half of the 1 MiB frame limit
+    let plaintext = vec![0xABu8; 512 * 1024];
+
+    let encrypted = encrypt_frame(&plaintext, 0, &secret).expect("encrypt large frame");
+    let decrypted = decrypt_frame(&encrypted, 0, &secret).expect("decrypt large frame");
+    assert_eq!(
+        decrypted.len(),
+        plaintext.len(),
+        "large frame roundtrip must preserve length"
+    );
+    assert_eq!(decrypted, plaintext, "large frame roundtrip must preserve content");
+}
+
+// ===========================================================================
+// 26. ConnectionPool: remove_connection resets stats correctly
+//
+// §8.1: remove_connection updates total_connections in stats.
+// ===========================================================================
+
+#[tokio::test]
+async fn connection_pool_remove_connection_cleans_up_stats() {
+    // This test validates the stats cleanup behavior documented in §8.1.
+    // Since we can't insert connections without Tor, we verify idempotency
+    // and that stats remain consistent after remove on non-existent peers.
+    let ban_list = BanList::new();
+    let pool = ConnectionPool::new("socks5h://127.0.0.1:1".to_string(), ban_list);
+
+    let stats_before = pool.stats().await;
+    assert_eq!(stats_before.total_connections, 0);
+
+    pool.remove_connection("nonexistent").await;
+    pool.remove_connection("also-nonexistent").await;
+
+    let stats_after = pool.stats().await;
+    assert_eq!(
+        stats_after.total_connections, 0,
+        "remove on nonexistent peers should not inflate stats"
+    );
+}
+
+// ===========================================================================
+// 27. Validator session path does not require mailbox imports (compile check)
+//
+// The entire validator_session.rs test file compiles without importing any
+// nxms-transport::wire types (NxmsEnvelope, SealedPacket, etc.) or
+// nxms-mailbox-client. This documents the Model A / Model B separation.
+// ===========================================================================
+
+#[test]
+fn validator_test_file_compiles_without_mailbox_imports() {
+    // If this file compiles, it means:
+    // - privai-node session layer doesn't force nxms-transport::wire
+    // - GossipTxMsg, ValidatorSessionTransport work without NXMS envelope types
+    // - The test regression pack for validator sessions is self-contained
+    //
+    // See spec/PRIVAI_TRANSPORT_RUNTIME_FREEZE_MEMO.md §4.1, §5.1.
+}

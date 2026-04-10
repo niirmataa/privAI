@@ -12,6 +12,7 @@
 //!   (from `session_transport.rs`) instead of importing these types directly
 
 pub use crate::session_impl::{
-    run_listener, BanList, ConnectionMeta, ConnectionPool, ConnectionPoolConfig, HandshakeCooldown, HandshakeMsg,
-    ListenerPressureGuard, NetConfig, NetError, PoolStats,
+    decrypt_frame, encrypt_frame, run_listener, BanList, ConnectionMeta, ConnectionPool,
+    ConnectionPoolConfig, HandshakeCooldown, HandshakeMsg, ListenerPressureGuard, NetConfig,
+    NetError, PoolStats,
 };

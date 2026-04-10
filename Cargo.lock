@@ -1569,6 +1569,7 @@ dependencies = [
  "base64",
  "clap",
  "hex",
+ "nxms-mailbox-client",
  "nxms-transport",
  "privai-chain",
  "privai-ledger",
