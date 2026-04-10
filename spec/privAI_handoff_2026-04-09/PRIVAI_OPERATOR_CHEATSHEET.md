@@ -1,10 +1,10 @@
-# Operator Cheatsheet — jedna strona
+﻿# Operator Cheatsheet — jedna strona
 
 ## Twoj workflow (4 kroki)
 
 ### 1. Nowa sesja z modelem
 Powiedz:
-> Przeczytaj CLAUDE.md i dokumenty z handoff. Jestes systemowym seniorem privAI.
+> Przeczytaj PRIVAI_START_HERE.md i dokumenty z handoff. Jestes systemowym seniorem privAI.
 
 Model zrobi reszte sam — ma pamiec globalną.
 
@@ -55,11 +55,11 @@ Model czyta je sam. Ale jakbys potrzebowal:
 
 | Dokument | Po co |
 |----------|-------|
-| PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md | Reguly gry |
-| SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md | Sekwencja uczaca |
-| PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md | Zabezpieczenia |
-| MODEL_FIT_AND_ROUTING.md | Kto do czego |
-| OPERATOR_CHEATSHEET.md | Ta kartka |
+| PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md | Reguly gry |
+| PRIVAI_SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md | Sekwencja uczaca |
+| PRIVAI_PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md | Zabezpieczenia |
+| PRIVAI_MODEL_FIT_AND_ROUTING.md | Kto do czego |
+| PRIVAI_OPERATOR_CHEATSHEET.md | Ta kartka |
 
 ## Jednozdaniowo
 

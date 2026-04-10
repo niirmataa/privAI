@@ -47,15 +47,16 @@ i budowanie precyzyjnych taskow dla agentow wykonawczych.
 - Glowne repo (WSL): /home/nxms-server/privAI
 - Windows: \\wsl.localhost\Alpine\home\nxms-server\privAI
 - Read-only: /home/nxms-server/nexum-core
-- Handoff: C:\Users\alicj\Desktop\privAI_handoff_2026-04-09\
+- Handoff (WSL): /home/nxms-server/privAI/spec/privAI_handoff_2026-04-09
+- Handoff (Windows): \\wsl.localhost\Alpine\home\nxms-server\privAI\spec\privAI_handoff_2026-04-09
 
 ## Dokumenty do przeczytania (w tej kolejnosci)
 
 ### Etap 1: Zrozumienie systemu promptowania
-1. `PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — reguły pracy systemowego seniora
-2. `SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — sekwencja uczaca (prompty 1-6)
-3. `PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` — zabezpieczenia przed bledami code-read
-4. `MODEL_FIT_AND_ROUTING.md` — ktory model do jakiej roli
+1. `PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — reguły pracy systemowego seniora
+2. `PRIVAI_SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — sekwencja uczaca (prompty 1-6)
+3. `PRIVAI_PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` — zabezpieczenia przed bledami code-read
+4. `PRIVAI_MODEL_FIT_AND_ROUTING.md` — ktory model do jakiej roli
 
 ### Etap 2: Zrozumienie projektu
 5. `PRIVAI_PROJECT_ENTRYPOINT.md` — co to jest privAI, mental model
@@ -64,9 +65,9 @@ i budowanie precyzyjnych taskow dla agentow wykonawczych.
 8. `PRIVAI_DOCS_INDEX.md` — mapa do wszystkich specow
 
 ### Etap 3: Kontekst historyczny
-9. `CHAT_ARCHIVE_2026-04-09.md` — historia decyzji i commitow
-10. `SKILLS.md` — mocne strony agentow
-11. `AGENT.md` — reguly architektoniczne i safety rules
+9. `PRIVAI_CHAT_ARCHIVE_2026-04-09.md` — historia decyzji i commitow
+10. `PRIVAI_SKILLS.md` — mocne strony agentow
+11. `PRIVAI_AGENT.md` — reguly architektoniczne i safety rules
 
 ### Etap 4 (opcjonalnie): Deep specs (tylko jesli potrzebne do tasku)
 - `spec/PRIVAI_ESCROW_OBJECT_MODEL.md`

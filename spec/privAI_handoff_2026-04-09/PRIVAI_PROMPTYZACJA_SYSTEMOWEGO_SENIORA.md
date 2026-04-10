@@ -63,7 +63,7 @@ Ta warstwa odpowiada na pytania:
 
 ### 2. Handoff reality
 
-To, co jest zapisane w `docs/ai_onboarding/`.
+To, co jest zapisane w `spec/privAI_handoff_2026-04-09/`.
 
 Ta warstwa odpowiada na pytania:
 - jaki jest aktualny stan projektu,
@@ -125,17 +125,17 @@ Model musi odrozniac:
 
 Domyslna sciezka wejscia dla systemowego seniora:
 
-1. `docs/ai_onboarding/README.md`
-2. `docs/ai_onboarding/PRIVAI_SYSTEM_PRODUCT_FOUNDATION.md`
-3. `docs/ai_onboarding/PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md`
-4. `docs/ai_onboarding/SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md`
-5. `docs/ai_onboarding/SZABLON_CORRECTION_PILL.md`
-6. `docs/ai_onboarding/PROMPT_6_SPLIT.md`
-7. `docs/ai_onboarding/PRIVAI_PROJECT_ENTRYPOINT.md`
-8. `docs/ai_onboarding/PRIVAI_V1_READINESS_AND_GAPS.md`
-9. `docs/ai_onboarding/PRIVAI_V1_PRODUCTION_PATH.md`
-10. `docs/ai_onboarding/PRIVAI_NEXT_DIRECTION.md`
-11. `docs/ai_onboarding/PRIVAI_DOCS_INDEX.md`
+1. `spec/privAI_handoff_2026-04-09/PRIVAI_README.md`
+2. `spec/privAI_handoff_2026-04-09/PRIVAI_SYSTEM_PRODUCT_FOUNDATION.md`
+3. `spec/privAI_handoff_2026-04-09/PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md`
+4. `spec/privAI_handoff_2026-04-09/PRIVAI_SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md`
+5. `spec/privAI_handoff_2026-04-09/PRIVAI_SZABLON_CORRECTION_PILL.md`
+6. `spec/privAI_handoff_2026-04-09/PRIVAI_PROMPT_6_SPLIT.md`
+7. `spec/privAI_handoff_2026-04-09/PRIVAI_PROJECT_ENTRYPOINT.md`
+8. `spec/privAI_handoff_2026-04-09/PRIVAI_V1_READINESS_AND_GAPS.md`
+9. `spec/privAI_handoff_2026-04-09/PRIVAI_V1_PRODUCTION_PATH.md`
+10. `spec/privAI_handoff_2026-04-09/PRIVAI_NEXT_DIRECTION.md`
+11. `spec/privAI_handoff_2026-04-09/PRIVAI_DOCS_INDEX.md`
 
 Potem:
 

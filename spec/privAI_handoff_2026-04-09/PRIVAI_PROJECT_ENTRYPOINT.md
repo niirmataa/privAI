@@ -142,7 +142,7 @@ Read in this order:
 2. `PRIVAI_V1_READINESS_AND_GAPS.md`
 3. `PRIVAI_NEXT_DIRECTION.md`
 4. `PRIVAI_DOCS_INDEX.md`
-5. `CHAT_ARCHIVE_2026-04-09.md`
+5. `PRIVAI_CHAT_ARCHIVE_2026-04-09.md`
 6. Detailed specs and then code
 
 This order is important: first understand the system, then the status, then the direction, then the deep details.

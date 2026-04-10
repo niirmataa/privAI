@@ -1,4 +1,4 @@
-# Prompty Utwardzajace Wejscie w Kod
+﻿# Prompty Utwardzajace Wejscie w Kod
 
 ## Cel
 
@@ -128,7 +128,7 @@ to element NIE MOZE miec statusu "confirmed-absent". Tylko "unchecked" lub "infe
 
 ### Correction pill link
 Jesli ten mini-prompt ujawnil blad w Twoim modelu (np. owner jest inny niz zakladales),
-**nie kombinuj** — uruchom Correction pill z PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md:
+**nie kombinuj** — uruchom Correction pill z PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md:
 ```
 KOREKTA:
 - Twierdziles: [co model powiedzial]
@@ -656,11 +656,11 @@ Mini-prompty utwardzajace nie sa jednorazowe. Powtarzaj je:
 
 ## Relacja do pozostalych dokumentow
 
-- `PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — definiuje role i reguly
-- `SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — definiuje sekwencje uczaca
-- `PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` (ten dokument) — definiuje zabezpieczenia przed bledami code-read
-- Correction pill (w PROMPTYZACJA) — mechanizm korekty po bledzie
-- Task Pill template (w PROMPTYZACJA) — format przekazania pracy do wykonawcy
+- `PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — definiuje role i reguly
+- `PRIVAI_SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — definiuje sekwencje uczaca
+- `PRIVAI_PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` (ten dokument) — definiuje zabezpieczenia przed bledami code-read
+- Correction pill (w `PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md`) — mechanizm korekty po bledzie
+- Task Pill template (w `PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md`) — format przekazania pracy do wykonawcy
 
 Razem tworza kompletny pipeline:
 uczenie -> utwardzenie -> wykonanie.

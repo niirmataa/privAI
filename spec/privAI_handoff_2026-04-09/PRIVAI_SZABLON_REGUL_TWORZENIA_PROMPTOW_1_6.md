@@ -39,7 +39,7 @@ Przy tworzeniu promptow zawsze trzeba pilnowac trzech warstw:
 - experimental / unresolved
 
 ### 2. Handoff reality
-- `docs/ai_onboarding/`
+- `spec/privAI_handoff_2026-04-09/`
 - aktualny stan projektu
 - ostatnie decyzje
 - current priorities

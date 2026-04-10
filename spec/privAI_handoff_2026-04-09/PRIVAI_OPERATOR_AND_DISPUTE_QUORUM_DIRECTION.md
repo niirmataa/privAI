@@ -10,7 +10,7 @@ Primary source docs:
 - `spec/privAI_handoff_2026-04-09/PRIVAI_PRODUCTION_SYSTEM_DIAGRAMS.md`
 - `spec/privAI_handoff_2026-04-09/PRIVAI_TOR_GATED_NETWORK_DIRECTION.md`
 - `spec/privAI_handoff_2026-04-09/PRIVAI_STAGE_A_STAGE_B_CONTRACT_FREEZE.md`
-- `spec/privAI_handoff_2026-04-09/OPERATOR_CHEATSHEET.md`
+- `spec/privAI_handoff_2026-04-09/PRIVAI_OPERATOR_CHEATSHEET.md`
 
 Terminology note:
 - marketplace wording often says `provider`

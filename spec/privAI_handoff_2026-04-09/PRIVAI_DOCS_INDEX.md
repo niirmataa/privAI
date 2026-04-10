@@ -8,7 +8,7 @@ Recommended read order:
 3. `PRIVAI_V1_READINESS_AND_GAPS.md`
 4. `PRIVAI_V1_PRODUCTION_PATH.md`
 5. `PRIVAI_NEXT_DIRECTION.md`
-6. `CHAT_ARCHIVE_2026-04-09.md`
+6. `PRIVAI_CHAT_ARCHIVE_2026-04-09.md`
 7. Deep specs below
 
 ## Core Escrow / Privacy Specs
@@ -56,13 +56,13 @@ Read when you need:
 
 ## Coordination / History Docs
 
-### `CHAT_ARCHIVE_2026-04-09.md`
+### `PRIVAI_CHAT_ARCHIVE_2026-04-09.md`
 Read when you need:
 - the big-picture history of this work,
 - why key decisions were made,
 - what got fixed in which order.
 
-### `XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
+### `PRIVAI_XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
 Read when you need:
 - the Xiaomi runtime handoff,
 - compact task template style,

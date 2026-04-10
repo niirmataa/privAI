@@ -211,10 +211,10 @@ Routing powinien byc aktualizowany gdy:
 
 ## Relacja do pozostalych dokumentow
 
-- `PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — jak przygotowac model do roli seniora
-- `SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — sekwencja uczaca
-- `PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` — zabezpieczenia przed bledami code-read
-- `MODEL_FIT_AND_ROUTING.md` (ten dokument) — ktory model do jakiej roboty
+- `PRIVAI_PROMPTYZACJA_SYSTEMOWEGO_SENIORA.md` — jak przygotowac model do roli seniora
+- `PRIVAI_SZABLON_REGUL_TWORZENIA_PROMPTOW_1_6.md` — sekwencja uczaca
+- `PRIVAI_PROMPTY_UTWARDZAJACE_WEJSCIE_W_KOD.md` — zabezpieczenia przed bledami code-read
+- `PRIVAI_MODEL_FIT_AND_ROUTING.md` (ten dokument) — ktory model do jakiej roboty
 
 Razem tworza kompletny system:
 - jak uczyc (Prompty 1-6),

@@ -258,7 +258,7 @@ This means the system now has a real local release flow instead of only disconne
 Files already created inside the repo for handoff and coordination:
 - `/home/nxms-server/privAI/zadania_12_14_opis.md`
 - `/home/nxms-server/privAI/KONTEKST_ORCHESTRACJI_2026-04-09.md`
-- `/home/nxms-server/privAI/XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
+- `/home/nxms-server/privAI/spec/privAI_handoff_2026-04-09/PRIVAI_XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
 
 These are complementary, not replacements for this archive.
 
@@ -377,8 +377,8 @@ The most practical next move is:
 
 If a future operator wants to understand the whole thread without reading the raw chat, they should read in this order:
 1. this archive
-2. `/home/nxms-server/privAI/PRIVAI_PROJECT_ENTRYPOINT.md` if present
+2. `/home/nxms-server/privAI/spec/privAI_handoff_2026-04-09/PRIVAI_PROJECT_ENTRYPOINT.md` if present
 3. `/home/nxms-server/privAI/KONTEKST_ORCHESTRACJI_2026-04-09.md`
 4. `/home/nxms-server/privAI/zadania_12_14_opis.md`
-5. `/home/nxms-server/privAI/XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
+5. `/home/nxms-server/privAI/spec/privAI_handoff_2026-04-09/PRIVAI_XIAOMI_HANDOFF_I_SZABLON_2026-04-09.md`
 6. the source-of-truth specs listed earlier

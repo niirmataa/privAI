@@ -1,4 +1,4 @@
-# AGENT.md - privAI Project Rules
+# PRIVAI_AGENT.md - privAI Project Rules
 
 This file describes how an agent should behave when entering `privAI`.
 
