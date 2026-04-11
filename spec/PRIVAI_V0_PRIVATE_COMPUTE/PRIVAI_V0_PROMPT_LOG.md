@@ -314,6 +314,25 @@ Do not continue the old root `PROMPT_LOG.md` for V0 work. The old root log belon
 
 **Write scope:** none.
 
+**Result:**
+
+- Correctly described privAI V0 as a post-quantum FullPrivacy private AI compute network.
+- Correctly explained the system in layers: product, roles, identity, compute lease/session, settlement/escrow, metering/receipts, transport, discovery, versioning, and agent/RAG/MCP context.
+- Proposed direction-level solutions for operatorless bridge, receipt availability, metering trust, pro-rata settlement, aPVA precision, hidden-root identity, private discovery, runtime privacy classes, transport/mailbox privacy, exit nodes, and `privai-context-mcp`.
+- Correctly separated docs/direction/protocol/code/devnet/production phases.
+- Identified major risks: receipt validation, receipt availability, metering fraud, escrow note splitting, identity correlation, discovery metadata leakage, permanent operator bridge, legacy drift, and RAG contamination.
+- Recommended next docs, led by operatorless escrow, metering, identity, node roles, aPVA, private discovery, runtime privacy classes, and protocol versioning.
+
+**Status:** done; no files edited by Xiaomi.
+
+---
+
+### P-T036-XIAOMI | 2026-04-11 | Codex | Deep Architecture Conversation
+
+**Goal:** Push Xiaomi from synthesis into deeper architectural tradeoff discussion while keeping the task read-only and direction-level.
+
+**Write scope:** none.
+
 **Status:** prompt-ready
 
 ---

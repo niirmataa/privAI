@@ -48,7 +48,8 @@ Transport is the shield.
 | V0-003 | 2026-04-11 | Codex | done | Single source-of-truth context plan created; docs tree updated to quarantine legacy and require V0-only RAG/MCP context |
 | V0-004 | 2026-04-11 | Codex | done | Legacy policy tightened to zero-use for V0 code work; all new docs must live under `spec/PRIVAI_V0_PRIVATE_COMPUTE/` |
 | V0-005 | 2026-04-11 | Codex | done | `privai-context-mcp` v1 direction saved as V0-only MCP context server plan; no implementation created |
-| P-T035-XIAOMI | 2026-04-11 | Codex | prompt-ready | Read-only whole-system synthesis prompt prepared; asks Xiaomi to describe the system as understood and propose direction-level solutions |
+| P-T035-XIAOMI | 2026-04-11 | Xiaomi | done | Whole-system synthesis completed; Xiaomi restated V0 layers, proposed direction-level solutions, identified production path, highest-risk gaps, next docs, and Opus/operator questions |
+| P-T036-XIAOMI | 2026-04-11 | Codex | prompt-ready | Deep architecture conversation prompt prepared; asks Xiaomi to stress-test V0 system design and propose tradeoffs without writing specs or code |
 | T-032-OPUS | 2026-04-11 | Opus | next | Operatorless Escrow Direction; target file not created yet |
 
 ---
