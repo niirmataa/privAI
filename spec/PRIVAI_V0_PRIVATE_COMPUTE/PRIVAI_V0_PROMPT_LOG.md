@@ -333,7 +333,370 @@ Do not continue the old root `PROMPT_LOG.md` for V0 work. The old root log belon
 
 **Write scope:** none.
 
-**Status:** prompt-ready
+**Result:**
+
+- Xiaomi gave a positive architecture verdict: V0 is coherent at direction level and does not need a major direction change.
+- The primary system risk was identified as `receipt truth`: signed miner self-reporting proves what the miner claimed, not what the miner actually delivered.
+- Strongest design choices identified:
+  - settlement based on resource delivery, not AI output quality,
+  - operatorless escrow by design,
+  - hidden-root plus scoped identities,
+  - private discovery by default,
+  - no quality disputes,
+  - V0-only context layer with legacy quarantine.
+- Weakest areas identified:
+  - receipt truth,
+  - receipt availability,
+  - pro-rata note splitting,
+  - identity correlation,
+  - discovery metadata leakage,
+  - transport metadata,
+  - Phase 1 centralization,
+  - RAG/MCP contamination.
+- Direction-level decisions proposed for Opus/operator review:
+  - challenge/response for Phase 2 receipt truth,
+  - dual receipt storage plus on-chain commitment,
+  - max PVA supply before aPVA type choice,
+  - explicit Phase 1 kill criteria,
+  - phase naming clarification,
+  - discovery metadata threat model,
+  - runtime privacy class hierarchy,
+  - transport metadata hardening,
+  - isolated pro-rata note split spec,
+  - MCP golden tests before agent use,
+  - identity before discovery,
+  - aPVA before settlement formula freeze.
+- Next Xiaomi discussions proposed:
+  - Receipt Truth Under Adversarial Conditions,
+  - The Economics of Privacy,
+  - 10-Year Attack Surface Review.
+
+**Status:** done; no files edited by Xiaomi.
+
+---
+
+### P-T037-XIAOMI | 2026-04-11 | Codex | Final V0 Architecture Proposal
+
+**Goal:** Ask Xiaomi to propose the target V0 architecture after identifying what can kill the system, while staying read-only and direction-level.
+
+**Write scope:** none.
+
+**Result:**
+
+- Xiaomi proposed an 11-layer final V0 architecture.
+- Main system rule: chain sees commitments and receipts, not workloads, outputs, or people.
+- Receipt truth was proposed as a three-layer model:
+  - miner signed receipts,
+  - optional user acknowledgments,
+  - protocol-level challenge/response for final operatorless settlement.
+- The answer separated on-chain, off-chain, transport, and RAG/MCP boundaries.
+- The answer proposed final phasing, decisions to freeze before code, decisions to keep open, next docs, red lines, and blocking questions.
+
+**Status:** done; no files edited by Xiaomi.
+
+---
+
+### V0-006 | 2026-04-11 | Codex | Polish Final Architecture Proposal
+
+**Goal:** Save the P-T037-XIAOMI final architecture proposal as a Polish V0 direction document.
+
+**Write scope:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_FINAL_ARCHITECTURE_PROPOSAL_PL.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_TASK_LOG.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_PROMPT_LOG.md`
+
+**Status:** done
+
+---
+
+### P-T038-XIAOMI | 2026-04-11 | Xiaomi | V0 Code Reality Gap Review
+
+**Goal:** Compare V0 private compute direction against current code reality without using legacy docs or editing files.
+
+**Result:**
+
+- Xiaomi concluded that V0 direction is correct but far from current implementation.
+- Current code strengths identified:
+  - solid escrow 2-of-3,
+  - Stage A/B boundary,
+  - Falcon usage,
+  - NXMS mailbox,
+  - Halo2 scaffold,
+  - escrow orchestrator as Phase 1 candidate.
+- Major gaps identified:
+  - no compute lease metering receipts,
+  - no pro-rata note split,
+  - Falcon public key currently functions as identity,
+  - marketplace types still exist in code,
+  - operator remains canonical for Release/Refund,
+  - `Amount14` may fundamentally conflict with `aPVA` precision,
+  - no private discovery,
+  - no runtime privacy classes,
+  - no challenge/response.
+- Blocking decisions identified:
+  - `Amount14` / amount type,
+  - `MarketplaceBatchTx` fate,
+  - `ComputeLeaseEscrow` vs extending `Escrow2of3`,
+  - Falcon identity migration,
+  - small payments receipt reuse vs separate compute lease receipt,
+  - orchestrator as automated operator base.
+
+**Status:** done; no files edited by Xiaomi.
+
+---
+
+### V0-007 | 2026-04-11 | Codex | Polish Code Reality Gap Review
+
+**Goal:** Save the P-T038-XIAOMI code-reality review as a Polish V0 gap document.
+
+**Write scope:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_CODE_REALITY_GAP_REVIEW_PL.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_TASK_LOG.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_PROMPT_LOG.md`
+
+**Status:** done
+
+---
+
+### P-T039-XIAOMI | 2026-04-11 | Xiaomi | V0 Migration Architecture
+
+**Goal:** Describe how to migrate from current code to V0 private compute without editing files.
+
+**Result:**
+
+- Xiaomi recommended an `add new alongside old` migration strategy.
+- Existing mechanics should be kept or bridged:
+  - `Escrow2of3`,
+  - `RecoveryRelease`,
+  - `EscrowApprovalBundle`,
+  - Falcon signatures,
+  - NXMS mailbox,
+  - Halo2 scaffold,
+  - escrow orchestrator.
+- Legacy marketplace types should be deprecated/isolated, not immediately removed.
+- New V0 primitives are needed:
+  - `ComputeLeaseEscrow`,
+  - compute lease receipts,
+  - receipt/metering layer,
+  - hidden-root identity,
+  - private discovery,
+  - runtime privacy classes,
+  - pro-rata note splitting.
+- `Amount14` should likely remain for proof/plaintext lane, while V0 needs a larger `LedgerAmount` directionally.
+- `nxms-escrow-orchestrator` is the strongest candidate for Phase 1 automated operator bridge.
+
+**Status:** done; no files edited by Xiaomi.
+
+---
+
+### V0-008 | 2026-04-11 | Codex | Polish Migration Architecture
+
+**Goal:** Save the P-T039-XIAOMI migration architecture as a Polish V0 strategy document.
+
+**Write scope:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_MIGRATION_ARCHITECTURE_PL.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_TASK_LOG.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_PROMPT_LOG.md`
+
+**Status:** done
+
+---
+
+### P-T040-XIAOMI | 2026-04-11 | Xiaomi | Domain Model Candidate Classification
+
+**Goal:** Classify the candidate V0 domain model as `FROZEN_CANDIDATE`, `CANDIDATE`, `OPEN`, `BLOCKED_BY_CODE_AUDIT`, or `REJECTED`.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DOMAIN_MODEL_CLASSIFICATION_PL.md`
+
+**Status:** done
+
+---
+
+### P-T041-XIAOMI | 2026-04-11 | Xiaomi | Amount14 / LedgerAmount Audit
+
+**Goal:** Audit `Amount14` usage against V0 `aPVA` / `LedgerAmount` requirements.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_AMOUNT14_AUDIT_PL.md`
+
+**Key result:**
+
+- `Amount14` appears to belong to the proof/plaintext lane, while V0 compute lease economics likely need a separate ledger amount representation.
+
+**Status:** done
+
+---
+
+### P-T042-XIAOMI | 2026-04-11 | Xiaomi | SpendPolicy / Escrow Compatibility Audit
+
+**Goal:** Audit whether V0 compute lease escrow should extend `Escrow2of3`, add a new `SpendPolicy`, add a new transaction, or use a separate settlement layer.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_SPENDPOLICY_AUDIT_PL.md`
+
+**Status:** done
+
+---
+
+### P-T043-XIAOMI | 2026-04-11 | Xiaomi | Identity Migration Audit
+
+**Goal:** Audit how current code uses Falcon identity and how it can migrate toward hidden root + scoped keys.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_IDENTITY_MIGRATION_AUDIT_PL.md`
+
+**Key result:**
+
+- Current code treats Falcon PK / `node_pk_hash` as the core system identifier.
+- `falcon_pk_hash()` with domain `privai:falcon-pk:v0` is frozen for compatibility and must not be changed.
+- `node_pk_hash` should remain unchanged for consensus and be reframed semantically as `ValidatorRoleKey` hash.
+- Hidden root can be introduced later as an additive vault extension.
+- Role separation should be added gradually without breaking consensus identity.
+- The first safe step is documentation/comment-level clarification, not behavior change.
+
+**Status:** done
+
+---
+
+### P-T044-XIAOMI | 2026-04-11 | Xiaomi | Marketplace Types Fate Audit
+
+**Goal:** Audit what to do with marketplace-era types so they do not contaminate V0 private compute.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_MARKETPLACE_TYPES_AUDIT_PL.md`
+
+**Status:** done
+
+---
+
+### P-T045-XIAOMI | 2026-04-11 | Xiaomi | Build-Once Domain Types Review
+
+**Goal:** Review the build-once candidate types for necessity, timing, overengineering risk, and code-audit blockers.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_BUILD_ONCE_TYPES_REVIEW_PL.md`
+
+**Status:** done
+
+---
+
+### V0-009 | 2026-04-11 | Codex | Task Workspace Setup
+
+**Goal:** Create a stable task-prompt workspace so future model tasks are referenced by path instead of pasted manually through chat.
+
+**Write scope:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/README.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-046_DECISION_MATRIX_DRAFT/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-047_DOMAIN_BOUNDARIES_FREEZE/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-048_MINIMAL_TYPES_FREEZE/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-049_IMPLEMENTATION_BLOCKERS/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-050_DOCS_DEPENDENCY_GRAPH/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-051_MCP_RAG_GOLDEN_QUESTIONS/`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-052_PRE_OPUS_BRIEF/`
+
+**Result:**
+
+- Each task folder contains `PROMPT.md`, `OUTPUT_XIAOMI.md`, and `STATUS.md`.
+- Each prompt explicitly tells Xiaomi where to write `OUTPUT_XIAOMI.md`.
+- `tasks/` is marked as non-canonical workspace.
+- Main V0 docs remain the accepted/canonical doc area.
+
+**Status:** done
+
+---
+
+### P-T053-GEMINI | 2026-04-11 | Gemini 3.1 Pro | Decision Matrix Cross-Review
+
+**Goal:** Independently review Xiaomi T-046 and Codex review for overclaims, premature freezes, missing blockers, and legacy/marketplace drift.
+
+**Prompt:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-053_GEMINI_DECISION_MATRIX_REVIEW/PROMPT.md`
+
+**Output path:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-053_GEMINI_DECISION_MATRIX_REVIEW/OUTPUT_GEMINI.md`
+
+**Status:** prompt_ready
+
+---
+
+### T-054-XIAOMI | 2026-04-11 | Xiaomi | Final Reviewer Brief Without Opus Gate
+
+**Goal:** Replace the old pre-Opus brief with a model-neutral reviewer brief that treats Opus/Claude as optional future reviewer, not a blocking authority.
+
+**Prompt:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-054_FINAL_REVIEWER_BRIEF/PROMPT.md`
+
+**Output path:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-054_FINAL_REVIEWER_BRIEF/OUTPUT_XIAOMI.md`
+
+**Status:** prompt_ready
+
+---
+
+### T-055-GEMINI | 2026-04-11 | Gemini 3.1 Pro | privai-context-mcp Sprint 1
+
+**Goal:** Implement Sprint 1 of `privai-context-mcp` as a real local Rust stdio MCP server with 8 read-only V0 tools and file-backed V0-only indexes.
+
+**Prompt:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-055_GEMINI_CONTEXT_MCP_SPRINT1/PROMPT.md`
+
+**Output path:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-055_GEMINI_CONTEXT_MCP_SPRINT1/OUTPUT_GEMINI.md`
+
+**Code write scope:**
+
+- `privai-context-mcp/**`
+
+**Status:** prompt_ready
+
+---
+
+### T-056-GEMINI | 2026-04-11 | Gemini 3.1 Pro | Vertex RAG Bridge Design
+
+**Goal:** Design the future Vertex RAG backend boundary for `privai-context-mcp` without making Vertex a Sprint 1 implementation requirement.
+
+**Prompt:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-056_VERTEX_RAG_BRIDGE_DESIGN/PROMPT.md`
+
+**Output path:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-056_VERTEX_RAG_BRIDGE_DESIGN/OUTPUT_GEMINI.md`
+
+**Status:** prompt_ready
+
+---
+
+### V0-010 | 2026-04-11 | Codex | Task Workflow Correction
+
+**Goal:** Remove Opus as a blocking dependency from the task workflow and document where pre-task Xiaomi audits P-T040 through P-T045 are stored.
+
+**Output:**
+
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/README.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-046_DECISION_MATRIX_DRAFT/REVIEW_CODEX.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-053_GEMINI_DECISION_MATRIX_REVIEW/PROMPT.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-054_FINAL_REVIEWER_BRIEF/PROMPT.md`
+- `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DOCS_TREE.md`
+
+**Status:** done
 
 ---
 

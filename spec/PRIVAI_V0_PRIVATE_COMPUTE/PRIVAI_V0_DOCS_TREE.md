@@ -326,15 +326,16 @@ DoD:
 
 ## 11. Current Blocking Facts
 
-- Opus is unavailable until 2026-04-15.
-- Heavy final specs should wait for Opus review.
-- Xiaomi can be used for read-only discussion and risk analysis.
-- Codex can maintain logs, working memos, and task prompts.
+- Opus/Claude is not a blocking dependency.
+- Heavy final specs require written direction/spec review, but that review can come from the current multi-model workflow plus operator decision.
+- Xiaomi can be used for read-only discussion, risk analysis, synthesis, and first-pass decision matrices.
+- Gemini can be used as an independent/adversarial reviewer once it is given bounded source scope.
+- Codex can maintain logs, working memos, task prompts, reviews, and source-of-truth discipline.
 - No code changes should be made for V0 until the docs phase plan is stable.
 
 ---
 
-## 12. Next Safe Work Until Opus Returns
+## 12. Next Safe Work Without Opus Dependency
 
 Safe work:
 
@@ -360,7 +361,7 @@ Safe work:
 
 3. Keep V0 logs current.
 
-4. Prepare strict task prompts for Opus:
+4. Prepare strict task prompts for Xiaomi/Gemini/Codex review:
    - Operatorless Escrow Direction,
    - Identity Model Direction,
    - Node Roles And Incentives Direction,
@@ -553,10 +554,11 @@ As of this document:
 Next heavy doc: PRIVAI_V0_OPERATORLESS_ESCROW_DIRECTION.md
 ```
 
-But Opus is unavailable until 2026-04-15, so the safest near-term work is:
+Opus/Claude may review later if available, but the safest near-term work does not wait for it:
 
 - collect read-only discussion notes,
 - refine task prompts,
+- run bounded Xiaomi/Gemini/Codex reviews,
 - update V0 logs,
 - avoid protocol freezes,
 - avoid code changes.
