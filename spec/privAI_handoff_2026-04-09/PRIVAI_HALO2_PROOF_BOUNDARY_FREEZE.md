@@ -303,10 +303,10 @@ Label: **current production-adjacent proof layer**
 - **Do NOT claim** that amount balance is enforced by the circuit — plaintext conservation is explicitly TODO
 - **Do NOT claim** that the current circuit is the final `2-in, 2-out` transaction proof system
 
-### 9.3 Interface with Stage A / Stage B boundary
+### 9.3 Interface with escrow Stage A / Stage B boundary
 
-- **Stage A** (current): The proof layer provides structural enforcement (proof coverage, certificate binding) and a growing set of Halo2 chip primitives. The proof system ID mechanism allows future strengthening without breaking the block format.
-- **Stage B** (future): Will require the `2-in, 2-out` circuit, consumed-note opening, plaintext conservation, and full spend relation to be wired. The current code is a scaffold toward that, not a delivery of it.
+- **Proof-current** (scaffold): The proof layer provides structural enforcement (proof coverage, certificate binding) and a growing set of Halo2 chip primitives. The proof system ID mechanism allows future strengthening without breaking the block format.
+- **Proof-target** (complete circuit): Will require the `2-in, 2-out` circuit, consumed-note opening, plaintext conservation, and full spend relation to be wired. The current code is a scaffold toward that, not a delivery of it.
 
 ### 9.4 Interface with proof certificates
 

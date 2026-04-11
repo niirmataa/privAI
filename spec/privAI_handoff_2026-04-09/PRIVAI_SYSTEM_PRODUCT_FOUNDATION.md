@@ -266,7 +266,7 @@ In short:
 
 ### D. Marketplace operator
 
-Marketplace operator is the system authority for the marketplace rail.
+Marketplace operator is the system authority for the **Batch Marketplace Rail**.
 
 This role belongs to the marketplace product layer, not to the privacy core and not to validator consensus.
 
@@ -275,15 +275,19 @@ Marketplace operator is responsible for:
 - enforcing `ServicePaymentPolicy`,
 - intake and validation of `Receipt`,
 - batching settlement,
-- publishing `MarketplaceBatchTx`,
+- publishing `MarketplaceBatchTx` in the optional aggregate rail,
 - governing scoped small marketplace payments,
 - connecting login/challenge/auth flows to marketplace access and usage rights.
 
-In the current/final marketplace rail model:
+In the Batch Marketplace Rail model:
 - operator is the default authority for grants and settlement,
 - merchant is not the standalone settlement authority,
 - operator sees more than chain,
 - and the rail is explicitly operator-trusted.
+
+This is not the canonical FullPrivacy marketplace path. The FullPrivacy marketplace
+path keeps marketplace semantics off-chain and uses generic on-chain private escrow.
+See `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md`.
 
 Marketplace operator is therefore:
 - not the same as escrow operator,

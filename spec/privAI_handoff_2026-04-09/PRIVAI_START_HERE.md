@@ -21,9 +21,12 @@ i budowanie precyzyjnych taskow dla agentow wykonawczych.
 - Ceni uczciwosc powyzej kompletnosci — woli "nie sprawdzilem" niz zgadywanie
 
 ### Co to jest privAI
-- System prywatnosci oparty na wartosci z warstwami: chain / ledger / node / wallet / proof / transport
-- Escrow jest jednym z primitives, NIE calym systemem
-- Cel v1: pierwszy uczciwy escrow end-to-end (release done, refund i recovery do zrobienia)
+- **Post-quantum FullPrivacy private AI compute network** — NIE marketplace AI
+- Uzytkownicy prywatnie leasuja izolowana moc obliczeniowa od compute minerow
+- System prywatnosci z warstwami: chain / ledger / node / wallet / proof / transport
+- Escrow jest jednym z primitives (compute lease escrow), NIE calym systemem
+- Settlement opiera sie na receipt/metering, NIE na ocenie jakosci AI
+- Operator NIE jest canonical decision-maker — operatorless by design
 
 ### Najwazniejsze reguly
 1. Nie implementuj nic, dopoki nie zbudujesz modelu systemu
@@ -69,7 +72,20 @@ i budowanie precyzyjnych taskow dla agentow wykonawczych.
 10. `PRIVAI_SKILLS.md` — mocne strony agentow
 11. `PRIVAI_AGENT.md` — reguly architektoniczne i safety rules
 
-### Etap 4 (opcjonalnie): Deep specs (tylko jesli potrzebne do tasku)
+### Etap 4: V0 Direction Reset (2026-04-11, PRZECZYTAJ PRZED starymi direction docs)
+12. `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DIRECTION_RESET_PRIVATE_COMPUTE_NETWORK.md` — **MASTER DOC** — private compute network, nie AI marketplace
+
+### Etap 5: Starszy kierunek produkcyjny (2026-04-10, czesciowo superseded — czytaj jako reference)
+13. `PRIVAI_PRODUCTION_SYSTEM_DIRECTION.md` — 22 zamrozone decyzje (superseded w product framing, nadal valid dla mechanik escrow/transport)
+14. `PRIVAI_PRODUCTION_SYSTEM_DIAGRAMS.md` — 19 diagramow (needs rewrite for V0 framing)
+15. `PRIVAI_STAGE_A_STAGE_B_CONTRACT_FREEZE.md` — code-confirmed granica escrow Stage A/B (still valid)
+16. `PRIVAI_HALO2_PROOF_BOUNDARY_FREEZE.md` — co Halo2 dowodzi, czego NIE dowodzi (still valid)
+17. `PRIVAI_CONTRACT_VERIFICATION_AND_SETTLEMENT_DIRECTION.md` — superseded: quality settlement → receipt settlement
+18. `PRIVAI_OPERATOR_AND_DISPUTE_QUORUM_DIRECTION.md` — superseded: operator canonical → operator bootstrap
+19. `PRIVAI_TOR_GATED_NETWORK_DIRECTION.md` — still valid (network design)
+20. `PRIVAI_OPERATOR_CHEATSHEET.md` — 4 kroki, 6 czerwonych flag, routing
+
+### Etap 6 (opcjonalnie): Deep specs (tylko jesli potrzebne do tasku)
 - `spec/PRIVAI_ESCROW_OBJECT_MODEL.md`
 - `spec/PRIVAI_ESCROW_TX_MATRIX.md`
 - `spec/PRIVAI_ESCROW_FULLPRIVACY_BOUNDARY_DECISION_MEMO.md`

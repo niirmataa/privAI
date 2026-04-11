@@ -37,6 +37,76 @@ Read when you need:
 - why Option B was chosen,
 - why `policy_opening` is mandatory.
 
+## V0 Direction Reset (2026-04-11) — READ FIRST
+
+### `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DIRECTION_RESET_PRIVATE_COMPUTE_NETWORK.md`
+**This is the highest-authority direction document.**
+Read when you need:
+- the canonical system model (private compute network, not AI marketplace),
+- identity model, recovery/settlement, fees/incentives, discovery, protocol versioning,
+- terminology reset (user/compute lessee, compute miner, operatorless escrow).
+
+This doc supersedes marketplace/product framing in all older docs below.
+
+---
+
+## Production Direction (2026-04-10) — partially superseded
+
+### `PRIVAI_PRODUCTION_SYSTEM_DIRECTION.md`
+Read when you need:
+- the single production direction (22 frozen decisions),
+- execution modes, pricing, operator model, sandbox network,
+- rollout phases, contract model, on-chain privacy model.
+
+### `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md`
+Read when you need:
+- the canonical boundary between marketplace and chain,
+- why marketplace is off-chain but escrow remains on-chain,
+- why the canonical chain path is FullPrivacy-first,
+- why private discovery is the baseline and public discovery is lower-privacy opt-in,
+- why `MarketplaceBatchTx` is optional aggregate rail, not the FullPrivacy marketplace baseline.
+
+### `PRIVAI_PRODUCTION_SYSTEM_DIAGRAMS.md`
+Read when you need:
+- visual companion to the direction doc (19 diagrams),
+- quick scan of architecture, settlement, verification, network topology.
+
+### `PRIVAI_STAGE_A_STAGE_B_CONTRACT_FREEZE.md`
+Read when you need:
+- code-confirmed escrow boundary (Stage A vs Stage B),
+- 10-point submit gate validation,
+- sentinel vs final tx_signing_hash.
+
+### `PRIVAI_HALO2_PROOF_BOUNDARY_FREEZE.md`
+Read when you need:
+- what Halo2 circuits actually prove today (code-confirmed),
+- what is NOT yet proven (explicit list),
+- three-layer proof model (circuit / structural / witness consistency).
+
+### `PRIVAI_CONTRACT_VERIFICATION_AND_SETTLEMENT_DIRECTION.md`
+Read when you need:
+- contract-first execution model,
+- 4-level verification (mechanical → contractual → semantic → settlement),
+- delivery vs quality distinction, skill pack structure.
+
+### `PRIVAI_OPERATOR_AND_DISPUTE_QUORUM_DIRECTION.md`
+Read when you need:
+- operator = rule executor (not moderator),
+- signer quorum vs future dispute panel,
+- recovery as peer path after timeout.
+
+### `PRIVAI_TOR_GATED_NETWORK_DIRECTION.md`
+Read when you need:
+- TOR-GATED sandbox network design parameters,
+- frozen invariants (F1-F8) vs open design questions,
+- multi-hop relay topology direction.
+
+### `PRIVAI_OPERATOR_CHEATSHEET.md`
+Read when you need:
+- 4-step operator workflow,
+- 6 red flags to react to,
+- model routing table.
+
 ## Transport / Runtime Specs
 
 ### `PRIVAI_TRANSPORT_RUNTIME_FREEZE_MEMO.md`

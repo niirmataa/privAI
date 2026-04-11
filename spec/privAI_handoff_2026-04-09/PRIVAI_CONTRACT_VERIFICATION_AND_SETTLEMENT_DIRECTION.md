@@ -155,6 +155,13 @@ The honest first delivery model is:
 3. Buyer confirms receipt / acceptance.
 4. Escrow settles through release / refund / recovery.
 
+Marketplace boundary:
+
+- delivery evidence belongs to the contract / evidence layer, not to marketplace-specific ledger state
+- if a delivery commitment is anchored on-chain, it must be a generic `delivery_hash` / `delivery_commit` binding for private contract settlement
+- the chain must not infer skill pack, marketplace category, task text, artifact contents, or provider profile semantics from that commitment
+- see `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md`
+
 Current proof certificates should be treated as **protocol-validity proofs**, not as final semantic proof that a skill was performed correctly.
 
 ### 4.4 Future strengthening

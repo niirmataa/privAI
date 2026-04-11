@@ -6,7 +6,7 @@ This file is the visual companion to:
 
 It exists to keep the production direction easy to scan without re-reading long prose.
 
-## 1. Production Stack
+## 1. Production Stack [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -34,7 +34,7 @@ flowchart TD
     Settlement"]
 ```
 
-## 2. Service Lifecycle
+## 2. Service Lifecycle [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -51,7 +51,7 @@ Notes:
 - `privAI` already has strong primitives for `Lock -> Execute -> Verify -> Settle`
 - the weakest / least-defined areas are `Browse -> Select -> Contract`
 
-## 3. Verification Model
+## 3. Verification Model [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -86,7 +86,7 @@ flowchart TD
 - refund
 - recovery
 
-## 4. Delivery vs Quality
+## 4. Delivery vs Quality [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -103,7 +103,7 @@ flowchart LR
 Rule:
 - proof of delivery is **not** proof of quality
 
-## 5. Settlement Mapping
+## 5. Settlement Mapping [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -116,7 +116,7 @@ flowchart TD
     E -->|timeout / unresolved| H["Recovery"]
 ```
 
-## 5A. On-Chain Privacy Model
+## 5A. On-Chain Privacy Model [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -132,7 +132,7 @@ Observer model:
 - observers see a valid settlement transition, not plaintext amount or recipient
 - on-chain marketplace activity must preserve `privAI` privacy, not publish business metadata
 
-## 6. Operator And Dispute Model
+## 6. Operator And Dispute Model [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -155,7 +155,7 @@ Rules:
 - normal Release / Refund are operator-signed
 - future dispute quorum should be procedural, not discretionary
 
-## 7. Frontend Direction
+## 7. Frontend Direction [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -170,7 +170,7 @@ Production direction:
 - first adapter in VS Code / VSCodium style environment
 - no shell fork for now
 
-## 8. Connectivity Modes
+## 8. Connectivity Modes [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -187,7 +187,7 @@ Rule:
 - the system should be offline-capable, not offline-only
 - the system should be online-capable, not online-required for every workflow
 
-## 9. Trust Direction
+## 9. Trust Direction [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -210,7 +210,7 @@ Rule:
 - trust should not start as a naive score
 - trust should be expensive to gain and expensive to lose
 
-## 10. Execution Modes (A-D)
+## 10. Execution Modes (A-D) [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -244,7 +244,7 @@ Key:
 - Mode C: provider sees resource usage only, NOT content/model/prompts
 - Mode D: routing logic defined in skill contract
 
-## 11. Sandbox Network: ISOLATED (default)
+## 11. Sandbox Network: ISOLATED (default) [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -259,7 +259,7 @@ flowchart LR
 - Provider does NOT see: content, model, prompts
 - Internet: **NONE**
 
-## 12. Sandbox Network: TOR-GATED (direction)
+## 12. Sandbox Network: TOR-GATED (direction) [design direction]
 
 ```mermaid
 flowchart LR
@@ -292,45 +292,52 @@ Frozen properties:
 - No single node learns the full path
 - Provider cannot determine whether traffic is destined for the internet
 
-## 13. Marketplace Transaction Lifecycle
+## 13. FullPrivacy Marketplace / Generic Escrow Lifecycle [frozen direction]
 
 ```mermaid
 sequenceDiagram
     participant B as Buyer
+    participant M as Marketplace / Transport
     participant O as Operator
-    participant P as Protocol / Ledger
+    participant L as Generic Ledger / Escrow
     participant PR as Provider
 
-    PR->>P: publish skill pack + contract + verifier + pricing
-    B->>P: browse / discover
-    B->>B: review contract
-    B->>P: accept contract (Falcon sig)
-    B->>P: lock PVA in escrow
+    PR->>M: publish discoverable offering off-chain
+    B->>M: browse / discover off-chain
+    B->>PR: negotiate + accept contract over encrypted transport
+    B->>L: lock PVA in generic FullPrivacy escrow
 
-    Note over P: ESCROW LOCKED
-    Note over P: contract_hash + private amount commitment + timeout
+    Note over L: ESCROW LOCKED
+    Note over L: contract_commit + private amount commitment + timeout
+    Note over L: no marketplace semantics on-chain
 
     PR->>PR: execute task
-    PR->>P: commit delivery_hash
-    PR->>B: deliver artifact
+    PR->>M: deliver artifact / evidence off-chain
+    PR->>L: optional generic delivery_commit if required by contract
 
-    B->>B: verify (Level A → B → C)
+    B->>B: verify (Level 1 → Level 2 → Level 3)
 
     alt Accepted
         B->>O: sign Release (Falcon)
-        O->>P: validate + co-sign Release
-        P->>PR: PVA → provider
+        O->>L: validate + co-sign Release
+        L->>PR: generic settlement output to provider
     else Rejected (provider agrees)
         PR->>O: sign Refund (Falcon)
-        O->>P: validate + co-sign Refund
-        P->>B: PVA → buyer
+        O->>L: validate + co-sign Refund
+        L->>B: generic settlement output to buyer
     else Timeout / unresolved
-        B->>P: Recovery (buyer_sig + provider_sig)
-        Note over P: peer resolution, no operator
+        B->>L: Recovery (buyer_sig + provider_sig)
+        Note over L: peer resolution, no operator
     end
 ```
 
-## 14. Skill Pack Structure
+Rules:
+- marketplace is the off-chain application/protocol layer
+- escrow is on-chain but generic
+- the chain does not store skill pack, discovery, task text, or marketplace profile semantics
+- `MarketplaceBatchTx` is optional aggregate rail, not the FullPrivacy marketplace baseline
+
+## 14. Skill Pack Structure [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -364,7 +371,7 @@ flowchart TD
     dispute: timeout → recovery"]
 ```
 
-## 15. Full Network Topology (direction)
+## 15. Full Network Topology (direction) [design direction]
 
 ```mermaid
 flowchart TD
@@ -402,7 +409,7 @@ privAI relay visibility: only immediate predecessor and successor (onion model).
 Exit-capable relay / validator visibility: traffic to route via Tor (not origin).
 Separation of duty: Provider != relays != exit-capable relay / validator.
 
-## 16. Rollout Phases
+## 16. Rollout Phases [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -431,7 +438,7 @@ flowchart LR
 
 ---
 
-## 17. Verification Failure Paths
+## 17. Verification Failure Paths [frozen direction]
 
 ```mermaid
 flowchart TD
@@ -468,7 +475,7 @@ flowchart TD
     no operator"]
 ```
 
-## 18. Operator Transition
+## 18. Operator Transition [frozen direction]
 
 ```mermaid
 flowchart LR
@@ -485,7 +492,7 @@ flowchart LR
     without changing normal escrow semantics"]
 ```
 
-## 19. Scope Change Protocol
+## 19. Scope Change Protocol [frozen direction]
 
 ```mermaid
 sequenceDiagram

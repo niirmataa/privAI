@@ -1,5 +1,16 @@
 # privAI Production System Direction
 
+> **⚠ SUPERSEDED IN BUSINESS/PRODUCT FRAMING BY:**
+> `spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DIRECTION_RESET_PRIVATE_COMPUTE_NETWORK.md`
+>
+> This document is **still useful** for older mechanism references (escrow 2-of-3 mechanics,
+> transport modes, sandbox network modes, on-chain privacy commitments) where explicitly
+> not contradicted by the V0 reset.
+>
+> Where this doc says "marketplace / provider / skill pack / quality / operator canonical"
+> and V0 reset says "private compute lease / compute miner / receipt settlement / operatorless
+> by design" — **V0 reset wins**.
+
 ## Core Rule
 
 We are not designing separate products for "v1", "v2", and "v5".
@@ -12,6 +23,7 @@ That means:
 
 See also:
 - `PRIVAI_PRODUCTION_SYSTEM_DIAGRAMS.md`
+- `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md` (marketplace is off-chain; chain is generic escrow / settlement)
 - `PRIVAI_TOR_GATED_NETWORK_DIRECTION.md` (detailed topology design note — not a frozen product invariant)
 
 ## What We Are Building
@@ -38,13 +50,34 @@ See also:
    - locality declaration: offline-capable / online-required / network-optional
 
 4. **Marketplace layer**
-   - discovery
+   - discovery (off-chain application/protocol layer)
    - contract acceptance (before escrow lock)
-   - payment lock (private PVA escrow)
+   - payment lock (generic private PVA escrow)
    - execution (local / remote API / sandbox rental / hybrid)
    - delivery (hash-commit + buyer confirmation)
    - verification (mechanical → contractual → semantic → settlement)
    - settlement (private on-chain settlement, rule-bound validation, PQ Falcon signatures)
+
+## Marketplace / Chain Boundary
+
+The marketplace is **not** a blockchain object.
+
+The chain is a generic private settlement substrate. Marketplace-specific concepts
+such as skill packs, provider profiles, discovery, task text, delivery artifacts,
+and reputation history must not be assumed to live on-chain.
+
+Escrow remains on-chain, but as a generic FullPrivacy private contract primitive.
+The chain should see escrow / settlement commitments, not marketplace business
+semantics.
+
+The canonical chain path is FullPrivacy-first. Lower-privacy or aggregate rails
+are explicit opt-in compromises, not the default privacy baseline.
+
+Public marketplace discovery is also not the privacy baseline. Discovery should
+default to private / encrypted / credential-gated flows, with transport and mailbox
+metadata hardening treated as core FullPrivacy work.
+
+See `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md` for the canonical boundary.
 
 ## UI Direction
 
@@ -130,6 +163,11 @@ Escrow validation reads `delivery_hash` from **ledger state** — same chain, na
 This is not a smart contract reading external state. It is protocol-level validation
 reading protocol-level data. No oracle needed.
 
+Marketplace boundary:
+- `delivery_hash` is a generic private-contract evidence commitment, not marketplace state
+- it must not encode skill pack, task text, provider profile, artifact contents, or discovery metadata
+- see `PRIVAI_MARKETPLACE_CHAIN_BOUNDARY_FREEZE.md`
+
 ## On-Chain Privacy Model
 
 `privAI` privacy has two distinct layers and both matter:
@@ -162,6 +200,11 @@ The production rule is:
 - and on-chain settlement must preserve `privAI` privacy guarantees rather than exposing
   marketplace details as public metadata.
 
+> **Status note:** On-chain privacy is frozen direction. The commitment structure
+> (LWE ciphertext, Poseidon hashes, encrypted recipient boxes) exists in code.
+> The cryptographic circuit enforcement (proving amounts are well-formed and
+> conserved) is not yet complete — see `PRIVAI_HALO2_PROOF_BOUNDARY_FREEZE.md` §8.
+
 ## Pricing Model
 
 v1 pricing models (frozen):
@@ -192,7 +235,7 @@ In the production direction, normal escrow settlement still requires operator pa
 
 - Release: buyer_sig + operator_sig → merchant
 - Refund: merchant_sig + operator_sig → buyer
-- Recovery: buyer_sig + merchant_sig (after timeout, no operator)
+- Recovery: buyer_sig + merchant_sig (after timeout, no operator) (Note: "merchant" = "provider" in product-layer docs. Code uses merchant_pk_hash.)
 
 Operator validation checks:
 1. Contract hash matches locked contract.
@@ -224,7 +267,7 @@ The production direction is:
 - release / refund / recovery enforced by rules.
 
 A future direction is:
-- dispute quorum of independent providers,
+- dispute panel of independent providers,
 - selected under protocol rules,
 - signing verdicts with Falcon,
 - possibly later weighted by trust / reputation.
