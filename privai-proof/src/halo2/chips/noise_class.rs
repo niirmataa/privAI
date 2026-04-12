@@ -50,7 +50,10 @@ impl NoiseClassChip {
         meta.create_gate("noise sign bit is boolean", |meta| {
             let q = meta.query_selector(q_enable);
             let sign = meta.query_advice(noise_sign, Rotation::cur());
-            vec![q * sign.clone() * (sign - halo2_proofs::plonk::Expression::Constant(Fp::from(1u64)))]
+            vec![
+                q * sign.clone()
+                    * (sign - halo2_proofs::plonk::Expression::Constant(Fp::from(1u64))),
+            ]
         });
 
         meta.create_gate("noise value matches abs and sign", |meta| {
@@ -71,10 +74,7 @@ impl NoiseClassChip {
 
             // Invariant: (0, 0) must always exist in the lookup table because
             // disabled rows query (0, 0) when q_enable == 0.
-            vec![
-                (q.clone() * class, table_class),
-                (q * abs, table_abs),
-            ]
+            vec![(q.clone() * class, table_class), (q * abs, table_abs)]
         });
 
         NoiseClassConfig {
@@ -166,12 +166,7 @@ impl NoiseClassChip {
                     || Value::known(Fp::from(noise_class as u64)),
                 )?;
                 let mut assigned_values = Vec::with_capacity(LWE_DIMENSION_V0 + 1);
-                for (offset, value) in e1
-                    .iter()
-                    .copied()
-                    .chain(std::iter::once(e2))
-                    .enumerate()
-                {
+                for (offset, value) in e1.iter().copied().chain(std::iter::once(e2)).enumerate() {
                     let abs = value.unsigned_abs() as u64;
                     let sign = if value < 0 { 1u64 } else { 0u64 };
 
@@ -225,7 +220,7 @@ mod tests {
         plonk::{Circuit, ConstraintSystem, Error},
     };
 
-    use super::{LWE_DIMENSION_V0, NoiseClassChip, NoiseClassConfig};
+    use super::{NoiseClassChip, NoiseClassConfig, LWE_DIMENSION_V0};
 
     #[derive(Clone)]
     struct NoiseClassCircuit {

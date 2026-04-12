@@ -1,8 +1,8 @@
-use std::collections::HashMap;
-use privai_chain::Hash32;
-use privai_chain::small_payments::{SpendGrant, Receipt, SettlementBatchSummary};
-use privai_chain::tx::{MarketplaceBatchTx, TxCore, TX_TYPE_MARKETPLACE_BATCH};
 use privai_chain::merkle_root;
+use privai_chain::small_payments::{Receipt, SettlementBatchSummary, SpendGrant};
+use privai_chain::tx::{MarketplaceBatchTx, TxCore, TX_TYPE_MARKETPLACE_BATCH};
+use privai_chain::Hash32;
+use std::collections::HashMap;
 
 #[derive(Debug, Default)]
 pub struct MarketplaceOperator {
@@ -42,7 +42,8 @@ impl MarketplaceOperator {
             policy_commit,
             operator_sig: vec![], // Signed off-chain by actual operator keys
         };
-        self.active_grants.insert(grant.grant_commit(), grant.clone());
+        self.active_grants
+            .insert(grant.grant_commit(), grant.clone());
         grant
     }
 
@@ -76,7 +77,7 @@ impl MarketplaceOperator {
 
     /// PHASE 8.4: Batch Settlement Publisher
     /// Tworzy ostateczny `MarketplaceBatchTx` (On-Chain Settlement) na podstawie uzbieranych receiptów.
-    /// 
+    ///
     /// Jeśli `operator_sig_sk` jest Some, batch jest podpisywany kluczem Falcon.
     pub fn publish_settlement_batch(
         &mut self,
@@ -107,7 +108,7 @@ impl MarketplaceOperator {
         }
 
         let receipt_root = merkle_root(receipt_commits);
-        
+
         let total_refund = grant.spend_cap.saturating_sub(total_gross);
 
         let summary = SettlementBatchSummary {
@@ -168,7 +169,7 @@ mod tests {
         let merchant_commit = [0x11; 32];
         let session_scope = [0x22; 32];
         let policy_commit = [0x33; 32];
-        
+
         // 1. Operator wystawia SpendGrant
         let grant = operator.issue_grant(
             merchant_commit,
@@ -226,9 +227,11 @@ mod tests {
         assert!(operator.intake_receipt(receipt2).is_ok());
 
         // 6. Publikacja Settlement Batch (bez podpisu — test nie wymaga kluczy Falcon)
-        let batch_tx = operator.publish_settlement_batch(merchant_commit, grant.grant_commit(), 0, 1000, None).unwrap();
+        let batch_tx = operator
+            .publish_settlement_batch(merchant_commit, grant.grant_commit(), 0, 1000, None)
+            .unwrap();
 
-        // 7. Weryfikacja SettlementTx 
+        // 7. Weryfikacja SettlementTx
         assert_eq!(batch_tx.ticket_nullifiers.len(), 2);
         assert!(batch_tx.ticket_nullifiers.contains(&ticket_1_nullifier));
         assert!(batch_tx.ticket_nullifiers.contains(&ticket_2_nullifier));

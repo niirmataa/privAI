@@ -1,0 +1,1 @@
+﻿# T-080-XIAOMI — Force ComputeLeaseEscrow Minimal Fields Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-080_XIAOMI_FORCE_COMPUTELEASEESCROW_MINIMAL_FIELDS/OUTPUT_XIAOMI.md ``` 

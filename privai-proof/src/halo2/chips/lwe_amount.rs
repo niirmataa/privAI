@@ -1,22 +1,22 @@
 use std::array;
 
 use halo2_gadgets::poseidon::{
-    Hash, Pow5Chip, Pow5Config,
     primitives::{self as poseidon, ConstantLength, P128Pow5T3},
+    Hash, Pow5Chip, Pow5Config,
 };
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
     plonk::{
-        Advice, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector,
-        TableColumn,
+        Advice, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector, TableColumn,
     },
     poly::Rotation,
 };
 
 use crate::halo2::{
-    U32_LIMBS_PER_FIELD, pack_u32_limbs_to_fp, packed_u32_field_len,
+    pack_u32_limbs_to_fp, packed_u32_field_len,
     params::{AmountCipherParams, LWE_DIMENSION_V0, LWE_MODULUS_Q_V0},
+    U32_LIMBS_PER_FIELD,
 };
 
 pub const LWE_CIPHERTEXT_LIMBS_V0: usize = LWE_DIMENSION_V0 + 1;
@@ -199,8 +199,7 @@ impl LweAmountChip {
             let lo = meta.query_advice(limb_lo, Rotation::cur());
             let hi = meta.query_advice(limb_hi, Rotation::cur());
             let two_pow_16 = Expression::Constant(Fp::from(1u64 << 16));
-            let q_minus_one =
-                Expression::Constant(Fp::from(crate::halo2::LWE_MODULUS_Q_V0 - 1));
+            let q_minus_one = Expression::Constant(Fp::from(crate::halo2::LWE_MODULUS_Q_V0 - 1));
 
             vec![
                 q.clone() * (value + slack.clone() - q_minus_one),
@@ -329,7 +328,10 @@ impl LweAmountChip {
 
             vec![
                 q.clone()
-                    * (output - reduced - noise - q_modulus * (wrap_positive.clone() - wrap_negative.clone())),
+                    * (output
+                        - reduced
+                        - noise
+                        - q_modulus * (wrap_positive.clone() - wrap_negative.clone())),
                 q.clone() * wrap_positive.clone() * (wrap_positive - one.clone()),
                 q.clone() * wrap_negative.clone() * (wrap_negative - one.clone()),
                 q * meta.query_advice(noise_wrap_positive, Rotation::cur())
@@ -337,13 +339,7 @@ impl LweAmountChip {
             ]
         });
 
-        let poseidon = Pow5Chip::configure::<P128Pow5T3>(
-            meta,
-            state,
-            partial_sbox,
-            rc_a,
-            rc_b,
-        );
+        let poseidon = Pow5Chip::configure::<P128Pow5T3>(meta, state, partial_sbox, rc_a, rc_b);
 
         LweAmountConfig {
             poseidon,
@@ -670,7 +666,9 @@ impl LweAmountChip {
                 let mut running_acc = Fp::from(0u64);
                 let mut last_acc = None;
 
-                for (offset, (&coeff, value_cell)) in coeffs.iter().zip(value_cells.iter()).enumerate() {
+                for (offset, (&coeff, value_cell)) in
+                    coeffs.iter().zip(value_cells.iter()).enumerate()
+                {
                     let coeff_fp = Fp::from(coeff as u64);
                     let value_fp = value_cell.value().map(|value| *value);
                     let product_fp = value_fp.map(|value| coeff_fp * value);
@@ -1037,10 +1035,7 @@ impl LweAmountChip {
             POSEIDON_WIDTH,
             POSEIDON_RATE,
         >::init(ct_chip, layouter.namespace(|| "init ct_amt poseidon"))?;
-        let ct_output = ct_hasher.hash(
-            layouter.namespace(|| "hash ct_amt_commit"),
-            ct_words,
-        )?;
+        let ct_output = ct_hasher.hash(layouter.namespace(|| "hash ct_amt_commit"), ct_words)?;
 
         let t_hasher = Hash::<
             _,
@@ -1050,10 +1045,7 @@ impl LweAmountChip {
             POSEIDON_WIDTH,
             POSEIDON_RATE,
         >::init(t_chip, layouter.namespace(|| "init t poseidon"))?;
-        let t_output = t_hasher.hash(
-            layouter.namespace(|| "hash t_commit"),
-            t_words,
-        )?;
+        let t_output = t_hasher.hash(layouter.namespace(|| "hash t_commit"), t_words)?;
 
         layouter.constrain_instance(ct_output.cell(), self.config.ct_amt_commit, 0)?;
         layouter.constrain_instance(t_output.cell(), self.config.t_commit, 0)?;
@@ -1104,10 +1096,10 @@ mod tests {
     };
 
     use crate::halo2::{
-        LWE_MODULUS_Q_V0, NoiseClassChip, NoiseClassConfig, params::AmountCipherParams,
+        params::AmountCipherParams, NoiseClassChip, NoiseClassConfig, LWE_MODULUS_Q_V0,
     };
 
-    use super::{LWE_DIMENSION_V0, LweAmountChip, LweAmountConfig};
+    use super::{LweAmountChip, LweAmountConfig, LWE_DIMENSION_V0};
 
     #[derive(Clone)]
     struct LweAmountCircuit {
@@ -1147,13 +1139,7 @@ mod tests {
         ) -> Result<(), Error> {
             let chip = LweAmountChip::new(config, AmountCipherParams::default());
             chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-            let _outputs = chip.assign(
-                layouter,
-                &self.u,
-                self.v,
-                &self.t,
-                &self.r,
-            )?;
+            let _outputs = chip.assign(layouter, &self.u, self.v, &self.t, &self.r)?;
             Ok(())
         }
     }
@@ -1327,8 +1313,16 @@ mod tests {
                 self.wrap_negative,
             )?;
 
-            layouter.constrain_instance(outputs.u_cells[0].cell(), config.lwe_amount.ct_amt_commit, 1)?;
-            layouter.constrain_instance(outputs.ct_amt_commit.cell(), config.lwe_amount.ct_amt_commit, 0)?;
+            layouter.constrain_instance(
+                outputs.u_cells[0].cell(),
+                config.lwe_amount.ct_amt_commit,
+                1,
+            )?;
+            layouter.constrain_instance(
+                outputs.ct_amt_commit.cell(),
+                config.lwe_amount.ct_amt_commit,
+                0,
+            )?;
             layouter.constrain_instance(outputs.t_commit.cell(), config.lwe_amount.t_commit, 0)?;
             Ok(())
         }
@@ -1463,8 +1457,8 @@ mod tests {
         let t_commit = LweAmountChip::poseidon_hash_t(&t);
 
         let circuit = LweAmountCircuit { u, v, t, r };
-        let prover =
-            MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]]).expect("mock prover");
+        let prover = MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]])
+            .expect("mock prover");
         prover.assert_satisfied();
     }
 
@@ -1479,12 +1473,8 @@ mod tests {
         let t_commit = LweAmountChip::poseidon_hash_t(&t);
 
         let circuit = LweAmountCircuit { u, v, t, r };
-        let prover = MockProver::run(
-            17,
-            &circuit,
-            vec![vec![wrong_ct_commit], vec![t_commit]],
-        )
-        .expect("mock prover");
+        let prover = MockProver::run(17, &circuit, vec![vec![wrong_ct_commit], vec![t_commit]])
+            .expect("mock prover");
         assert!(prover.verify().is_err());
     }
 
@@ -1499,12 +1489,8 @@ mod tests {
         let wrong_t_commit = Fp::from(654321);
 
         let circuit = LweAmountCircuit { u, v, t, r };
-        let prover = MockProver::run(
-            17,
-            &circuit,
-            vec![vec![ct_commit], vec![wrong_t_commit]],
-        )
-        .expect("mock prover");
+        let prover = MockProver::run(17, &circuit, vec![vec![ct_commit], vec![wrong_t_commit]])
+            .expect("mock prover");
         assert!(prover.verify().is_err());
     }
 
@@ -1540,13 +1526,7 @@ mod tests {
                 acc + Fp::from(coeff as u64) * Fp::from(value as u64)
             });
 
-        let circuit = LweAmountDotProductCircuit {
-            u,
-            v,
-            t,
-            r,
-            coeffs,
-        };
+        let circuit = LweAmountDotProductCircuit { u, v, t, r, coeffs };
         let prover = MockProver::run(
             18,
             &circuit,
@@ -1567,13 +1547,7 @@ mod tests {
         let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
         let t_commit = LweAmountChip::poseidon_hash_t(&t);
 
-        let circuit = LweAmountDotProductCircuit {
-            u,
-            v,
-            t,
-            r,
-            coeffs,
-        };
+        let circuit = LweAmountDotProductCircuit { u, v, t, r, coeffs };
         let prover = MockProver::run(
             18,
             &circuit,
@@ -1663,7 +1637,10 @@ mod tests {
         let prover = MockProver::run(
             18,
             &circuit,
-            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+            vec![
+                vec![ct_commit, Fp::from(expected_u0 as u64)],
+                vec![t_commit],
+            ],
         )
         .expect("mock prover");
         prover.assert_satisfied();
@@ -1703,7 +1680,10 @@ mod tests {
         let prover = MockProver::run(
             18,
             &circuit,
-            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+            vec![
+                vec![ct_commit, Fp::from(expected_u0 as u64)],
+                vec![t_commit],
+            ],
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());
@@ -1753,7 +1733,10 @@ mod tests {
         let prover = MockProver::run(
             18,
             &circuit,
-            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+            vec![
+                vec![ct_commit, Fp::from(expected_u0 as u64)],
+                vec![t_commit],
+            ],
         )
         .expect("mock prover");
         prover.assert_satisfied();
@@ -1803,7 +1786,10 @@ mod tests {
         let prover = MockProver::run(
             18,
             &circuit,
-            vec![vec![ct_commit, Fp::from(expected_u0 as u64)], vec![t_commit]],
+            vec![
+                vec![ct_commit, Fp::from(expected_u0 as u64)],
+                vec![t_commit],
+            ],
         )
         .expect("mock prover");
         assert!(prover.verify().is_err());

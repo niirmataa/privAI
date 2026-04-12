@@ -1,0 +1,4 @@
+﻿# T-062-XIAOMI-PROVE-MINIMAL-SAFE-TYPES
+
+Pending.
+

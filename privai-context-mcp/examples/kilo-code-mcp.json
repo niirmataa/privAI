@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "privai-context": {
+      "command": "/home/nxms-server/privAI/privai-context-mcp/target/debug/privai-context-mcp",
+      "args": ["serve"],
+      "env": {
+        "PRIVAI_V0_ROOT": "/home/nxms-server/privAI/spec/PRIVAI_V0_PRIVATE_COMPUTE",
+        "VERTEX_PROJECT_ID": "privai-492115",
+        "VERTEX_LOCATION": "europe-west3",
+        "VERTEX_RAG_CORPUS": "projects/privai-492115/locations/europe-west3/ragCorpora/3379951520341557248"
+      }
+    }
+  }
+}

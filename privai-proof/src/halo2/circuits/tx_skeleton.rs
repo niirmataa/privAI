@@ -5,8 +5,8 @@ use halo2_proofs::{
 };
 
 use crate::halo2::{
-    AmountCipherParams, LWE_DIMENSION_V0, LweAmountChip, LweAmountConfig, NoiseClassChip,
-    NoiseClassConfig, NoteCommitChip, NoteCommitConfig, NullifierChip, NullifierConfig,
+    AmountCipherParams, LweAmountChip, LweAmountConfig, NoiseClassChip, NoiseClassConfig,
+    NoteCommitChip, NoteCommitConfig, NullifierChip, NullifierConfig, LWE_DIMENSION_V0,
 };
 
 #[derive(Clone, Debug)]
@@ -86,8 +86,7 @@ impl Circuit<Fp> for PrivaiTxSkeletonCircuit {
         config: Self::Config,
         mut layouter: impl Layouter<Fp>,
     ) -> Result<(), Error> {
-        let lwe_amount_chip =
-            LweAmountChip::new(config.lwe_amount, AmountCipherParams::default());
+        let lwe_amount_chip = LweAmountChip::new(config.lwe_amount, AmountCipherParams::default());
         let noise_class_chip = NoiseClassChip::new(config.noise_class);
         let note_commit_chip = NoteCommitChip::new(config.note_commit);
         let nullifier_chip = NullifierChip::new(config.nullifier);

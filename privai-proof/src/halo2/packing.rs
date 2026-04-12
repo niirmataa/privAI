@@ -70,9 +70,7 @@ mod tests {
         assert_eq!(packed.len(), 1);
 
         let radix = Fp::from(1u64 << 32);
-        let expected = Fp::from(5)
-            + Fp::from(6) * radix
-            + Fp::from(7) * radix.square();
+        let expected = Fp::from(5) + Fp::from(6) * radix + Fp::from(7) * radix.square();
 
         assert_eq!(packed[0], expected);
     }

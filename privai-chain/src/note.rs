@@ -1,11 +1,11 @@
 use serde::{Deserialize, Serialize};
 
 use crate::canonical::{
-    CanonicalEncode, write_bytes, write_fixed, write_option_bytes, write_u8, write_u64,
+    write_bytes, write_fixed, write_option_bytes, write_u64, write_u8, CanonicalEncode,
 };
 use crate::hash::{
-    AUX_DOMAIN, BUNDLE_DOMAIN, NOTE_DOMAIN, NOTE_PAYLOAD_DOMAIN, NULLIFIER_DOMAIN, POLICY_DOMAIN,
-    domain_hash,
+    domain_hash, AUX_DOMAIN, BUNDLE_DOMAIN, NOTE_DOMAIN, NOTE_PAYLOAD_DOMAIN, NULLIFIER_DOMAIN,
+    POLICY_DOMAIN,
 };
 use crate::params::{AEAD_ALG_XCHACHA20_POLY1305, FRODOKEM_640_SHAKE, PRIVAI_V0};
 use crate::primitives::{Amount14, BundleId, Flags8, Hash32, LweCiphertext, Nullifier};
@@ -452,7 +452,10 @@ mod tests {
             RecipientBox::new(vec![1, 2], [3; 24], vec![4, 5], [6; 16], [7; 16]),
         );
 
-        assert_eq!(note.payload_commit(), domain_hash(NOTE_PAYLOAD_DOMAIN, &[&note.payload_bytes()]));
+        assert_eq!(
+            note.payload_commit(),
+            domain_hash(NOTE_PAYLOAD_DOMAIN, &[&note.payload_bytes()])
+        );
     }
 
     #[test]

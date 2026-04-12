@@ -1,0 +1,1 @@
+﻿# T-079-XIAOMI — Force Node Role Implementation Boundary  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-079_XIAOMI_FORCE_NODE_ROLE_IMPLEMENTATION_BOUNDARY/OUTPUT_XIAOMI.md ``` 

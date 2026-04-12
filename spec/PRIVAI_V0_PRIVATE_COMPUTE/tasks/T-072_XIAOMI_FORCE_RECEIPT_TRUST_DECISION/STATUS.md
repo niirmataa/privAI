@@ -1,0 +1,1 @@
+﻿# T-072-XIAOMI — Force Receipt Trust Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-072_XIAOMI_FORCE_RECEIPT_TRUST_DECISION/OUTPUT_XIAOMI.md ``` 

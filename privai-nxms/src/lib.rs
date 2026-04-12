@@ -1,3 +1,5 @@
+pub mod discovery;
+
 use nxms_transport::wire::{NxmsPayloadV2, NXMS_PROTO_V2};
 use privai_chain::small_payments::{Receipt, ServicePaymentPolicy, SpendGrant};
 use serde::{Deserialize, Serialize};

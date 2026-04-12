@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{CanonicalEncode, write_fixed, write_u8, write_u32, write_u64, write_vec};
-use crate::hash::{BLOCK_HEADER_DOMAIN, PROOF_CERT_DOMAIN, domain_hash, merkle_root};
+use crate::canonical::{write_fixed, write_u32, write_u64, write_u8, write_vec, CanonicalEncode};
+use crate::hash::{domain_hash, merkle_root, BLOCK_HEADER_DOMAIN, PROOF_CERT_DOMAIN};
 use crate::params::PRIVAI_V0;
 use crate::primitives::Hash32;
 use crate::tx::Transaction;
@@ -334,9 +334,9 @@ pub fn statement_root(body: &BlockBody) -> Hash32 {
 
 pub fn proof_cert_root(proof_certificates: &[ProofCertificate]) -> Hash32 {
     merkle_root(
-        proof_certificates
-            .iter()
-            .map(|certificate| domain_hash(PROOF_CERT_DOMAIN, &[&certificate.to_canonical_bytes()])),
+        proof_certificates.iter().map(|certificate| {
+            domain_hash(PROOF_CERT_DOMAIN, &[&certificate.to_canonical_bytes()])
+        }),
     )
 }
 
@@ -361,10 +361,7 @@ impl CanonicalEncode for PeerInfo {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ConsensusMsg {
     /// Proposer wysyła blok do walidacji.
-    Proposal {
-        block: Block,
-        proposer_sig: Vec<u8>,
-    },
+    Proposal { block: Block, proposer_sig: Vec<u8> },
 
     /// Walidator głosuje prevote (akceptuje blok do dalszej tury).
     Prevote(Vote),
@@ -408,9 +405,7 @@ pub enum ConsensusMsg {
     },
 
     /// Żądanie listy peerów od innego węzła (peer discovery).
-    GetPeers {
-        requester_pk_hash: Hash32,
-    },
+    GetPeers { requester_pk_hash: Hash32 },
 
     /// Odpowiedź z listą peerów (peer discovery).
     /// Lista jest podpisana kluczem Falcon nadawcy (ochrona przed Eclipse attack).
@@ -446,7 +441,9 @@ impl ConsensusMsg {
             Self::ViewChange(vc) => vc.height,
             Self::Ping { height, .. } => *height,
             Self::SyncRequest { from_height, .. } => *from_height,
-            Self::SyncResponse { blocks, .. } => blocks.first().map(|b| b.header.height).unwrap_or(0),
+            Self::SyncResponse { blocks, .. } => {
+                blocks.first().map(|b| b.header.height).unwrap_or(0)
+            }
             Self::Gossip { .. } | Self::GetPeers { .. } | Self::PeersList { .. } => 0,
         }
     }
@@ -458,8 +455,11 @@ impl ConsensusMsg {
             Self::QuorumCert(qc) => qc.round,
             Self::ViewChange(vc) => vc.new_round,
             Self::Ping { round, .. } => *round,
-            Self::SyncRequest { .. } | Self::SyncResponse { .. } | Self::Gossip { .. }
-            | Self::GetPeers { .. } | Self::PeersList { .. } => 0,
+            Self::SyncRequest { .. }
+            | Self::SyncResponse { .. }
+            | Self::Gossip { .. }
+            | Self::GetPeers { .. }
+            | Self::PeersList { .. } => 0,
         }
     }
 }
@@ -467,7 +467,10 @@ impl ConsensusMsg {
 impl CanonicalEncode for ConsensusMsg {
     fn encode(&self, out: &mut Vec<u8>) {
         match self {
-            Self::Proposal { block, proposer_sig } => {
+            Self::Proposal {
+                block,
+                proposer_sig,
+            } => {
                 write_u8(out, 0x01);
                 block.encode(out);
                 crate::canonical::write_bytes(out, proposer_sig);
@@ -488,25 +491,41 @@ impl CanonicalEncode for ConsensusMsg {
                 write_u8(out, 0x05);
                 vc.encode(out);
             }
-            Self::Ping { height, round, sender_pk_hash } => {
+            Self::Ping {
+                height,
+                round,
+                sender_pk_hash,
+            } => {
                 write_u8(out, 0x10);
                 write_u64(out, *height);
                 write_u32(out, *round);
                 write_fixed(out, sender_pk_hash);
             }
-            Self::SyncRequest { from_height, to_height, requester_pk_hash } => {
+            Self::SyncRequest {
+                from_height,
+                to_height,
+                requester_pk_hash,
+            } => {
                 write_u8(out, 0x20);
                 write_u64(out, *from_height);
                 write_u64(out, *to_height);
                 write_fixed(out, requester_pk_hash);
             }
-            Self::SyncResponse { blocks, qcs, sender_pk_hash } => {
+            Self::SyncResponse {
+                blocks,
+                qcs,
+                sender_pk_hash,
+            } => {
                 write_u8(out, 0x21);
                 write_vec(out, blocks);
                 write_vec(out, qcs);
                 write_fixed(out, sender_pk_hash);
             }
-            Self::Gossip { tx, sender_pk_hash, hops } => {
+            Self::Gossip {
+                tx,
+                sender_pk_hash,
+                hops,
+            } => {
                 write_u8(out, 0x30);
                 tx.encode(out);
                 write_fixed(out, sender_pk_hash);
@@ -516,7 +535,11 @@ impl CanonicalEncode for ConsensusMsg {
                 write_u8(out, 0x40);
                 write_fixed(out, requester_pk_hash);
             }
-            Self::PeersList { peers, sender_pk_hash, falcon_sig } => {
+            Self::PeersList {
+                peers,
+                sender_pk_hash,
+                falcon_sig,
+            } => {
                 write_u8(out, 0x41);
                 write_vec(out, peers);
                 write_fixed(out, sender_pk_hash);
@@ -529,7 +552,7 @@ impl CanonicalEncode for ConsensusMsg {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tx::{TX_TYPE_TRANSFER_NOTE, TransferNoteTx, TxCore};
+    use crate::tx::{TransferNoteTx, TxCore, TX_TYPE_TRANSFER_NOTE};
 
     #[test]
     fn consensus_msg_type_and_height_round() {

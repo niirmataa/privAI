@@ -1,584 +1,399 @@
-# privAI v0 Concrete Formats
+# privAI V0 Concrete Formats (Updated)
 
-Status: legacy wire-format reference in migration.
-Canonicality: non-canonical. Do czasu nowego canonical formats doc ten plik jest tylko pomocniczy i nie moze samodzielnie definiowac finalnego wire format.
-Owner: privAI protocol formats.
-Depends on: `spec/PRIVAI_SYSTEM_FREEZE_FOR_PVA_DRAFT.md`.
-Superseded by: planowany `spec/PRIVAI_CANONICAL_FORMATS.md`.
+**Status:** updated to current system state  
+**Data:** 2026-04-12  
+**Zakres:** konkretne formaty obiektów i payloadów dla privAI V0 — zgodne z kodem
 
-## 1. Cel dokumentu
+---
 
-Ten dokument zamraza konkretne formaty obiektow i payloadow dla `privAI v0`.
-Ma byc pomostem miedzy architektura a implementacja.
+## 1. Canonical primitives
 
-Zakres:
+Wszystkie hashe: BLAKE3.  
+Wszystkie liczby: little-endian.  
+Wszystkie ciągi bajtów: `u32_len || bytes`.
 
-- canonical primitives,
-- `ReceiveBundle`,
-- `SpendPolicy`,
-- `RecipientBox`,
-- `Note`,
-- `Nullifier`,
-- `TransferNoteTx`,
-- `PRIVAI/1` message types nad NXMS.
-
-## 2. Canonical primitives
-
-Wszystkie hashe i bindingi sa liczone przez `BLAKE3`.
-Wszystkie liczby calkowite serializujemy little-endian.
-Wszystkie ciagi bajtow serializujemy jako `u32_len || bytes`.
-
-Typy bazowe:
-
-```text
+```
 Hash32      = [u8; 32]
 BundleId    = [u8; 16]
 ContextId   = [u8; 16]
 BlockHeight = u64
-Amount14    = u16   where value < 16384
+Amount14    = u16   where value < 16384  (proof lane only)
+LedgerAmount = u64  (escrow/settlement economics)
 Flags8      = u8
 ```
 
 Funkcje domenowe:
 
-```text
-H_note(x)      = BLAKE3("privai:note:v0"      || x)
-H_policy(x)    = BLAKE3("privai:policy:v0"    || x)
-H_bundle(x)    = BLAKE3("privai:bundle:v0"    || x)
-H_nullifier(x) = BLAKE3("privai:nullifier:v0" || x)
-H_stmt(x)      = BLAKE3("privai:stmt:v0"      || x)
-H_aux(x)       = BLAKE3("privai:aux:v0"       || x)
+```
+H_note(x)      = BLAKE3("privai:note:v0"                || x)
+H_policy(x)    = BLAKE3("privai:policy:v0"               || x)
+H_bundle(x)    = BLAKE3("privai:bundle:v0"               || x)
+H_nullifier(x) = BLAKE3("privai:nullifier:v0"            || x)
+H_stmt(x)      = BLAKE3("privai:stmt:v0"                 || x)
+H_aux(x)       = BLAKE3("privai:aux:v0"                  || x)
+H_falcon(x)    = BLAKE3("privai:falcon-pk:v0"            || x)
+H_lease(x)     = BLAKE3("privai:compute-lease-policy:v1" || x)
+H_receipt(x)   = BLAKE3("privai:compute-lease-receipt:v1"|| x)
+H_window(x)    = BLAKE3("privai:window-telemetry:v1"     || x)
+H_env(x)       = BLAKE3("privai:env-fingerprint:v1"      || x)
+H_manifest(x)  = BLAKE3("privai:startup-manifest:v1"     || x)
 ```
 
-## 3. LWE ciphertext encoding
+---
 
-Kwota noty jest kodowana jako swiezy ciphertext LWE.
-Dla v0 przyjmujemy:
-
-```text
-q = 4294967291
-n = 1024
-```
-
-Canonical encoding:
+## 2. Resource Classification
 
 ```rust
-struct LweCiphertext {
-    a: [u32; 1024],
-    b: u32,
+enum GpuClass { A100 = 0x01, H100 = 0x02, V100 = 0x03, T4 = 0x04, Generic = 0xFF }
+enum CpuTier  { X86_64 = 0x01, Arm64 = 0x02, Generic = 0xFF }
+
+enum ResourceClass {
+    Gpu { class: GpuClass, vram_mb: u32 },              // tag 0x01
+    Cpu { tier: CpuTier, cores: u16 },                  // tag 0x02
+    Memory { ram_mb: u32 },                             // tag 0x03
+    Composite { gpu, cpu, ram_mb, storage_mb },          // tag 0x04
 }
+
+enum PrivacyClass { Vm = 0x01, Container = 0x02, Sandbox = 0x03, ConfidentialRuntime = 0x04 }
+enum NetworkMode  { Isolated = 0x01, NxmsOnly = 0x02, TorGated = 0x03, InternetExit = 0x04 }
+enum SettlementMode { AllOrNothing = 0x01, ProRata = 0x02 }
+enum RoleType { Validator = 0x01, ComputeMiner = 0x02, Relay = 0x03, Mailbox = 0x04, ExitNode = 0x05 }
+enum HeartbeatStatus { Active = 0x01, Missed = 0x02, Terminated = 0x03 }
 ```
 
-Zasady:
+---
 
-- kazdy element `a[i]` i `b` jest interpretowany mod `q`,
-- serializacja to 1024 razy `u32_le` plus jedno `u32_le`,
-- rozmiar canonical = `4100 B`.
-
-## 4. ReceiveBundle
-
-`ReceiveBundle` jest jednorazowym ukrytym adresem odbiorczym.
-Jest naturalnym nastepca `prekeys` z `nexum-cli`.
+## 3. ComputeLeasePolicy
 
 ```rust
-struct ReceiveBundle {
+struct ComputeLeasePolicy {
     version: u8,
-    bundle_id: BundleId,
-    expires_at: u64,
-    flags: u8,
-    one_time_falcon_pk: Vec<u8>,
-    one_time_frodo_pk: Vec<u8>,
-    route_hint: Option<Vec<u8>>,
+    resource_class: ResourceClass,
+    min_duration_units: u64,
+    max_duration_units: u64,
+    price_aPVA_per_unit: LedgerAmount,
+    privacy_class: PrivacyClass,
+    network_mode: NetworkMode,
+    settlement_mode: SettlementMode,
+    meter_version: u8,
+    timeout_blocks: u64,
+    window_duration_blocks: u64,
+    total_windows: u32,
+    benchmark_floor_ms: u32,
+    benchmark_interval: u32,
+    degraded_weight_permille: u16,
+}
+
+commitment = H_lease(canonical(ComputeLeasePolicy))
+```
+
+---
+
+## 4. ComputeOffering
+
+```rust
+struct ComputeOffering {
+    resource_class: ResourceClass,
+    price_aPVA_per_unit: LedgerAmount,
+    min_duration_units: u64,
+    max_duration_units: u64,
+    network_mode: NetworkMode,
+    privacy_class: PrivacyClass,
+    scoped_offering_id: Hash32,
+    availability_start: u64,
+    availability_end: u64,
+    meter_version: u8,
+    miner_role_key_hash: Hash32,
+    benchmark_floor_ms: u32,
 }
 ```
 
-Pole `route_hint` jest opcjonalne i moze zawierac:
+---
 
-- mailbox endpoint,
-- onion hint,
-- katalog marketplace,
-- identyfikator warstwy relay.
+## 5. DiscoveryQuery
 
-Commitment bundle:
-
-```text
-bundle_commit = H_bundle(canonical_receive_bundle)
+```rust
+struct DiscoveryQuery {
+    min_resource_class: ResourceClass,
+    max_price_aPVA_per_unit: LedgerAmount,
+    min_duration_units: u64,
+    preferred_network_mode: NetworkMode,
+    preferred_privacy_class: PrivacyClass,
+    response_kem_pk: Vec<u8>,
+    expires_at_unix: u64,
+}
 ```
 
-Zasady v0:
+---
 
-- `version = 0x00`
-- `flags`:
-  - `0x01` uploaded
-  - `0x02` used
-  - `0x04` revoked
-- bundle jest jednorazowy,
-- sender nie powinien uzywac bundle po `expires_at`.
+## 6. ComputeLeaseReceipt
 
-## 5. SpendPolicy
+```rust
+struct ComputeLeaseReceipt {
+    session_id: Hash32,
+    total_windows: u32,
+    passed_windows: u32,
+    degraded_windows: u32,
+    window_hashes_root: Hash32,     // Merkle root of per-window hashes
+    lease_policy_commit: Hash32,
+    miner_role_key_hash: Hash32,
+    meter_version: u8,
+    miner_signature: Vec<u8>,       // Falcon
+}
 
-Spend policy opisuje warunek wydania noty.
+commitment = H_receipt(canonical(ComputeLeaseReceipt))
+```
+
+---
+
+## 7. Window Telemetry (off-chain, hash-chained)
+
+```rust
+struct WindowTelemetryRecord {
+    window_index: u32,
+    window_start_height: u64,
+    challenge_hash: Hash32,
+    response_time_ms: u32,
+    availability: bool,
+    performance: Option<bool>,   // None = N/A (no benchmark this window)
+    heartbeat: HeartbeatStatus,
+    gpu_utilization: Option<u8>,
+    cpu_utilization: Option<u8>,
+    ram_used_mb: Option<u32>,
+    previous_record_hash: Hash32,  // hash chain
+    miner_signature: Vec<u8>,      // Falcon
+}
+
+record_hash = H_window(canonical(WindowTelemetryRecord))
+```
+
+---
+
+## 8. Startup Manifest (off-chain)
+
+```rust
+struct EnvironmentFingerprint {
+    binary_hash: Hash32,
+    config_hash: Hash32,
+    os_kernel_hash: Hash32,
+    gpu_driver_hash: Option<Hash32>,
+    compute_runtime_hash: Option<Hash32>,
+    process_hashes: Vec<Hash32>,
+    disk_fingerprint: Hash32,
+    timestamp_unix: u64,
+}
+
+struct StartupManifest {
+    session_id: Hash32,
+    env_fingerprint_commit: Hash32,
+    miner_role_key_hash: Hash32,
+    start_timestamp_unix: u64,
+    start_block_height: u64,
+    miner_signature: Vec<u8>,      // Falcon
+}
+
+env_commit = H_env(canonical(EnvironmentFingerprint))
+manifest_commit = H_manifest(canonical(StartupManifest))
+```
+
+---
+
+## 9. SpendPolicy (updated)
 
 ```rust
 enum SpendPolicy {
-    Single {
-        falcon_pk_hash: Hash32,
-    },
-    Escrow2of3 {
-        buyer_pk_hash: Hash32,
-        seller_pk_hash: Hash32,
-        arbiter_pk_hash: Hash32,
+    Single { falcon_pk_hash: Hash32 },                              // tag 0x01
+    MarketplaceSettlement { ... },                                  // tag 0x02 — DEPRECATED
+    Escrow2of3 { buyer, merchant, operator, timeout_block },        // tag 0x03 — BRIDGE
+    ComputeLeaseEscrow {                                            // tag 0x04 — NEW
+        user_pk_hash: Hash32,
+        miner_pk_hash: Hash32,
+        lease_policy_commit: Hash32,
         timeout_block: u64,
+        settlement_mode: SettlementMode,
     },
 }
+
+commitment = H_policy(canonical(SpendPolicy))
 ```
 
-Canonical `policy_tag`:
+---
 
-```text
-0x01 = Single
-0x02 = Escrow2of3
-```
-
-Commitment polityki:
-
-```text
-spend_policy_commit = H_policy(canonical_spend_policy)
-```
-
-## 6. RecipientBox
-
-`RecipientBox` zawiera dane potrzebne odbiorcy do rozpoznania i wydania noty.
-Nie moze byc jedynym zrodlem prawdy o funduszach, ale musi byc wystarczajacy do odtworzenia witnessa odbiorczego.
-
-### 6.1. On-chain box
+## 10. EscrowAction (updated)
 
 ```rust
-struct RecipientBox {
-    version: u8,
-    kem_alg: u8,
-    aead_alg: u8,
+enum EscrowAction {
+    Release = 0x01,
+    Refund = 0x02,
+    RecoveryRelease = 0x03,     // already operatorless
+    ProRataSplit = 0x04,        // NEW — 1 input → 2 outputs
+}
+```
+
+---
+
+## 11. TargetRecipient (updated)
+
+```rust
+enum TargetRecipient {
+    One(SignerRole),                  // output to one recipient
+    Either(SignerRole, SignerRole),   // output to either (recovery)
+    Two(SignerRole, SignerRole),      // output to both (pro-rata) — NEW
+}
+```
+
+---
+
+## 12. Settlement
+
+```rust
+fn calculate_settlement(total_amount, receipt, policy) -> SettlementResult {
+    effective = receipt.passed + (receipt.degraded * policy.degraded_weight / 1000)
+    miner_share = total_amount * effective / receipt.total_windows
+    user_share = total_amount - miner_share
+    // integer arithmetic, remainder to user
+}
+
+struct SettlementResult {
+    miner_share: LedgerAmount,
+    user_share: LedgerAmount,
+    effective_windows: u64,
+    total_windows: u64,
+}
+```
+
+---
+
+## 13. ComputeLeaseEscrowPolicy (on-chain)
+
+```rust
+struct ComputeLeaseEscrowPolicy {
+    tag: u8,                         // 0x04
+    user_pk_hash: Hash32,
+    miner_pk_hash: Hash32,
+    operator_pk_hash: Hash32,        // Phase 1 bridge only
+    lease_policy_commit: Hash32,
+    locked_amount: LedgerAmount,
+    timeout_block_height: u64,
+}
+
+fn evaluate_settlement(receipt, policy) -> SettlementResult {
+    // 1. Verify receipt matches locked policy
+    // 2. Verify miner identity
+    // 3. Calculate deterministic split
+}
+```
+
+---
+
+## 14. Identity (Phase 0-5)
+
+```rust
+struct ValidatorRoleKey { falcon_pk_hash: Hash32 }     // frozen, from vault
+struct ComputeMinerRoleKey { falcon_pk_hash: Hash32 }   // independent, generated
+
+// Two independent keys. No hidden root (Phase 6+).
+// Falcon is signing tool, not identity.
+```
+
+---
+
+## 15. Version Domains
+
+```rust
+enum VersionDomain {
+    ChainProtocol     = 0x01,  // chain-activated
+    TxVersion         = 0x02,  // chain-activated
+    EscrowPolicy      = 0x03,  // chain-activated
+    ProofSystem       = 0x04,  // chain-activated
+    NxmsTransport     = 0x05,  // handshake
+    MailboxProtocol   = 0x06,  // handshake
+    ComputeLease      = 0x07,  // declared per session
+    MeterProtocol     = 0x08,  // declared per session
+    DiscoveryProtocol = 0x09,  // declared per session
+}
+
+// Hard rule: no silent downgrade from FullPrivacy.
+// Enforced by VersionRegistry::negotiate().
+```
+
+---
+
+## 16. Relay (onion routing)
+
+```rust
+struct RelayLayer {
+    next_hop: String,
+    next_hop_port: u16,
+    encrypted_payload: Vec<u8>,
+    is_final: bool,
+}
+
+struct RelayEnvelope {
     kem_ct: Vec<u8>,
-    nonce: [u8; 24],
-    ciphertext: Vec<u8>,
-    tag: [u8; 16],
-    hint: [u8; 16],
+    nonce: Vec<u8>,
+    encrypted_layer: Vec<u8>,
+    tag: Vec<u8>,
+}
+
+struct RelayRoute {
+    hops: Vec<RelayHop>,
+    destination: String,
+    destination_port: u16,
 }
 ```
 
-Wartosci v0:
+---
 
-```text
-version  = 0x00
-kem_alg  = 0x01  // FrodoKEM-640-SHAKE
- aead_alg = 0x01  // XChaCha20-Poly1305
+## 17. On-Chain vs Off-Chain
+
+**On-chain:**
+- OutputNote (encrypted, Amount14)
+- Nullifier
+- TransferNoteTx
+- ComputeLeaseEscrowPolicy
+- Lease policy commitment (hash)
+- Receipt commitment (hash)
+- Settlement result
+- Block height (clock)
+
+**Off-chain:**
+- ComputeLeasePolicy (full)
+- ComputeOffering
+- DiscoveryQuery / Response
+- Window telemetry records (hash-chained)
+- Startup manifest + environment fingerprint
+- Aggregate receipt (full)
+- Prompts / workloads / outputs
+- VM session data
+
+---
+
+## 18. Deprecated (legacy marketplace)
+
+```
+MarketplaceBatchTx     — DEPRECATED, stays in code for compatibility
+MarketplaceSettlement  — DEPRECATED, ledger rejects in FullPrivacy
+MarketOfferBody        — DEPRECATED
+MarketAcceptBody       — DEPRECATED
+InferenceRequestBody   — DEPRECATED
+InferenceResponseBody  — DEPRECATED
 ```
 
-`hint` nie jest sekretne. Moze sluzyc do:
-
-- szybszego skanowania walleta,
-- indeksowania lokalnego,
-- powiazania z `bundle_id` bez ujawniania calego bundle.
-
-### 6.2. Plaintext box
-
-```rust
-struct RecipientBoxPlaintext {
-    version: u8,
-    bundle_id: BundleId,
-    note_commit: Hash32,
-    amount: Amount14,
-    witness_seed: Hash32,
-    nullifier_key: Hash32,
-    spend_policy_opening: Vec<u8>,
-    aux_opening: Vec<u8>,
-    sender_memo: Option<Vec<u8>>,
-}
-```
-
-Zasady:
-
-- `witness_seed` sluzy do odtworzenia prywatnego witnessa noty,
-- `nullifier_key` jest sekretem spendera do wyliczenia `nullifier`,
-- `spend_policy_opening` pozwala odbiorcy odtworzyc pelny `SpendPolicy`,
-- `aux_opening` sluzy do otwarcia `aux_commit`,
-- `sender_memo` jest opcjonalne i nigdy nie trafia jawnie na chain.
-
-## 7. Aux commitment
-
-`aux_commit` w nocie powinien wiazac dane potrzebne do przyszlego proofa wydania.
-
-Przyklad v0:
-
-```rust
-struct AuxWitness {
-    version: u8,
-    amount: Amount14,
-    witness_seed: Hash32,
-    noise_class: u8,
-    bundle_id: BundleId,
-}
-```
-
-Commitment:
-
-```text
-aux_commit = H_aux(canonical_aux_witness)
-```
-
-W `RecipientBoxPlaintext` nie trzeba przenosic calego witnessa LWE, jesli mozna go deterministycznie odtworzyc z `witness_seed`.
-
-## 8. Note i note_commit
-
-On-chain output:
-
-```rust
-struct OutputNote {
-    note_commit: Hash32,
-    spend_policy_commit: Hash32,
-    ct_amt: LweCiphertext,
-    aux_commit: Hash32,
-    recipient_box: RecipientBox,
-}
-```
-
-`note_commit` nie jest dowolne.
-Wyliczamy je jako:
-
-```text
-note_commit = H_note(
-    canonical(spend_policy_commit) ||
-    canonical(ct_amt) ||
-    canonical(aux_commit) ||
-    canonical(recipient_box)
-)
-```
-
-Zasada:
-
-- `note_commit` zawsze hash'uje caly output bez pola `note_commit`.
-
-## 9. Nullifier
-
-`Nullifier` zuzywa note bez ujawniania adresu odbiorcy.
-
-```rust
-struct Nullifier(Hash32);
-```
-
-Definicja v0:
-
-```text
-nullifier = H_nullifier(note_commit || nullifier_key)
-```
-
-Wymagania:
-
-- `nullifier_key` jest znany tylko spenderowi,
-- dwa rozne noty nie powinny dawac tego samego nullifiera,
-- ten sam note zawsze daje ten sam nullifier.
-
-## 10. Public statement binding
-
-Kazda transakcja musi miec publiczny binding do statementu proofa.
-
-```text
-statement_commit = H_stmt(
-    tx_version ||
-    all_input_note_commits ||
-    all_input_nullifiers ||
-    all_output_note_commits ||
-    fee ||
-    tx_type
-)
-```
-
-Dzieki temu:
-
-- proof moze byc inline albo batch,
-- tx i proof sa zwiazane jednoznacznie,
-- blok moze zawierac jeden proof dla wielu tx, jesli kazda tx ma poprawny `statement_commit`.
-
-## 11. TransferNoteTx
-
-v0 zamraza taki publiczny format transakcji:
-
-```rust
-struct TransferNoteTx {
-    version: u8,
-    tx_type: u8,
-    inputs: Vec<InputRef>,
-    input_nullifiers: Vec<Nullifier>,
-    outputs: Vec<OutputNote>,
-    fee: u64,
-    statement_commit: Hash32,
-    auth: Vec<InputAuth>,
-}
-
-struct InputRef {
-    note_commit: Hash32,
-}
-
-struct InputAuth {
-    policy_tag: u8,
-    signer_pks: Vec<Vec<u8>>,
-    signatures: Vec<Vec<u8>>,
-}
-```
-
-Wartosci:
-
-```text
-version = 0x00
-tx_type = 0x01  // TransferNote
-```
-
-Zasady walidacji:
-
-- `inputs.len() == input_nullifiers.len() == auth.len()` dla v0,
-- kazdy input musi istniec i nie byc juz zuzyty,
-- kazdy `InputAuth` musi pasowac do polityki input note,
-- `statement_commit` musi odpowiadac polom transakcji,
-- proof zwiazany z `statement_commit` musi byc wazny,
-- conservation i range checks sa w proofie,
-- `nullifier` uniqueness jest sprawdzana przez ledger.
-
-## 12. Escrow notes
-
-Escrow nie jest osobnym systemem formatow.
-To tylko specjalny `SpendPolicy`.
-
-Przykladowe zastosowanie:
-
-- buyer tworzy output note z `Escrow2of3`,
-- release wymaga podpisow buyer+seller albo seller+arbiter,
-- po `timeout_block` refund path moze byc odblokowany przez odpowiednia polityke i proof logic.
-
-Mozliwe `tx_type` v0:
-
-```text
-0x01 = TransferNote
-0x02 = EscrowOpen
-0x03 = EscrowResolve
-0x04 = Rebalance
-0x05 = ModelRegister
-0x06 = StakeDeposit
-0x07 = StakeWithdraw
-```
-
-## 13. Canonical hashing of Falcon keys
-
-Aby nie nosic stale calych kluczy w politykach, hashujemy publiczne klucze Falcon tak:
-
-```text
-falcon_pk_hash = BLAKE3("privai:falcon-pk:v0" || pk_bytes)
-```
-
-Ten hash trafia do `SpendPolicy`.
-Pelne klucze publiczne pojawiaja sie w `InputAuth`, gdy trzeba zweryfikowac podpis.
-
-## 14. PRIVAI/1 over NXMS
-
-`nxms-transport` ma byc rozszerzony z `ESCROW/1` do `PRIVAI/1`.
-
-Zmiany logiczne:
-
-- `app_proto = "PRIVAI/1"`
-- `escrow_id_hex` staje sie ogolnym `context_id_hex`
-- `msg_type` rozszerzamy poza escrow
-
-### 14.1. Envelope rules
-
-W v0 zachowujemy obecny model NXMS:
-
-- `from`
-- `to`
-- `seq`
-- PQ encryption/authentication
-- anti-replay po `(context_id, from, seq)`
-
-### 14.2. Message types
-
-```rust
-enum PrivAiMsgType {
-    BundleOffer,
-    BundleRequest,
-    BundleDelivery,
-    WitnessUpdate,
-    MarketOffer,
-    MarketAccept,
-    InferenceRequest,
-    InferenceResponse,
-    EscrowOpen,
-    EscrowResolve,
-    ProofServiceRequest,
-    ProofServiceResponse,
-    Error,
-}
-```
-
-## 15. PRIVAI/1 payload bodies
-
-### 15.1. BundleOffer
-
-```rust
-struct BundleOfferBody {
-    bundle_id: BundleId,
-    bundle_commit: Hash32,
-    expires_at: u64,
-    route_hint: Option<Vec<u8>>,
-}
-```
-
-### 15.2. BundleRequest
-
-```rust
-struct BundleRequestBody {
-    requested_count: u16,
-    min_expiry: u64,
-}
-```
-
-### 15.3. BundleDelivery
-
-```rust
-struct BundleDeliveryBody {
-    bundle_id: BundleId,
-    receive_bundle_bytes: Vec<u8>,
-}
-```
-
-### 15.4. WitnessUpdate
-
-`WitnessUpdate` sluzy do pomocniczej synchronizacji odbiorcy po transferze.
-Fundusze nie zaleza od tej wiadomosci, ale wallet moze szybciej zaktualizowac lokalny stan.
-
-```rust
-struct WitnessUpdateBody {
-    note_commit: Hash32,
-    bundle_id: BundleId,
-    recipient_box_mirror: Vec<u8>,
-    sender_hint: Option<Vec<u8>>,
-}
-```
-
-### 15.5. MarketOffer
-
-```rust
-struct MarketOfferBody {
-    model_id: Hash32,
-    operator_id: Hash32,
-    price_model: Vec<u8>,
-    settlement_policy: u8,
-    metadata_box: Option<Vec<u8>>,
-}
-```
-
-### 15.6. MarketAccept
-
-```rust
-struct MarketAcceptBody {
-    model_id: Hash32,
-    session_context: ContextId,
-    payment_bundle_id: BundleId,
-    escrow_required: bool,
-}
-```
-
-### 15.7. InferenceRequest
-
-```rust
-struct InferenceRequestBody {
-    session_context: ContextId,
-    model_id: Hash32,
-    prompt_box: Vec<u8>,
-    payment_note_commit: Option<Hash32>,
-}
-```
-
-### 15.8. InferenceResponse
-
-```rust
-struct InferenceResponseBody {
-    session_context: ContextId,
-    response_box: Vec<u8>,
-    settle_hint: Option<Vec<u8>>,
-}
-```
-
-### 15.9. ProofServiceRequest
-
-```rust
-struct ProofServiceRequestBody {
-    statement_commit: Hash32,
-    tx_refs: Vec<Hash32>,
-    witness_box: Vec<u8>,
-}
-```
-
-### 15.10. ProofServiceResponse
-
-```rust
-struct ProofServiceResponseBody {
-    statement_commit: Hash32,
-    proof_bytes: Vec<u8>,
-    verifier_hint: Option<Vec<u8>>,
-}
-```
-
-### 15.11. Error
-
-```rust
-struct PrivAiErrorBody {
-    context_id: ContextId,
-    code: String,
-    reason: String,
-}
-```
-
-## 16. What is on-chain vs off-chain
-
-On-chain:
-
-- `OutputNote`
-- `Nullifier`
-- `TransferNoteTx`
-- stake/model registration data
-- escrow settlement tx
-
-Off-chain przez NXMS:
-
-- bundle exchange
-- witness updates
-- prompt/response payloads
-- proof service witness transport
-- marketplace negotiation
-
-On-chain encrypted but public carrier:
-
-- `RecipientBox`
-
-## 17. First implementation targets
-
-Najblizszy krok implementacyjny po tym specu:
-
-1. `privai-crypto`: typy `Hash32`, `LweCiphertext`, hash helpers
-2. `privai-wallet`: `ReceiveBundle`, `RecipientBox`, `Nullifier` derivation
-3. `privai-ledger`: `OutputNote`, `TransferNoteTx`, canonical serialization
-4. `privai-nxms`: `PRIVAI/1` payload enum i `context_id`
-5. `privai-proof`: `statement_commit` binding i witness schema
-
-## 18. Freeze points
-
-Na potrzeby v0 zamrazamy juz teraz:
-
-- `q = 2^32 - 5`
-- `p = 2^14`
-- note-based ledger
-- `ReceiveBundle` jako hidden address primitive
-- `Nullifier = H_nullifier(note_commit || nullifier_key)`
-- `RecipientBox` jako on-chain encrypted delivery
-- `statement_commit` jako binding tx-proof
-- `PRIVAI/1` jako generalizacja NXMS
-
-To wystarczy, zeby przejsc do scaffoldingu crates i pierwszych struktur kodu.
+---
+
+## 19. What is frozen
+
+- `q = 2^32 - 5`, `p = 2^14`
+- Note-based ledger
+- Nullifier = H_nullifier(note_commit || nullifier_key)
+- RecipientBox jako on-chain encrypted delivery
+- statement_commit jako binding tx-proof
+- falcon_pk_hash = BLAKE3("privai:falcon-pk:v0" || pk_bytes)
+- Escrow2of3 as bridge (untouched)
+- RecoveryRelease as operatorless anchor
+- 9 version domains
+
+---
+
+*Document version: 2026-04-12. Updated from legacy marketplace formats to V0 private compute model. Matches current code state.*

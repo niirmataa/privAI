@@ -1,0 +1,1 @@
+﻿# T-078-XIAOMI — Force Runtime Privacy Classes Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-078_XIAOMI_FORCE_RUNTIME_PRIVACY_CLASSES_DECISION/OUTPUT_XIAOMI.md ``` 

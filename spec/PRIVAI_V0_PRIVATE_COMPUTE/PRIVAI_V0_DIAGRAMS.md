@@ -1,415 +1,438 @@
-# V0 Private Compute Network — Diagrams
+# V0 Private Compute Network — Diagrams (Updated)
 
-> **Date:** 2026-04-11
-> **Companion to:** `PRIVAI_V0_DIRECTION_RESET_PRIVATE_COMPUTE_NETWORK.md`
-> **Status:** Visual companion for V0 canonical direction
+> **Date:** 2026-04-12
+> **Companion to:** `PRIVAI_V0_SIMPLE_4_JAK_FINALNIE_WYGLADA_SYSTEM.md`, `PRIVAI_V0_SIMPLE_5_SYSTEM_CORE_DRAFT.md`
+> **Status:** Visual companion updated after system core draft
 > **Rule:** Where this doc and old `PRIVAI_PRODUCTION_SYSTEM_DIAGRAMS.md` conflict on framing, this doc wins.
 
 ---
 
-## 1. V0 System Stack [canonical V0 direction]
+## 1. V0 System Stack
 
 ```mermaid
 flowchart TD
-    U["User / Compute Lessee
+    U["User
     wallet keys
-    scoped session keys
     private by default"] --> D["Private Discovery
+    encrypted query via NXMS mailbox
     resource-based
-    encrypted / credential-gated
-    off-chain baseline"]
+    off-chain"]
 
-    D --> T["Transport Layer
-    NXMS mailbox (control plane)
-    Relay (encrypted routing)
-    Tor-gated (optional egress)
-    P2P/KEM (session optimization)"]
+    D --> T["Transport
+    NXMS mailbox (envelope storage)
+    Tor SOCKS5 (P2P direct)
+    FrodoKEM + XChaCha20Poly1305"]
 
     T --> C["Private Compute Session
-    isolated runtime slice
     VM / container / GPU slice
-    metering + heartbeats
+    window-based metering
+    signed agent telemetry
     ephemeral by default"]
 
-    C --> E["FullPrivacy Chain
-    PVA/aPVA settlement
-    compute lease escrow
+    C --> E["Chain
+    zegar księgowy prywatności
+    PVA settlement
+    escrow lock/release/refund/pro-rata
     nullifiers + commitments
-    proof/statement coverage
-    validator consensus"]
+    blocks co ~30s"]
 
-    E --> I["Incentive Layer
+    E --> I["Incentives
     validators: block rewards
     compute miners: lease PVA
-    relays: routing PVA
     mailboxes: storage PVA
+    relays: routing PVA
     exit nodes: egress PVA (opt-in)"]
 ```
 
 Rules:
-- Privacy is the product. Compute is the supply. PVA is the incentive.
-- Chain sees commitments, not workloads.
-- Discovery is private, not a public marketplace.
-- All ledger accounting uses aPVA, never floats.
+- Chain is a privacy accountant — sees commitments, not workloads.
+- Discovery is private via NXMS mailbox, not a public registry.
+- Sessions are divided into windows — metering is window-based.
+- Transport: FrodoKEM heavy once, XChaCha20Poly1305 fast after.
 
 ---
 
-## 2. Node Roles [canonical V0 direction]
+## 2. Node Roles
 
 ```mermaid
 flowchart TD
-    NO["Node Operator
+    NO["Physical Machine
     (one machine / entity)"] --> V["Validator
     secures chain
-    validates blocks
+    writes blocks
     earns block rewards"]
 
     NO --> CM["Compute Miner
-    rents runtime slices
-    metering + heartbeats
+    provides runtime slices
+    runs agent (signed telemetry)
     earns lease PVA"]
-
-    NO --> R["Relay
-    routes encrypted traffic
-    sees only prev/next hop
-    earns routing PVA"]
 
     NO --> MB["Mailbox
     stores encrypted envelopes
     async delivery
     earns storage PVA"]
 
+    NO --> R["Relay
+    routes encrypted traffic
+    sees only prev/next hop
+    earns routing PVA (future)"]
+
     NO --> EX["Exit Node
-    (explicit opt-in)
-    internet egress via Tor
+    (explicit opt-in only)
+    internet egress
     higher risk / higher reward
-    earns egress PVA"]
+    earns egress PVA (future)"]
 ```
 
 Rules:
 - One machine may run multiple roles. Protocol must not merge them.
-- Validator ≠ compute miner at protocol level.
+- Validator ≠ compute miner at protocol level. Two independent keys.
 - Exit node is never default. Explicit opt-in only.
-- Each role has separate stake/bond requirements.
-- Relay sees only immediate neighbors (onion model).
+- Compute miner runs an agent daemon for signed telemetry.
 
 ---
 
-## 3. Compute Lease Lifecycle [canonical V0 direction]
+## 3. Compute Lease Lifecycle
 
 ```mermaid
 sequenceDiagram
     participant U as User
-    participant D as Private Discovery
+    participant NXMS as NXMS Mailbox
     participant CM as Compute Miner
-    participant L as FullPrivacy Chain
+    participant L as Chain
+    participant AGENT as Miner Agent
 
-    U->>D: search by resource class (private/encrypted)
-    D->>U: matching ComputeOfferings (credential-gated)
-    U->>U: review lease policy + price
-    U->>CM: accept lease terms (encrypted transport)
-    U->>L: lock PVA/aPVA in FullPrivacy compute lease escrow
+    U->>NXMS: encrypted discovery query
+    NXMS->>CM: delivery (mailbox cannot read content)
+    CM->>NXMS: ComputeOffering response (encrypted)
+    NXMS->>U: delivery
+
+    U->>NXMS: lease acceptance (encrypted)
+    NXMS->>CM: delivery
+    U->>L: escrow lock (ComputeLeaseEscrow)
 
     Note over L: ESCROW LOCKED
-    Note over L: lease_policy_commit + private amount + timeout
+    Note over L: lease_policy_commit + amount + timeout
 
-    CM->>CM: provision isolated runtime slice
-    CM->>U: session ready (encrypted channel)
+    CM->>CM: provision VM/container/sandbox
+    CM->>NXMS: session ready (encrypted credentials)
+    NXMS->>U: delivery
 
-    loop Metering
-        CM->>CM: heartbeat / challenge
-        CM->>CM: resource measurement
-        CM->>U: signed metering receipt
+    U->>CM: P2P connection via Tor (FrodoKEM handshake → XChaCha20Poly1305)
+    Note over U,CM: Alice uses VM privately
+
+    loop Every 60 blocks (≈30 min)
+        L->>U: new block height (clock tick)
+        U->>CM: challenge (based on block_hash — unpredictable)
+        AGENT->>CM: signed telemetry (availability, performance)
+        CM->>U: response + miner_signature
+        U->>U: verify PASS/FAIL
     end
 
-    U->>U: session complete or timeout
+    Note over U: session ends
 
-    alt Full completion
-        U->>L: settlement claim (receipts prove full delivery)
-        L->>CM: full PVA to miner
-    else Partial completion
-        U->>L: settlement claim (receipts prove N of M units)
-        L->>CM: pro-rata PVA to miner
-        L->>U: remainder PVA to user
-    else Miner fault / no-show
-        U->>L: timeout claim (no valid receipts)
-        L->>U: full refund to user
-    else Unresolved after timeout
-        Note over L: peer recovery path (user + miner sigs)
+    CM->>NXMS: aggregate receipt + ZK proof (encrypted)
+    NXMS->>U: delivery
+
+    alt User accepts receipt
+        U->>L: settlement claim
+        L->>CM: earned PVA
+        L->>U: remainder PVA
+    else User disputes
+        U->>L: dispute
+        L->>CM: show window-by-window ZK proof
+        L->>L: verify → loser pays dispute fee
     end
 ```
 
 Rules:
-- Discovery is private, not a public marketplace browse.
+- Discovery is private via NXMS mailbox.
 - Escrow locks before session starts.
-- Settlement is receipt-based, not quality-based.
-- Pro-rata split is the expected norm for timed compute.
-- Operatorless settlement is the canonical target.
+- Windows are off-chain — chain is only the clock (block height).
+- Challenge uses block_hash — unpredictable before block, deterministic after.
+- Receipt is aggregate (total_windows, passed_windows) + ZK proof.
+- Settlement = passed/total × amount. Integer arithmetic. Remainder to user.
 
 ---
 
-## 4. On-Chain vs Off-Chain Boundary [canonical V0 direction]
+## 4. On-Chain vs Off-Chain Boundary
 
 ```mermaid
 flowchart LR
-    subgraph ON_CHAIN["On-Chain (FullPrivacy Chain)"]
-        OC1["Encrypted/committed amount"]
-        OC2["Escrow lease policy commitment"]
-        OC3["Nullifiers"]
-        OC4["Settlement authorization sigs"]
-        OC5["Proof/statement commitments"]
-        OC6["Generic delivery commitment (if needed)"]
+    subgraph ON_CHAIN["Chain (zegar księgowy prywatności)"]
+        OC1["Escrow lock (committed amount)"]
+        OC2["Lease policy commitment (hash)"]
+        OC3["Nullifiers (no double-spend)"]
+        OC4["Settlement authorization signatures"]
+        OC5["Receipt commitment (hash — not full receipt)"]
+        OC6["Block height (clock for windows)"]
         OC7["Fee/reward distribution"]
     end
 
     subgraph OFF_CHAIN["Off-Chain (private / ephemeral)"]
-        OF1["Prompts / workloads"]
-        OF2["Model outputs / results"]
-        OF3["Runtime files / session workspace"]
-        OF4["Resource discovery messages"]
-        OF5["Metering raw logs"]
-        OF6["Compute offerings"]
-        OF7["Credential proofs (where not anchored)"]
-        OF8["Provider/miner profiles"]
-        OF9["Lease negotiation"]
+        OF1["Prompts / workloads / outputs"]
+        OF2["VM / container / session workspace"]
+        OF3["Discovery queries and responses"]
+        OF4["ComputeOfferings"]
+        OF5["Window challenges and responses"]
+        OF6["Agent telemetry (signed measurements)"]
+        OF7["Full receipts (aggregate + per-window)"]
+        OF8["Lease negotiation"]
+        OF9["Miner profiles (none — no public profiles)"]
     end
 ```
 
 Rules:
-- Chain must not become a marketplace, registry, profile directory, or service graph.
-- Chain sees generic commitments, not business semantics.
-- Workloads, outputs, and model data never touch the chain.
-- All off-chain data is ephemeral by default; persistent storage is explicit opt-in.
+- Chain sees commitments, not workloads.
+- Chain sees receipt hash, not full receipt.
+- Chain sees block height, not window details.
+- All off-chain data is ephemeral by default.
+- Chain is the clock — windows are built on block heights.
 
 ---
 
-## 5. FullPrivacy Escrow Boundary [canonical V0 direction]
+## 5. Escrow Boundary
 
 ```mermaid
 flowchart TD
     subgraph V0_MODEL["V0: Compute Lease Escrow"]
-        V0A["Lock PVA for runtime lease"]
-        V0B["Settlement by receipts/metering"]
-        V0C["Pro-rata split expected"]
-        V0D["Operatorless by design"]
-        V0E["Operator = bootstrap only"]
+        V0A["ComputeLeaseEscrow SpendPolicy (tag 0x04)"]
+        V0B["Settlement by window-based receipt"]
+        V0C["Pro-rata = passed/total × amount"]
+        V0D["Operatorless target"]
+        V0E["Phase 1: Release + Refund sequence (bridge)"]
+        V0F["Phase 2: ProRataSplit action (proper)"]
     end
 
-    subgraph CURRENT_CODE["Current Code Reality"]
-        CC1["Escrow 2-of-3 mechanics exist"]
-        CC2["Release / Refund / Recovery actions exist"]
-        CC3["Operator co-signs normal path"]
-        CC4["Stage A / Stage B boundary is code-confirmed"]
-        CC5["All-or-nothing per action (no pro-rata yet)"]
+    subgraph CURRENT_CODE["Current Code"]
+        CC1["Escrow2of3 (bridge — untouched)"]
+        CC2["Release / Refund / RecoveryRelease"]
+        CC3["Operator co-signs Release/Refund"]
+        CC4["Stage A / Stage B boundary (code-confirmed)"]
+        CC5["All-or-nothing per action"]
+        CC6["RecoveryRelease = already operatorless anchor"]
     end
 
-    V0_MODEL -.->|"direction"| CURRENT_CODE
-    CURRENT_CODE -.->|"implementation truth"| V0_MODEL
+    V0_MODEL -.->|"new SpendPolicy alongside"| CURRENT_CODE
+    CURRENT_CODE -.->|"foundation"| V0_MODEL
 ```
 
 Rules:
-- V0 sets the direction: operatorless, receipt-based, pro-rata.
-- Current code still uses 2-of-3 with operator. This is bootstrap, not final.
-- Pro-rata split requires new mechanics not yet implemented.
-- Stage A / Stage B boundary is unchanged by V0.
-- Recovery path (user + miner after timeout, no operator) already aligns with V0 direction.
+- Escrow2of3 stays untouched — it's the bridge.
+- ComputeLeaseEscrow is a new SpendPolicy variant, not an extension.
+- Phase 1 pro-rata = Release + Refund sequence (existing mechanics).
+- Phase 2 pro-rata = ProRataSplit action (new mechanics).
+- RecoveryRelease is the operatorless anchor — proof it works.
 
 ---
 
-## 6. Private Discovery Flow [canonical V0 direction]
+## 6. Window-Based Metering
 
 ```mermaid
 sequenceDiagram
+    participant L as Chain (clock)
     participant U as User
-    participant D as Discovery Layer (off-chain)
     participant CM as Compute Miner
+    participant AGENT as Miner Agent
 
-    U->>D: query: GPU class >= X, VRAM >= Y, price <= Z, privacy >= P
-    Note over D: private / encrypted / credential-gated
-    D->>U: matching ComputeOfferings (scoped IDs, not public profiles)
+    Note over L,U,CM: Session starts at block N
 
-    U->>U: evaluate offering: resource class, price, reliability credential
-    U->>CM: request lease (over encrypted transport)
-    CM->>U: lease terms + selective reliability proof
+    loop Every 60 blocks
+        L->>L: new block produced
+        L->>U: block_hash(height) is known
+        U->>U: challenge = hash(session_id || window_id || block_hash)
+        U->>CM: challenge via NXMS
+        AGENT->>CM: signed telemetry snapshot
+        CM->>CM: compute response
+        CM->>U: response + miner_signature
+        U->>U: verify response
+        U->>U: availability check (response in timeout?)
+        U->>U: performance check (time < benchmark_floor?)
+        U->>U: window_pass = availability AND (performance OR N/A)
+    end
 
-    Note over U,CM: No public provider profile exchanged
-    Note over U,CM: No public marketplace registry queried
-    Note over U,CM: No reputation leaderboard consulted
+    Note over U: Session ends at block N + (1440 × 60)
+
+    CM->>U: aggregate receipt {total_windows, passed_windows, ZK proof}
+    U->>U: compare with own data
 ```
 
 Rules:
-- User searches by resource requirements, not by provider identity.
-- Discovery is off-chain, private, credential-gated as baseline.
-- Public discovery is lower-privacy opt-in, never default.
-- Compute miner exposes scoped offering ID, not permanent public identity.
-- Reliability is proven selectively, not published on a leaderboard.
+- Block height is the clock. Windows are built on blocks.
+- Challenge uses block_hash — unpredictable before block, deterministic after.
+- Miner agent provides signed telemetry (nvidia-smi, node_exporter, fio).
+- User verifies independently.
+- Receipt is aggregate, not per-window stream.
+- ZK proof confirms consistency, not absolute truth.
 
 ---
 
-## 7. Runtime Network Modes [canonical V0 direction]
+## 7. Settlement Formula
 
 ```mermaid
 flowchart TD
-    subgraph ISOLATED["isolated (default)"]
-        I1["Runtime slice"] -.-x I2["Internet"]
-        I1 <-->|"P2P/KEM tunnel"| I3["User"]
-    end
+    R["Aggregate Receipt
+    total_windows: 1440
+    passed_windows: 1368
+    degraded_windows: 40"]
+    
+    P["Lease Policy
+    degraded_weight: 500 (50%)
+    amount: 48 PVA"]
+    
+    R --> E["effective = passed + (degraded × weight / 1000)
+    = 1368 + (40 × 0.5) = 1388"]
+    
+    P --> E
+    
+    E --> M["miner_share = amount × effective / total
+    = 48 × 1388 / 1440 = 46 PVA"]
+    
+    E --> U["user_share = amount - miner_share
+    = 48 - 46 = 2 PVA"]
+    
+    M --> S["Chain executes: 46 PVA → miner, 2 PVA → user"]
+    U --> S
+```
 
-    subgraph NXMS_ONLY["nxms_only"]
-        N1["Runtime slice"] <-->|"NXMS mailbox"| N2["privAI network only"]
-        N1 -.-x N3["Internet"]
-    end
+Rules:
+- Integer arithmetic only. No floats.
+- Remainder always goes to user.
+- Degraded windows have configurable weight (default 50%).
+- Formula is deterministic — same inputs always give same output.
 
-    subgraph TOR_GATED["tor_gated"]
-        T1["Runtime slice"] -->|"encrypted multi-hop"| T2["privAI relays"]
-        T2 -->|"exit to Tor"| T3["Exit node (opt-in)"]
-        T3 -->|"Tor circuit"| T4["Internet"]
-    end
+---
 
-    subgraph INTERNET_EXIT["internet_exit (explicit opt-in)"]
-        E1["Runtime slice"] -->|"direct"| E2["Internet"]
-        Note over E1,E2: "Miner IP leaks. Higher price. Explicit acceptance required."
+## 8. Receipt Truth Architecture
+
+```mermaid
+flowchart TD
+    AGENT["Miner Agent Daemon
+    nvidia-smi + node_exporter + fio
+    signed measurements
+    hash-chained records"] --> TELEMETRY["Private Telemetry
+    only user + miner see"]
+
+    TELEMETRY --> ZK["ZK Proof
+    proves consistency between
+    telemetry and receipt
+    hides raw measurements"]
+
+    ZK --> RECEIPT["Aggregate Receipt
+    total_windows
+    passed_windows
+    degraded_windows
+    window_hashes_root
+    miner_signature"]
+
+    RECEIPT --> SETTLEMENT["Settlement
+    passed/total × amount"]
+
+    RECEIPT --> DISPUTE_PATH{"Dispute?"}
+    
+    DISPUTE_PATH -->|"no"| SETTLEMENT
+    DISPUTE_PATH -->|"yes"| WINDOW["Window-by-Window ZK Proof
+    per-window PASS/FAIL
+    hides raw measurements
+    reveals consistency"]
+
+    WINDOW --> VERDICT["Chain verifies
+    loser pays dispute fee"]
+```
+
+Rules:
+- Agent is immutable daemon — signed, hash-chained, tamper-evident.
+- ZK proof confirms consistency — does not prove absolute truth.
+- Model must be sensible for ZK proof to be meaningful.
+- Dispute resolution uses window-by-window proof.
+- Benchmark tools (MLPerf, LINPACK, fio, iperf3) are existing industry standards.
+
+---
+
+## 9. Identity (Phase 0-5)
+
+```mermaid
+flowchart TD
+    V["Validator
+    Falcon PK from vault
+    = node_pk_hash (frozen)"] --> CHAIN["Chain
+    consensus voting
+    block production"]
+
+    CM["Compute Miner
+    separate Falcon PK
+    generated independently"] --> SIG["Signs
+    receipts
+    lease claims
+    agent telemetry"]
+
+    V -.->|"independent"| CM
+
+    subgraph FUTURE["Phase 6+ (future)"]
+        HR["Hidden Root Credential"]
+        HR --> V_KEY["Validator Role Key"]
+        HR --> CM_KEY["Compute Miner Role Key"]
+        HR --> SESSION["Session Keys"]
+        HR --> EPOCH["Epoch Keys"]
     end
 ```
 
 Rules:
-- `isolated` is the default. No external network.
-- `nxms_only` allows privAI-internal communication only.
-- `tor_gated` routes through relay hops + Tor. Compute miner cannot see destination.
-- `internet_exit` is never default. Explicit opt-in by miner. IP exposure acknowledged.
-- Exit node is a separate role from compute miner.
+- Phase 0-5: two independent keys (validator + compute miner).
+- Falcon is a signing tool, not identity.
+- Validator identity is frozen — cannot be changed.
+- Hidden root is Phase 6+ concern.
+- Compute miner key is separate from validator key.
 
 ---
 
-## 8. Transport / Mailbox / Relay Privacy [canonical V0 direction]
+## 10. Transport
 
 ```mermaid
 flowchart LR
-    U["User"] -->|"encrypted payload"| MB["Mailbox
+    U["User"] -->|"NXMS envelope
+    FrodoKEM → XChaCha20Poly1305
+    Falcon signature"| MB["Mailbox
     stores encrypted envelopes
     cannot read content"]
 
-    MB -->|"encrypted delivery"| CM["Compute Miner
-    receives encrypted payload
-    decrypts only own session"]
+    MB -->|"delivery"| CM["Compute Miner
+    decrypts own session"]
 
-    CM -->|"encrypted outbound"| R1["Relay hop 1
-    sees prev + next only"]
-    R1 -->|"encrypted"| R2["Relay hop N
-    sees prev + next only"]
-    R2 -->|"exit handoff"| EX["Exit Node
-    sees traffic to Tor
-    cannot see origin"]
-    EX -->|"Tor circuit"| INT["Internet"]
+    U2["User"] -->|"P2P via Tor
+    FrodoKEM handshake (once)
+    XChaCha20Poly1305 (streaming)"| CM2["Compute Miner
+    VM session direct connection"]
 ```
 
 Rules:
-- Mailbox stores encrypted envelopes. Cannot read content.
-- Each relay sees only its immediate predecessor and successor.
-- No single node learns the full route.
-- Compute miner cannot determine if traffic exits to internet.
-- Metadata minimization is a core priority, not a future nice-to-have.
+- NXMS mailbox: each envelope has own FrodoKEM. Heavy but independent.
+- P2P direct: FrodoKEM handshake once, then XChaCha20Poly1305. Fast.
+- Mailbox for: discovery, challenges, receipts.
+- P2P for: VM session, streaming, terminal.
+- Transport metadata hardening is future.
 
 ---
 
-## 9. Metering / Receipt Flow [canonical V0 direction]
-
-```mermaid
-sequenceDiagram
-    participant CM as Compute Miner
-    participant RT as Runtime Slice
-    participant U as User
-    participant L as Chain (settlement)
-
-    CM->>RT: provision runtime slice
-    RT->>U: session started
-
-    loop Every metering interval
-        RT->>RT: measure: CPU/GPU/RAM/VRAM, duration, resource class
-        CM->>U: signed metering receipt (meter_version, miner_sig)
-        U->>U: validate + store receipt
-    end
-
-    loop Heartbeat / challenge
-        U->>CM: challenge
-        CM->>U: heartbeat response
-    end
-
-    Note over U: session ends (complete / timeout / fault)
-
-    U->>L: settlement claim + receipt evidence
-    L->>L: validate receipts against lease policy
-    L->>CM: earned PVA
-    L->>U: remainder PVA (if partial)
-```
-
-Rules:
-- Metering uses same protocol for all compute miners (not same physical sensor).
-- Every receipt is signed by miner with meter_version declared.
-- Heartbeats detect liveness; missed heartbeats count against reliability.
-- Settlement validates receipts against lease policy, not subjective quality.
-- Wire format of receipts is a future protocol spec — not defined here.
-
----
-
-## 10. Reliability Scoring [canonical V0 direction]
+## 11. Protocol Version Domains
 
 ```mermaid
 flowchart TD
-    subgraph POSITIVE["Score increases"]
-        P1["+ uptime"]
-        P2["+ completed sessions"]
-        P3["+ delivered compute units"]
-        P4["+ valid heartbeats"]
-    end
-
-    subgraph NEGATIVE["Score decreases"]
-        N1["- early shutdowns"]
-        N2["- missed heartbeats"]
-        N3["- failed challenges"]
-        N4["- resource mismatch"]
-        N5["- settlement faults"]
-    end
-
-    POSITIVE --> S["Deterministic
-    Machine Reliability Score"]
-    NEGATIVE --> S
-
-    S --> SP["Selective proof to user
-    (not public leaderboard)"]
-```
-
-Rules:
-- This is deterministic machine reliability, not human reputation.
-- No subjective AI quality score. No human review. No public leaderboard baseline.
-- Score is proven selectively to requesting users, not broadcast.
-- Exact formula weights are a future protocol spec — not defined here.
-- Energy telemetry supports fraud detection and audit, not direct payment.
-
----
-
-## 11. Protocol Version Domains [canonical V0 direction]
-
-```mermaid
-flowchart TD
-    subgraph CHAIN["Chain-activated (by height/epoch)"]
+    subgraph CHAIN["Chain-activated"]
         CV["chain_protocol_version"]
         TV["tx_version"]
         EP["escrow_policy_version"]
         PS["proof_system_id"]
     end
 
-    subgraph NEGOTIATED["Session/handshake-negotiated"]
+    subgraph NEGOTIATED["Session/handshake"]
         NT["nxms_transport_version"]
         MP["mailbox_protocol_version"]
-        RP["relay_protocol_version"]
-        XP["exit_policy_version"]
     end
 
-    subgraph DECLARED["Declared per offer/session"]
+    subgraph DECLARED["Per offer/session"]
         CL["compute_lease_protocol_version"]
         MV["meter_protocol_version"]
-        CS["credential_schema_version"]
         DP["discovery_protocol_version"]
     end
 
@@ -421,146 +444,38 @@ flowchart TD
 ```
 
 Rules:
-- 12 explicit version domains. Each versioned independently.
-- Chain versions activate by height or epoch.
-- Transport/relay/mailbox versions negotiate in handshake.
-- Lease/meter/credential versions declared per session.
-- No silent downgrade from FullPrivacy to lower privacy. Ever.
-- If a task introduces a new format, it must state version impact.
+- 9 active version domains (relay, exit, credential are future).
+- No silent downgrade from FullPrivacy. Ever.
 
 ---
 
-## 12. Legacy Framing Rejected [canonical V0 direction]
+## 12. What Is Rejected
 
 ```mermaid
 flowchart LR
-    subgraph REJECTED["NOT the V0 model"]
+    subgraph REJECTED["NOT V0"]
         R1["Public AI marketplace"]
         R2["Public provider profile"]
-        R3["Skill pack registry on-chain"]
-        R4["Quality-of-answer settlement"]
-        R5["Operator as canonical escrow decision-maker"]
-        R6["MarketplaceBatchTx as product center"]
-        R7["Public reputation leaderboard"]
-        R8["Artifact delivery as center of settlement"]
+        R3["Quality-of-answer settlement"]
+        R4["Operator as canonical decision-maker"]
+        R5["MarketplaceBatchTx as product center"]
+        R6["Public reputation leaderboard"]
+        R7["Artifact delivery as center"]
     end
 
-    subgraph CANONICAL["V0 canonical model"]
+    subgraph CANONICAL["V0"]
         C1["Private compute network"]
-        C2["Hidden root + scoped identity"]
-        C3["Private resource-based discovery"]
-        C4["Receipt / metering settlement"]
-        C5["Operatorless escrow by design"]
-        C6["FullPrivacy compute lease escrow"]
-        C7["Deterministic machine reliability"]
-        C8["Compute session as center"]
+        C2["Window-based metering"]
+        C3["Receipt / settlement by availability"]
+        C4["Operatorless escrow by design"]
+        C5["2 independent keys (Phase 0-5)"]
+        C6["NXMS mailbox discovery"]
+        C7["Chain = privacy accountant"]
     end
 
     REJECTED -->|"replaced by"| CANONICAL
 ```
 
-Rules:
-- If old docs say "marketplace" and V0 says "private compute network", V0 wins.
-- If old docs say "provider" and V0 says "compute miner", V0 wins.
-- If old docs say "quality settlement" and V0 says "receipt settlement", V0 wins.
-- Deep-spec mechanical truth (Stage A/B, Halo2 boundary, transport split) is NOT rejected.
-- Legacy docs remain as mechanical reference where not contradicted by V0.
-
 ---
 
-## 13. Identity Layers [canonical V0 direction]
-
-```mermaid
-flowchart TD
-    HR["Hidden Root Credential
-    (never exposed as public baseline)"] --> RK["Role Keys
-    validator / compute miner /
-    relay / mailbox / exit"]
-    RK --> SK["Session Keys
-    (scoped per compute lease session)"]
-    SK --> EK["Epoch Keys
-    (rotated periodically)"]
-
-    F["Falcon PQ Signatures"] -.->|"used by"| HR
-    F -.->|"used by"| RK
-    F -.->|"used by"| SK
-
-    subgraph NOT_IDENTITY["NOT identity"]
-        NI1["Public nickname"]
-        NI2["Public Falcon key as stable ID"]
-        NI3["Public provider profile"]
-        NI4["Human reputation score"]
-    end
-```
-
-Rules:
-- Identity = hidden root + scoped role/session/epoch keys.
-- Falcon is a signing tool, not the identity itself.
-- No public profile as privacy baseline.
-- Validator identity is separate from compute miner identity.
-- Credential format is a future protocol spec — not defined here.
-
----
-
-## 14. Operatorless Escrow Transition [future strengthening]
-
-```mermaid
-flowchart LR
-    P0["Phase 0 (now)
-    Escrow 2-of-3
-    operator co-signs
-    all-or-nothing per action
-    honest about trust"] --> P1["Phase 1
-    Automated operator
-    receipt-validated rules
-    still a keypair
-    bootstrap path"]
-
-    P1 --> P2["Phase 2 (V0 target)
-    Operatorless escrow
-    receipt/metering settlement
-    pro-rata split
-    protocol-only validation
-    no operator keypair needed"]
-```
-
-Rules:
-- Phase 0 is current reality. Operator co-signs. All-or-nothing. This is bootstrap.
-- Phase 1 automates operator decisions based on receipts. Still uses operator key.
-- Phase 2 removes operator entirely. Settlement is protocol-validated from receipts.
-- Pro-rata split requires new escrow mechanics (not yet implemented).
-- Recovery path (user + miner after timeout) already works without operator.
-
----
-
-## 15. Compute Offering Object [canonical V0 direction]
-
-```mermaid
-flowchart TD
-    CO["ComputeOffering"] --> RC["resource_class
-    GPU/CPU/RAM/VRAM/storage"]
-    CO --> PR["price_aPVA
-    per compute unit"]
-    CO --> DUR["min/max lease duration"]
-    CO --> NM["network_mode
-    isolated / nxms_only /
-    tor_gated / internet_exit"]
-    CO --> RPC["runtime_privacy_class"]
-    CO --> AW["availability_window"]
-    CO --> MV["meter_protocol_version"]
-    CO --> LP["lease_policy_version"]
-    CO --> SID["scoped_offering_id
-    (not permanent public identity)"]
-    CO --> SRP["selective_reliability_proof"]
-```
-
-Rules:
-- This is what users discover. Not a provider profile. Not a skill pack.
-- Offering ID is scoped, not a permanent public identifier.
-- Reliability is proven selectively, not published.
-- Price is in aPVA. All protocol accounting uses aPVA.
-- Exact schema is a future protocol spec — this is direction only.
-
----
-
-*Document version: 2026-04-11. Visual companion for V0 Direction Reset. Does not override deep-spec mechanical truth (Stage A/B boundary, Halo2 proof boundary, transport split). Where this doc and old diagrams doc conflict on product/business framing, this doc wins.*
+*Document version: 2026-04-12. Updated after system core draft. Window-based metering, simple identity (2 keys), NXMS mailbox discovery, ZK proof receipt architecture, existing benchmark tools.*

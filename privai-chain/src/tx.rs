@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use crate::canonical::{
-    CanonicalEncode, write_fixed, write_i64, write_option_bytes, write_u8, write_u32, write_u64,
-    write_vec, write_vec_bytes,
+    write_fixed, write_i64, write_option_bytes, write_u32, write_u64, write_u8, write_vec,
+    write_vec_bytes, CanonicalEncode,
 };
-use crate::hash::{STATEMENT_DOMAIN, TX_DOMAIN, TX_SIGNING_DOMAIN, domain_hash};
+use crate::hash::{domain_hash, STATEMENT_DOMAIN, TX_DOMAIN, TX_SIGNING_DOMAIN};
 use crate::note::{LiteOutputNote, OutputNote};
 use crate::primitives::{ContextId, Hash32, Nullifier};
 
@@ -367,7 +367,9 @@ impl Transaction {
             Self::Model(tx) => &tx.core,
             Self::Stake(tx) => &tx.core,
             Self::MarketplaceBatch(tx) => &tx.core,
-            Self::LiteTransfer(_) => unreachable!("LiteTransfer uses LiteTxCore; access via lite_core()"),
+            Self::LiteTransfer(_) => {
+                unreachable!("LiteTransfer uses LiteTxCore; access via lite_core()")
+            }
         }
     }
 
@@ -532,6 +534,9 @@ mod tests {
             },
         };
 
-        assert_eq!(tx.validate_shape(), Err(TxShapeError::TransferRequiresOutputs));
+        assert_eq!(
+            tx.validate_shape(),
+            Err(TxShapeError::TransferRequiresOutputs)
+        );
     }
 }

@@ -19,9 +19,9 @@ impl RailContext {
     }
 
     pub fn get_or_create_pool(&mut self, merchant_commit: Hash32) -> &mut LocalTicketPool {
-        self.tickets.entry(merchant_commit).or_insert_with(|| {
-            LocalTicketPool::new(self.rail_seed, merchant_commit)
-        })
+        self.tickets
+            .entry(merchant_commit)
+            .or_insert_with(|| LocalTicketPool::new(self.rail_seed, merchant_commit))
     }
 }
 

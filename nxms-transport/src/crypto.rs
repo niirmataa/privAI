@@ -1,5 +1,5 @@
-use anyhow::{Result, anyhow};
-use base64::{Engine as _, engine::general_purpose::STANDARD as B64};
+use anyhow::{anyhow, Result};
+use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use serde::{Deserialize, Serialize};
 use std::ffi::CString;
 use std::fmt;
@@ -547,7 +547,10 @@ fn encrypt_internal(
     };
     if rc != 0 {
         // C contract resets output pointers to NULL on error.
-        return Err(anyhow!("nxms_ms_encrypt_packet_with_signer failed rc={}", rc));
+        return Err(anyhow!(
+            "nxms_ms_encrypt_packet_with_signer failed rc={}",
+            rc
+        ));
     }
 
     let (kem_ct, nonce, ciphertext, tag, sig) = unsafe {
@@ -1273,6 +1276,7 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
 
     #[test]
+    #[cfg(feature = "falcon-audit-raw-api")]
     fn falcon_sign_and_verify_roundtrip() {
         let keys = Keys::generate().expect("keygen");
         let sig_sk = keys.sig_sk_zeroizing().expect("sig sk");

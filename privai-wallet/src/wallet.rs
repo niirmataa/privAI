@@ -13,17 +13,16 @@ use crate::state::{
 };
 use crate::store::WalletStore;
 use nxms_transport::crypto::{
-    Keys, XCHACHA20POLY1305_KEY_LEN, XCHACHA20POLY1305_TAG_LEN,
     kem_decaps, kem_encaps, random_xchacha20poly1305_nonce, xchacha20poly1305_decrypt,
-    xchacha20poly1305_encrypt,
+    xchacha20poly1305_encrypt, Keys, XCHACHA20POLY1305_KEY_LEN, XCHACHA20POLY1305_TAG_LEN,
 };
 use privai_chain::{
     derive_aux_commit, derive_nullifier, AuxWitness, BundleId, CanonicalDecode, CanonicalEncode,
-    Hash32, Nullifier, OutputNote, ReceiveBundle, RecipientBox, RecipientBoxPlaintext,
-    SpendPolicy, AEAD_ALG_XCHACHA20_POLY1305, FRODOKEM_640_SHAKE,
+    Hash32, Nullifier, OutputNote, ReceiveBundle, RecipientBox, RecipientBoxPlaintext, SpendPolicy,
+    AEAD_ALG_XCHACHA20_POLY1305, FRODOKEM_640_SHAKE,
 };
 
-use crate::small_payments_rail::{RailContext, LocalTicket};
+use crate::small_payments_rail::{LocalTicket, RailContext};
 
 const WALLET_BUNDLE_ID_DOMAIN_V0: &[u8] = b"privai:wallet-bundle-id:v0";
 const RECIPIENT_BOX_KEY_DOMAIN_V0: &[u8] = b"privai:recipient-box:key:v0";
@@ -45,11 +44,15 @@ impl<S: WalletStore> PrivaiWallet<S> {
     pub fn open(mut store: S) -> Result<Self, WalletError> {
         let snapshot = store.load()?.unwrap_or_default();
         store.save(&snapshot)?;
-        Ok(Self { store, snapshot, wallet_keys: None })
+        Ok(Self {
+            store,
+            snapshot,
+            wallet_keys: None,
+        })
     }
 
     /// Otwórz portfel z master seed (v1 — deterministic key derivation).
-    /// 
+    ///
     /// Jeśli store jest pusty, seed jest używany do derive wszystkich kluczy.
     /// Jeśli store ma istniejący seed_hash, jest weryfikowany.
     pub fn from_master_seed(mut store: S, seed: [u8; 32]) -> Result<Self, WalletError> {
@@ -65,7 +68,11 @@ impl<S: WalletStore> PrivaiWallet<S> {
         }
 
         store.save(&snapshot)?;
-        Ok(Self { store, snapshot, wallet_keys: Some(wallet_keys) })
+        Ok(Self {
+            store,
+            snapshot,
+            wallet_keys: Some(wallet_keys),
+        })
     }
 
     /// Generuj nowy portfel z losowym master seed.
@@ -74,7 +81,11 @@ impl<S: WalletStore> PrivaiWallet<S> {
         let mut snapshot = store.load()?.unwrap_or_default();
         snapshot.master_seed_hash = Some(wallet_keys.master_seed_hash());
         store.save(&snapshot)?;
-        Ok(Self { store, snapshot, wallet_keys: Some(wallet_keys) })
+        Ok(Self {
+            store,
+            snapshot,
+            wallet_keys: Some(wallet_keys),
+        })
     }
 
     pub fn snapshot(&self) -> &WalletSnapshot {
@@ -140,7 +151,8 @@ impl<S: WalletStore> PrivaiWallet<S> {
         // v1: użyj WalletKeys jeśli dostępny (deterministic key derivation)
         // v0: fallback do Keys::generate() (legacy mode)
         let keys = if let Some(ref wallet_keys) = self.wallet_keys {
-            wallet_keys.derive_bundle_keys(index)
+            wallet_keys
+                .derive_bundle_keys(index)
                 .map_err(|e| WalletError::Crypto(e))?
         } else {
             Keys::generate().map_err(|err| WalletError::Crypto(err.to_string()))?
@@ -208,7 +220,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
     }
 
     /// Uzupełnij pulę bundli do target (v1 — deterministic key derivation).
-    /// 
+    ///
     /// Generuje nowe bundle z WalletKeys::derive_bundle_keys(next_bundle_index).
     /// Każdy bundle ma status Fresh i local_keys.
     pub fn replenish_bundles(
@@ -217,7 +229,10 @@ impl<S: WalletStore> PrivaiWallet<S> {
         expires_at: u64,
         route_hint: Option<Vec<u8>>,
     ) -> Result<usize, WalletError> {
-        let fresh_count = self.snapshot.bundles.values()
+        let fresh_count = self
+            .snapshot
+            .bundles
+            .values()
             .filter(|b| b.status == BundleStatus::Fresh)
             .count();
 
@@ -241,7 +256,7 @@ impl<S: WalletStore> PrivaiWallet<S> {
     }
 
     /// Oznacz wygasłe bundle jako Revoked.
-    /// 
+    ///
     /// Sprawdza `bundle.expires_at < now_ms` dla każdego Fresh/Offered bundle.
     pub fn revoke_expired(&mut self, now_ms: u64) -> Result<usize, WalletError> {
         let mut revoked = 0;
@@ -260,7 +275,11 @@ impl<S: WalletStore> PrivaiWallet<S> {
     }
 
     pub fn scan_output(&self, output: &OutputNote) -> BundleMatch {
-        if self.snapshot.bundles.contains_key(&output.recipient_box.hint) {
+        if self
+            .snapshot
+            .bundles
+            .contains_key(&output.recipient_box.hint)
+        {
             BundleMatch::HintMatched(output.recipient_box.hint)
         } else {
             BundleMatch::NoMatch
@@ -268,13 +287,10 @@ impl<S: WalletStore> PrivaiWallet<S> {
     }
 
     /// Atomically odbiera notę: otwiera RecipientBox, weryfikuje, zapisuje, flush.
-    /// 
+    ///
     /// Crash safety: wszystko w jednej operacji — flush na końcu.
     /// Guard przed double-receive: sprawdza note_commit PRZED otwarciem.
-    pub fn receive_note(
-        &mut self,
-        note: &OutputNote,
-    ) -> Result<Nullifier, WalletError> {
+    pub fn receive_note(&mut self, note: &OutputNote) -> Result<Nullifier, WalletError> {
         // 1. Guard przed double-receive (przed otwarciem — oszczędza KEM decaps)
         if self.snapshot.owned_notes.contains_key(&note.note_commit) {
             return Err(WalletError::DuplicateNote(note.note_commit));
@@ -402,8 +418,8 @@ impl<S: WalletStore> PrivaiWallet<S> {
         bundle: &ReceiveBundle,
         opened: &RecipientBoxPlaintext,
     ) -> Result<(RecipientBox, Hash32), WalletError> {
-        let (kem_ct, shared_secret) =
-            kem_encaps(&bundle.one_time_frodo_pk).map_err(|err| WalletError::Crypto(err.to_string()))?;
+        let (kem_ct, shared_secret) = kem_encaps(&bundle.one_time_frodo_pk)
+            .map_err(|err| WalletError::Crypto(err.to_string()))?;
         let nonce = random_xchacha20poly1305_nonce();
         let recipient_box_stub = RecipientBox::new(
             kem_ct,
@@ -425,21 +441,20 @@ impl<S: WalletStore> PrivaiWallet<S> {
 
         let key = derive_recipient_box_key(&shared_secret, &recipient_box_stub);
         let aad = recipient_box_aad(&recipient_box_stub);
-        let (ciphertext, tag) = xchacha20poly1305_encrypt(
-            &key,
-            &nonce,
-            &opened_final.to_canonical_bytes(),
-            &aad,
-        )
-        .map_err(|err| WalletError::Crypto(err.to_string()))?;
+        let (ciphertext, tag) =
+            xchacha20poly1305_encrypt(&key, &nonce, &opened_final.to_canonical_bytes(), &aad)
+                .map_err(|err| WalletError::Crypto(err.to_string()))?;
 
-        Ok((RecipientBox::new(
-            recipient_box_stub.kem_ct,
-            nonce,
-            ciphertext,
-            tag,
-            bundle.bundle_id,
-        ), derived_nk))
+        Ok((
+            RecipientBox::new(
+                recipient_box_stub.kem_ct,
+                nonce,
+                ciphertext,
+                tag,
+                bundle.bundle_id,
+            ),
+            derived_nk,
+        ))
     }
 
     pub fn verify_opened_note(
@@ -523,7 +538,10 @@ impl<S: WalletStore> PrivaiWallet<S> {
         self.flush()
     }
 
-    pub fn generate_next_ticket(&mut self, merchant_commit: Hash32) -> Result<LocalTicket, WalletError> {
+    pub fn generate_next_ticket(
+        &mut self,
+        merchant_commit: Hash32,
+    ) -> Result<LocalTicket, WalletError> {
         if let Some(rail_context) = &mut self.snapshot.rail_context {
             let rail_seed = rail_context.rail_seed; // Extract copy of seed first
             let pool = rail_context.get_or_create_pool(merchant_commit);
@@ -584,7 +602,10 @@ fn update_len_prefixed(hasher: &mut blake3::Hasher, bytes: &[u8]) {
     hasher.update(bytes);
 }
 
-fn derive_recipient_box_key(shared_secret: &[u8], recipient_box: &RecipientBox) -> [u8; XCHACHA20POLY1305_KEY_LEN] {
+fn derive_recipient_box_key(
+    shared_secret: &[u8],
+    recipient_box: &RecipientBox,
+) -> [u8; XCHACHA20POLY1305_KEY_LEN] {
     let mut hasher = blake3::Hasher::new();
     update_len_prefixed(&mut hasher, RECIPIENT_BOX_KEY_DOMAIN_V0);
     update_len_prefixed(&mut hasher, shared_secret);
@@ -613,8 +634,7 @@ mod tests {
     use super::*;
     use crate::store::MemoryWalletStore;
     use privai_chain::{
-        Amount14, AuxWitness, CanonicalEncode, LweCiphertext, PRIVAI_V0, RecipientBox,
-        SpendPolicy,
+        Amount14, AuxWitness, CanonicalEncode, LweCiphertext, RecipientBox, SpendPolicy, PRIVAI_V0,
     };
 
     fn sample_bundle() -> ReceiveBundle {
@@ -741,14 +761,10 @@ mod tests {
         let mut opened = opened;
         opened.note_payload_commit = note_payload_commit;
         // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
-        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
-            .expect("seal box");
-        let note = OutputNote::new(
-            spend_policy.commitment(),
-            ct_amt,
-            aux_commit,
-            recipient_box,
-        );
+        let (recipient_box, _derived_nk) =
+            PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
+                .expect("seal box");
+        let note = OutputNote::new(spend_policy.commitment(), ct_amt, aux_commit, recipient_box);
 
         let nullifier = wallet
             .record_opened_note(note.clone(), opened.clone())
@@ -756,11 +772,19 @@ mod tests {
 
         assert_eq!(wallet.spendable_notes().len(), 1);
         assert_eq!(
-            wallet.snapshot().bundles.get(&bundle.bundle_id).unwrap().status,
+            wallet
+                .snapshot()
+                .bundles
+                .get(&bundle.bundle_id)
+                .unwrap()
+                .status,
             BundleStatus::Used
         );
         assert_eq!(
-            wallet.spend_material(&note.note_commit).expect("spend material").nullifier,
+            wallet
+                .spend_material(&note.note_commit)
+                .expect("spend material")
+                .nullifier,
             nullifier
         );
     }
@@ -810,14 +834,10 @@ mod tests {
         let mut opened = opened;
         opened.note_payload_commit = note_payload_commit;
         // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
-        let (recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
-            .expect("seal box");
-        let note = OutputNote::new(
-            spend_policy.commitment(),
-            ct_amt,
-            aux_commit,
-            recipient_box,
-        );
+        let (recipient_box, _derived_nk) =
+            PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened)
+                .expect("seal box");
+        let note = OutputNote::new(spend_policy.commitment(), ct_amt, aux_commit, recipient_box);
 
         let opened_again = wallet.open_recipient_box(&note).expect("open box");
         assert_eq!(opened_again.bundle_id, bundle.bundle_id);
@@ -868,8 +888,9 @@ mod tests {
 
         // Seal z opened_bad (z ZŁYM note_payload_commit)
         // Krok 6: seal_recipient_box returns (RecipientBox, derived_nk).
-        let (_recipient_box, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
-            .expect("seal box");
+        let (_recipient_box, _derived_nk) =
+            PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
+                .expect("seal box");
 
         let spend_policy = SpendPolicy::Single {
             falcon_pk_hash: [0x31; 32],
@@ -887,8 +908,9 @@ mod tests {
             &aux_commit,
         );
         // Utwórz recipient_box_bad z użyciem seal_recipient_box i opened_bad
-        let (recipient_box_bad, _derived_nk) = PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
-            .expect("seal box bad");
+        let (recipient_box_bad, _derived_nk) =
+            PrivaiWallet::<MemoryWalletStore>::seal_recipient_box(&bundle, &opened_bad)
+                .expect("seal box bad");
 
         let note = OutputNote::new(
             spend_policy.commitment(),
@@ -900,7 +922,9 @@ mod tests {
         // record_opened_note(note, opened_good) - opened_good jest ignorowany
         // receive_note deszyfruje ciphertext → opened z ZŁYM note_payload_commit
         // verify_opened_note: opened.note_payload_commit (zły) != note.note_payload_commit (poprawny) → NotePayloadCommitMismatch!
-        let err = wallet.record_opened_note(note, opened_good).expect_err("must reject");
+        let err = wallet
+            .record_opened_note(note, opened_good)
+            .expect_err("must reject");
         assert!(matches!(err, WalletError::NotePayloadCommitMismatch));
     }
 
@@ -908,11 +932,25 @@ mod tests {
     fn create_bundle_is_deterministic_for_same_inputs() {
         let mut wallet = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let bundle_a = wallet
-            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]), [0xAA; 32])
+            .create_bundle(
+                100,
+                0,
+                vec![1, 2, 3],
+                vec![4, 5, 6],
+                Some(vec![7, 8]),
+                [0xAA; 32],
+            )
             .expect("bundle a");
         let mut wallet_b = PrivaiWallet::open(MemoryWalletStore::new()).expect("wallet");
         let bundle_b = wallet_b
-            .create_bundle(100, 0, vec![1, 2, 3], vec![4, 5, 6], Some(vec![7, 8]), [0xAA; 32])
+            .create_bundle(
+                100,
+                0,
+                vec![1, 2, 3],
+                vec![4, 5, 6],
+                Some(vec![7, 8]),
+                [0xAA; 32],
+            )
             .expect("bundle b");
 
         assert_eq!(bundle_a.bundle_id, bundle_b.bundle_id);

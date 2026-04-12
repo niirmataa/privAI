@@ -1,0 +1,1 @@
+﻿# T-073-XIAOMI — Force Receipt Availability Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-073_XIAOMI_FORCE_RECEIPT_AVAILABILITY_DECISION/OUTPUT_XIAOMI.md ``` 

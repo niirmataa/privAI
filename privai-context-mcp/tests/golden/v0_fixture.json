@@ -1,0 +1,32 @@
+[
+  {
+    "id": "v0-master-private-compute-reset",
+    "layer": "v0_master",
+    "title": "Private compute network reset",
+    "topic": "product_framing",
+    "summary": "privAI is not an AI model marketplace; it is a post-quantum FullPrivacy private AI compute network.",
+    "content": "Privacy is the product. Compute is the supply. PVA is the incentive. Chain is the settlement. Transport is the shield.",
+    "tags": ["v0", "direction", "private-compute"],
+    "status": "canonical",
+    "recommended_for": ["new_agent", "reentry", "task_execution"],
+    "do_not_overclaim": ["do not infer public marketplace baseline"],
+    "source_path": "/home/nxms-server/privAI/spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_DIRECTION_RESET_PRIVATE_COMPUTE_NETWORK.md",
+    "source_scope": "v0_only",
+    "legacy_allowed": false
+  },
+  {
+    "id": "v0-settlement-receipts",
+    "layer": "v0_direction",
+    "title": "Settlement uses receipts and metering",
+    "topic": "settlement",
+    "summary": "Settlement is based on compute lease policy, receipts, metering, and timeouts, not subjective AI output quality.",
+    "content": "Pro-rata and operatorless settlement are direction targets, not current implementation claims.",
+    "tags": ["v0", "settlement", "metering", "receipts"],
+    "status": "direction",
+    "recommended_for": ["task_execution", "review"],
+    "do_not_overclaim": ["do not infer pro-rata is implemented", "do not infer operatorless escrow is implemented"],
+    "source_path": "/home/nxms-server/privAI/spec/PRIVAI_V0_PRIVATE_COMPUTE/PRIVAI_V0_COMPUTE_LEASE_SETTLEMENT_DIRECTION.md",
+    "source_scope": "v0_only",
+    "legacy_allowed": false
+  }
+]

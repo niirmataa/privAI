@@ -1,8 +1,8 @@
 use std::array;
 
 use halo2_gadgets::poseidon::{
-    Hash, Pow5Chip, Pow5Config,
     primitives::{self as poseidon, ConstantLength, P128Pow5T3},
+    Hash, Pow5Chip, Pow5Config,
 };
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
@@ -49,13 +49,7 @@ impl NullifierChip {
         meta.enable_equality(note_commit);
         meta.enable_equality(nullifier_key);
 
-        let poseidon = Pow5Chip::configure::<P128Pow5T3>(
-            meta,
-            state,
-            partial_sbox,
-            rc_a,
-            rc_b,
-        );
+        let poseidon = Pow5Chip::configure::<P128Pow5T3>(meta, state, partial_sbox, rc_a, rc_b);
 
         NullifierConfig {
             poseidon,
@@ -177,7 +171,8 @@ mod tests {
         ) -> Result<(), Error> {
             let note_commit = self.note_commit.ok_or(Error::Synthesis)?;
             let nullifier_key = self.nullifier_key.ok_or(Error::Synthesis)?;
-            let _output = NullifierChip::new(config).assign(layouter, note_commit, nullifier_key)?;
+            let _output =
+                NullifierChip::new(config).assign(layouter, note_commit, nullifier_key)?;
             Ok(())
         }
     }
@@ -193,8 +188,8 @@ mod tests {
             nullifier_key: Some(nullifier_key),
         };
 
-        let prover = MockProver::run(6, &circuit, vec![vec![note_commit, expected]])
-            .expect("mock prover");
+        let prover =
+            MockProver::run(6, &circuit, vec![vec![note_commit, expected]]).expect("mock prover");
         prover.assert_satisfied();
     }
 
@@ -209,8 +204,8 @@ mod tests {
             nullifier_key: Some(nullifier_key),
         };
 
-        let prover = MockProver::run(6, &circuit, vec![vec![note_commit, wrong]])
-            .expect("mock prover");
+        let prover =
+            MockProver::run(6, &circuit, vec![vec![note_commit, wrong]]).expect("mock prover");
         assert!(prover.verify().is_err());
     }
 }

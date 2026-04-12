@@ -1,6 +1,7 @@
 #[cfg(feature = "crypto")]
 pub mod crypto;
 pub mod peers;
+pub mod relay;
 #[cfg(feature = "security")]
 pub mod security;
 pub mod tor_net;

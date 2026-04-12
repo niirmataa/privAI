@@ -32,7 +32,8 @@ impl EscrowProofReadyHandoff {
         deadline_height: u64,
         requester_hint: Hash32,
     ) -> Result<Self, WalletError> {
-        let expected_signing_hash = Transaction::TransferNote(assembled.tx.clone()).tx_signing_hash();
+        let expected_signing_hash =
+            Transaction::TransferNote(assembled.tx.clone()).tx_signing_hash();
         if assembled.tx_signing_hash != expected_signing_hash {
             return Err(WalletError::Crypto(
                 "tx_signing_hash mismatch between assembled payload and tx body".into(),
@@ -124,9 +125,9 @@ impl EscrowAttachedProof {
         block: &Block,
     ) -> Result<BlockProofArtifacts, WalletError> {
         let artifacts = self.to_block_proof_artifacts(block.hash())?;
-        artifacts
-            .validate_against_block(block)
-            .map_err(|err| WalletError::Crypto(format!("block proof artifact validation failed: {err}")))?;
+        artifacts.validate_against_block(block).map_err(|err| {
+            WalletError::Crypto(format!("block proof artifact validation failed: {err}"))
+        })?;
         Ok(artifacts)
     }
 }
@@ -134,16 +135,16 @@ impl EscrowAttachedProof {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use privai_chain::ExecutionMode;
     use privai_chain::{
-        Amount14, AuxWitness, CanonicalEncode, InputAuth, InputRef, LweCiphertext, Nullifier,
-        OutputNote, RecipientBox, RecipientBoxPlaintext, SpendPolicy, TxCore, BlockTemplate,
-        TX_TYPE_TRANSFER_NOTE, PRIVAI_V0,
+        Amount14, AuxWitness, BlockTemplate, CanonicalEncode, InputAuth, InputRef, LweCiphertext,
+        Nullifier, OutputNote, RecipientBox, RecipientBoxPlaintext, SpendPolicy, TxCore, PRIVAI_V0,
+        TX_TYPE_TRANSFER_NOTE,
     };
     use privai_proof::{
         build_execution_bundle_from_transfer_proofs, TransferInputWitness, TransferOutputWitness,
         TransferStatement, TransferWitness,
     };
-    use privai_chain::ExecutionMode;
 
     fn sample_assembled() -> EscrowAssembledTx {
         let seed = 10u8;
@@ -272,7 +273,10 @@ mod tests {
         assert_eq!(handoff.tx, assembled.tx);
         assert_eq!(handoff.tx_signing_hash, assembled.tx_signing_hash);
         assert_eq!(handoff.statement_commit, assembled.tx.core.statement_commit);
-        assert_eq!(handoff.public_inputs_hash, handoff.proving_data.public_inputs_hash());
+        assert_eq!(
+            handoff.public_inputs_hash,
+            handoff.proving_data.public_inputs_hash()
+        );
         assert_eq!(handoff.proof_job.job_fee, 100);
         assert_eq!(handoff.proof_job.deadline_height, 200);
     }
@@ -338,8 +342,7 @@ mod tests {
         let handoff =
             EscrowProofReadyHandoff::build(&assembled, 100, 200, [8; 32]).expect("handoff");
 
-        let bad_system =
-            handoff.attach_single_tx_proof_result(vec![1], 0, vec![[9; 32]], [10; 32]);
+        let bad_system = handoff.attach_single_tx_proof_result(vec![1], 0, vec![[9; 32]], [10; 32]);
         assert!(
             matches!(bad_system, Err(WalletError::Crypto(msg)) if msg.contains("proof_system_id"))
         );
@@ -368,6 +371,9 @@ mod tests {
         assert_eq!(artifacts.entries.len(), 1);
         assert_eq!(artifacts.entries[0].tx_index, 0);
         assert_eq!(artifacts.execution_bundle, block.body.execution_bundle);
-        assert_eq!(artifacts.proof_certificates(), block.body.proof_certificates);
+        assert_eq!(
+            artifacts.proof_certificates(),
+            block.body.proof_certificates
+        );
     }
 }

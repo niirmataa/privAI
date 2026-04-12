@@ -1,0 +1,1 @@
+﻿# T-081-XIAOMI — Force First Code Landing Slice Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-081_XIAOMI_FORCE_FIRST_CODE_LANDING_SLICE/OUTPUT_XIAOMI.md ``` 

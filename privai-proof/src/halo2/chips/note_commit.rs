@@ -1,8 +1,8 @@
 use std::array;
 
 use halo2_gadgets::poseidon::{
-    Hash, Pow5Chip, Pow5Config,
     primitives::{self as poseidon, ConstantLength, P128Pow5T3},
+    Hash, Pow5Chip, Pow5Config,
 };
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
@@ -54,13 +54,7 @@ impl NoteCommitChip {
         meta.enable_equality(recipient_box_commit);
         meta.enable_equality(blinding);
 
-        let poseidon = Pow5Chip::configure::<P128Pow5T3>(
-            meta,
-            state,
-            partial_sbox,
-            rc_a,
-            rc_b,
-        );
+        let poseidon = Pow5Chip::configure::<P128Pow5T3>(meta, state, partial_sbox, rc_a, rc_b);
 
         NoteCommitConfig {
             poseidon,
@@ -296,8 +290,7 @@ mod tests {
             blinding: Some(Fp::from(55)),
         };
 
-        let prover = MockProver::run(7, &circuit, vec![vec![Fp::from(999)]])
-            .expect("mock prover");
+        let prover = MockProver::run(7, &circuit, vec![vec![Fp::from(999)]]).expect("mock prover");
         assert!(prover.verify().is_err());
     }
 }

@@ -1,10 +1,13 @@
 pub mod config;
+pub mod compute_session;
 pub mod consensus_loop;
 pub mod gossip;
+pub mod identity;
 pub mod mailbox_pull;
 pub mod escrow_stage;
 pub mod identity_provider;
 pub mod mempool;
+pub mod metering;
 pub mod net;
 pub mod node;
 pub mod proposer;

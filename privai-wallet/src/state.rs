@@ -1,11 +1,11 @@
 use std::collections::BTreeMap;
 
+use crate::small_payments_rail::RailContext;
 use nxms_transport::crypto::Keys;
 use privai_chain::{
     Amount14, BundleId, Hash32, Nullifier, OutputNote, ReceiveBundle, RecipientBoxPlaintext,
 };
 use serde::{Deserialize, Serialize};
-use crate::small_payments_rail::RailContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum BundleStatus {

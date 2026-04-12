@@ -49,14 +49,12 @@ impl CanonicalDecode for SpendPolicy {
                     timeout_block: read_u64(input)?,
                 })
             }
-            tag if tag == SpendPolicyTag::Escrow2of3 as u8 => {
-                Ok(SpendPolicy::Escrow2of3 {
-                    buyer_pk_hash: read_fixed(input)?,
-                    merchant_pk_hash: read_fixed(input)?,
-                    operator_pk_hash: read_fixed(input)?,
-                    timeout_block: read_u64(input)?,
-                })
-            }
+            tag if tag == SpendPolicyTag::Escrow2of3 as u8 => Ok(SpendPolicy::Escrow2of3 {
+                buyer_pk_hash: read_fixed(input)?,
+                merchant_pk_hash: read_fixed(input)?,
+                operator_pk_hash: read_fixed(input)?,
+                timeout_block: read_u64(input)?,
+            }),
             tag => Err(DecodeError::InvalidSpendPolicyTag(tag)),
         }
     }

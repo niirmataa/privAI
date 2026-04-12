@@ -4,9 +4,9 @@
 //! Recovery: Master Seed (256 bit) → odtworzenie WSZYSTKICH kluczy.
 //! See: PRIVAI_V0_FORMATS.md
 
-use zeroize::Zeroizing;
 use nxms_transport::crypto::{Keys, FF_FALCON_TEST_SEED_LEN};
 use privai_chain::Hash32;
+use zeroize::Zeroizing;
 
 /// Domeny KDF — każda gałąź drzewa kluczy ma własną domenę.
 const SPEND_ROOT_DOMAIN: &str = "privai:wallet:spend-root:v0";
@@ -18,9 +18,9 @@ const SPEND_DOMAIN: &str = "privai:wallet:spend:v0";
 const NULLIFIER_DOMAIN: &str = "privai:wallet:nk:v0";
 
 /// Hierarchia kluczy portfela.
-/// 
+///
 /// Master Seed (256 bit) → 4 root keys → per-bundle/per-note derivation.
-/// 
+///
 /// Zasady:
 /// - Spend Root → nigdy nie opuszcza urządzenia
 /// - Scan Root → może być wyeksportowany do trusted observer (delegacja skanowania)
@@ -41,7 +41,7 @@ pub struct WalletKeys {
 
 impl WalletKeys {
     /// Utwórz klucze z master seed.
-    /// 
+    ///
     /// Każdy root jest derived przez BLAKE3 z domeną + master_seed.
     /// Deterministyczny: ten sam seed → te same root keys.
     pub fn from_master_seed(seed: &[u8; 32]) -> Self {
@@ -77,7 +77,7 @@ impl WalletKeys {
     }
 
     /// Derive klucze dla bundla o danym indexie.
-    /// 
+    ///
     /// Zwraca Keys z:
     /// - Falcon signing keys (seeded z spend_root)
     /// - FrodoKEM keys (generowane losowo — KEM nie ma seeded wariantu w nxms-transport)
@@ -87,7 +87,8 @@ impl WalletKeys {
         let mut sig_seed = [0u8; FF_FALCON_TEST_SEED_LEN]; // 48 bajtów
         sig_seed[..32].copy_from_slice(&spend_seed_32);
         // Pozostałe 16 bajtów z drugiego hash
-        let spend_seed_ext = derive_key_with_index("privai:wallet:spend-ext:v0", &self.spend_root, bundle_index);
+        let spend_seed_ext =
+            derive_key_with_index("privai:wallet:spend-ext:v0", &self.spend_root, bundle_index);
         sig_seed[32..].copy_from_slice(&spend_seed_ext[..16]);
 
         // Generate keys: Falcon seeded + KEM random
@@ -95,7 +96,7 @@ impl WalletKeys {
     }
 
     /// Derive nullifier key dla danej noty.
-    /// 
+    ///
     /// Używane przez nadawcę do wstawienia NK do RecipientBoxPlaintext.
     /// Odbiorca może zweryfikować czy NK jest poprawnie derived.
     pub fn derive_nullifier_key(&self, note_index: u64) -> [u8; 32] {
@@ -103,7 +104,7 @@ impl WalletKeys {
     }
 
     /// Scan Root — do eksportu dla delegowanego skanowania.
-    /// 
+    ///
     /// Scan Root pozwala hint-matching BEZ możliwości spendowania.
     pub fn scan_root(&self) -> &[u8; 32] {
         &self.scan_root
@@ -115,7 +116,7 @@ impl WalletKeys {
     }
 
     /// Export skanowania (Scan Root + KEM Root) do lightweight scanning wallet.
-    /// 
+    ///
     /// **NIE zawiera Spend Root** — delegat może skanować ale nie spendować.
     pub fn export_scanning_delegate(&self) -> ScanningDelegate {
         ScanningDelegate {
@@ -134,7 +135,7 @@ pub struct ScanningDelegate {
 
 impl ScanningDelegate {
     /// Utwórz z wyeksportowanego scan_root.
-    /// 
+    ///
     /// **UWAGA**: KEM root jest potrzebny do KEM decapsulation.
     /// Bez niego delegat może tylko hint-matchować ale nie otwierać RecipientBox.
     pub fn from_roots(scan_root: [u8; 32], kem_root: [u8; 32]) -> Self {
@@ -220,14 +221,20 @@ mod tests {
         let bundle1 = keys.derive_bundle_keys(1).expect("derive 1");
 
         // Ten sam index → te same Falcon klucze (seeded)
-        assert_eq!(bundle0_a.sig_pk().expect("sig pk a"), bundle0_b.sig_pk().expect("sig pk b"));
+        assert_eq!(
+            bundle0_a.sig_pk().expect("sig pk a"),
+            bundle0_b.sig_pk().expect("sig pk b")
+        );
 
         // KEM jest generowany LOSOWO (nie seeded) — różne wywołania dają różne klucze
         // To jest oczekiwane zachowanie (KEM nie ma seeded wariantu w nxms-transport)
         // assert_ne!(bundle0_a.kem_pk().expect("kem pk a"), bundle0_b.kem_pk().expect("kem pk b"));
 
         // Różny index → różne Falcon klucze
-        assert_ne!(bundle0_a.sig_pk().expect("sig pk a"), bundle1.sig_pk().expect("sig pk 1"));
+        assert_ne!(
+            bundle0_a.sig_pk().expect("sig pk a"),
+            bundle1.sig_pk().expect("sig pk 1")
+        );
     }
 
     #[test]

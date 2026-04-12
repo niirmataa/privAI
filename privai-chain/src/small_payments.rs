@@ -1,10 +1,8 @@
 use serde::{Deserialize, Serialize};
 
-use crate::canonical::{
-    CanonicalEncode, write_fixed, write_u8, write_u32, write_u64,
-};
-use crate::primitives::{Hash32, Nullifier};
+use crate::canonical::{write_fixed, write_u32, write_u64, write_u8, CanonicalEncode};
 use crate::hash::domain_hash;
+use crate::primitives::{Hash32, Nullifier};
 
 pub const POLICY_DOMAIN: &str = "nxms_privai_policy_v0";
 pub const GRANT_DOMAIN: &str = "nxms_privai_grant_v0";
@@ -37,8 +35,8 @@ pub struct ServicePaymentPolicy {
     pub min_deposit_required: u64,
     pub max_spend_per_session: u64,
     pub max_spend_per_window: u64,
-    pub grant_expiry_rule: u32,       // seconds
-    pub settlement_window_rule: u32,  // seconds
+    pub grant_expiry_rule: u32,        // seconds
+    pub settlement_window_rule: u32,   // seconds
     pub requires_full_privacy_if: u64, // amount threshold
 }
 
@@ -75,7 +73,7 @@ pub struct SpendGrant {
     pub service_commit: Option<Hash32>,
     pub session_scope: Hash32,
     pub spend_cap: u64,
-    pub grant_expiry: u64, // absolute timestamp
+    pub grant_expiry: u64,      // absolute timestamp
     pub settlement_window: u64, // absolute timestamp
     pub policy_commit: Hash32,
     pub operator_sig: Vec<u8>,

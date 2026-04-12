@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-use crate::canonical::{CanonicalEncode, write_fixed, write_u16, write_u32};
+use crate::canonical::{write_fixed, write_u16, write_u32, CanonicalEncode};
 use crate::params::{LWE_DIMENSION, PLAINTEXT_SPACE_P};
 
 pub type Hash32 = [u8; 32];

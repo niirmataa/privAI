@@ -1,0 +1,1 @@
+﻿# T-076-XIAOMI — Force Lease Policy Binding Decision  Status: prompt_ready  Created: 2026-04-12  Output path:  ```text spec/PRIVAI_V0_PRIVATE_COMPUTE/tasks/T-076_XIAOMI_FORCE_LEASE_POLICY_BINDING_DECISION/OUTPUT_XIAOMI.md ``` 
