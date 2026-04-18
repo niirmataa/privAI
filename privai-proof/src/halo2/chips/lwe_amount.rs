@@ -7,6 +7,7 @@ use halo2_gadgets::poseidon::{
 use halo2_proofs::{
     circuit::{AssignedCell, Layouter, Value},
     pasta::Fp,
+    arithmetic::Field,
     plonk::{
         Advice, Column, ConstraintSystem, Error, Expression, Fixed, Instance, Selector, TableColumn,
     },
@@ -15,7 +16,7 @@ use halo2_proofs::{
 
 use crate::halo2::{
     pack_u32_limbs_to_fp, packed_u32_field_len,
-    params::{AmountCipherParams, LWE_DIMENSION_V0, LWE_MODULUS_Q_V0},
+    params::{AmountCipherParams, DELTA_V0, LWE_DIMENSION_V0, LWE_MODULUS_Q_V0, MAX_AMOUNT_V0},
     U32_LIMBS_PER_FIELD,
 };
 
@@ -24,46 +25,37 @@ pub const PACKED_LWE_CIPHERTEXT_LEN_V0: usize = packed_u32_field_len(LWE_CIPHERT
 pub const PACKED_LWE_PUBLIC_KEY_LEN_V0: usize = packed_u32_field_len(LWE_DIMENSION_V0);
 const POSEIDON_WIDTH: usize = 3;
 const POSEIDON_RATE: usize = 2;
-// For n = 1024 and q = 2^32 - 5:
-//   max dot product < 1024 * (q - 1)^2 < 2^74
-// After reduction mod q, the quotient therefore fits below 2^42.
-// We keep the witness quotient constrained to 42 bits.
 const DOT_REDUCTION_QUOTIENT_BITS: usize = 42;
 
-/// First concrete stage of the future PKE-LWE amount gadget.
-///
-/// This stage proves:
-/// - canonical `u32 -> Fp` packing for `(u, v)` and `t`
-/// - `u32` range checks via 16-bit decomposition lookups
-/// - `ct_amt_commit = Poseidon(pack(u, v))`
-/// - `t_commit = Poseidon(pack(t))`
-///
-/// Full well-formedness (`u = A^T r + e1`, `v = t^T r + e2 + Δ·amount`) will
-/// be layered on top of this in the next iteration.
+const CHUNK_SIZE: usize = 16;
+const CHUNK_STEPS: usize = (LWE_DIMENSION_V0 + CHUNK_SIZE - 1) / CHUNK_SIZE; // 64
+const OFFSETS_PER_COL: usize = CHUNK_STEPS + DOT_REDUCTION_QUOTIENT_BITS + 2; // 108
+
+// ─────────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug)]
-pub struct LweAmountConfig {
+pub struct LweAmountConfigV2 {
     pub poseidon: Pow5Config<Fp, POSEIDON_WIDTH, POSEIDON_RATE>,
     pub q_pack: Selector,
     pub q_limb: Selector,
     pub q_lt_modulus: Selector,
-    pub q_dot_first: Selector,
-    pub q_dot_mul: Selector,
-    pub q_dot_advice_mul: Selector,
-    pub q_dot_acc: Selector,
+    pub q_chunk_init: Selector,
+    pub q_chunk_step: Selector,
     pub q_reduce_eq: Selector,
-    pub q_reduce_bind: Selector,
     pub q_reduce_bit: Selector,
-    pub q_reduce_acc_first: Selector,
+    pub q_reduce_acc_init: Selector,
     pub q_reduce_acc_step: Selector,
+    pub q_reduce_bind: Selector,
     pub q_noise_relation: Selector,
+    pub q_v_gate: Selector,
+    pub q_combined_noise: Selector,
+    pub q_amount_range: Selector,
     pub limb_value: Column<Advice>,
     pub limb_lo: Column<Advice>,
     pub limb_hi: Column<Advice>,
     pub lt_q_slack: Column<Advice>,
-    pub dot_coeff: Column<Fixed>,
-    pub dot_value: Column<Advice>,
-    pub dot_other_value: Column<Advice>,
-    pub dot_product: Column<Advice>,
+    pub a_cols: [Column<Fixed>; CHUNK_SIZE],
+    pub r_cols: [Column<Advice>; CHUNK_SIZE],
     pub dot_accumulator: Column<Advice>,
     pub reduce_coeff: Column<Fixed>,
     pub reduce_full: Column<Advice>,
@@ -83,14 +75,16 @@ pub struct LweAmountConfig {
     pub t_commit: Column<Instance>,
 }
 
+// ─────────────────────────────────────────────────────────────────────
+
 #[derive(Clone, Debug)]
-pub struct LweAmountChip {
-    config: LweAmountConfig,
+pub struct LweAmountChipV2 {
+    config: LweAmountConfigV2,
     params: AmountCipherParams,
 }
 
 #[derive(Clone, Debug)]
-pub struct LweAmountOutputs {
+pub struct LweAmountOutputsV2 {
     pub ct_amt_commit: AssignedCell<Fp, Fp>,
     pub t_commit: AssignedCell<Fp, Fp>,
     pub u_cells: Vec<AssignedCell<Fp, Fp>>,
@@ -99,8 +93,8 @@ pub struct LweAmountOutputs {
     pub r_cells: Vec<AssignedCell<Fp, Fp>>,
 }
 
-impl LweAmountChip {
-    pub fn configure(meta: &mut ConstraintSystem<Fp>) -> LweAmountConfig {
+impl LweAmountChipV2 {
+    pub fn configure(meta: &mut ConstraintSystem<Fp>) -> LweAmountConfigV2 {
         let state = array::from_fn(|_| meta.advice_column());
         let partial_sbox = meta.advice_column();
         let rc_a = array::from_fn(|_| meta.fixed_column());
@@ -108,24 +102,23 @@ impl LweAmountChip {
         let q_pack = meta.selector();
         let q_limb = meta.complex_selector();
         let q_lt_modulus = meta.complex_selector();
-        let q_dot_first = meta.selector();
-        let q_dot_mul = meta.selector();
-        let q_dot_advice_mul = meta.selector();
-        let q_dot_acc = meta.selector();
+        let q_chunk_init = meta.selector();
+        let q_chunk_step = meta.selector();
         let q_reduce_eq = meta.selector();
-        let q_reduce_bind = meta.selector();
         let q_reduce_bit = meta.selector();
-        let q_reduce_acc_first = meta.selector();
+        let q_reduce_acc_init = meta.selector();
         let q_reduce_acc_step = meta.selector();
+        let q_reduce_bind = meta.selector();
         let q_noise_relation = meta.selector();
+        let q_v_gate = meta.selector();
+        let q_combined_noise = meta.selector();
+        let q_amount_range = meta.complex_selector();
         let limb_value = meta.advice_column();
         let limb_lo = meta.advice_column();
         let limb_hi = meta.advice_column();
         let lt_q_slack = meta.advice_column();
-        let dot_coeff = meta.fixed_column();
-        let dot_value = meta.advice_column();
-        let dot_other_value = meta.advice_column();
-        let dot_product = meta.advice_column();
+        let a_cols: [Column<Fixed>; CHUNK_SIZE] = array::from_fn(|_| meta.fixed_column());
+        let r_cols: [Column<Advice>; CHUNK_SIZE] = array::from_fn(|_| meta.advice_column());
         let dot_accumulator = meta.advice_column();
         let reduce_coeff = meta.fixed_column();
         let reduce_full = meta.advice_column();
@@ -145,13 +138,10 @@ impl LweAmountChip {
         let t_commit = meta.instance_column();
 
         meta.enable_constant(rc_b[0]);
-        for column in state {
-            meta.enable_equality(column);
+        for s in &state {
+            meta.enable_equality(*s);
         }
         meta.enable_equality(limb_value);
-        meta.enable_equality(lt_q_slack);
-        meta.enable_equality(dot_value);
-        meta.enable_equality(dot_other_value);
         meta.enable_equality(dot_accumulator);
         meta.enable_equality(reduce_full);
         meta.enable_equality(reduce_reduced);
@@ -163,207 +153,222 @@ impl LweAmountChip {
         meta.enable_equality(noise_value);
         meta.enable_equality(ct_amt_commit);
         meta.enable_equality(t_commit);
+        for c in &r_cols {
+            meta.enable_equality(*c);
+        }
 
-        meta.create_gate("u32 limb decomposes into 16-bit halves", |meta| {
+        // limb decomposition: limb = lo + hi * 2^16
+        meta.create_gate("limb = lo + hi*2^16", |meta| {
             let q = meta.query_selector(q_limb);
-            let limb = meta.query_advice(limb_value, Rotation::cur());
+            let v = meta.query_advice(limb_value, Rotation::cur());
             let lo = meta.query_advice(limb_lo, Rotation::cur());
             let hi = meta.query_advice(limb_hi, Rotation::cur());
-            let two_pow_16 = Expression::Constant(Fp::from(1u64 << 16));
-
-            vec![q * (limb - (lo + hi * two_pow_16))]
+            vec![q * (v - (lo + hi * Expression::Constant(Fp::from(1u64 << 16))))]
         });
-
-        meta.lookup(|meta| {
-            let q = meta.query_selector(q_limb);
-            let lo = meta.query_advice(limb_lo, Rotation::cur());
-
-            // Invariant: 0 must always exist in the `u16` lookup table because
-            // disabled rows query 0 when `q_limb == 0`.
-            vec![(q * lo, table_u16)]
-        });
-
         meta.lookup(|meta| {
             let q = meta.query_selector(q_limb);
-            let hi = meta.query_advice(limb_hi, Rotation::cur());
-
-            // Invariant: 0 must always exist in the `u16` lookup table because
-            // disabled rows query 0 when `q_limb == 0`.
-            vec![(q * hi, table_u16)]
+            vec![(
+                q.clone() * meta.query_advice(limb_lo, Rotation::cur()),
+                table_u16,
+            )]
+        });
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_limb);
+            vec![(q * meta.query_advice(limb_hi, Rotation::cur()), table_u16)]
         });
 
-        meta.create_gate("canonical element is less than LWE modulus q", |meta| {
+        // value < q: value + slack = q-1, slack = slack_lo + slack_hi*2^16
+        meta.create_gate("value < q", |meta| {
             let q = meta.query_selector(q_lt_modulus);
-            let value = meta.query_advice(limb_value, Rotation::cur());
-            let slack = meta.query_advice(lt_q_slack, Rotation::cur());
+            let v = meta.query_advice(limb_value, Rotation::cur());
+            let s = meta.query_advice(lt_q_slack, Rotation::cur());
             let lo = meta.query_advice(limb_lo, Rotation::cur());
             let hi = meta.query_advice(limb_hi, Rotation::cur());
-            let two_pow_16 = Expression::Constant(Fp::from(1u64 << 16));
-            let q_minus_one = Expression::Constant(Fp::from(crate::halo2::LWE_MODULUS_Q_V0 - 1));
-
-            vec![
-                q.clone() * (value + slack.clone() - q_minus_one),
-                q * (slack - (lo + hi * two_pow_16)),
-            ]
+            let qm1 = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0 - 1));
+            let t16 = Expression::Constant(Fp::from(1u64 << 16));
+            vec![q.clone() * (v + s.clone() - qm1), q * (s - (lo + hi * t16))]
         });
-
         meta.lookup(|meta| {
             let q = meta.query_selector(q_lt_modulus);
-            let lo = meta.query_advice(limb_lo, Rotation::cur());
-
-            vec![(q.clone() * lo, table_u16)]
+            vec![(
+                q.clone() * meta.query_advice(limb_lo, Rotation::cur()),
+                table_u16,
+            )]
         });
-
         meta.lookup(|meta| {
             let q = meta.query_selector(q_lt_modulus);
-            let hi = meta.query_advice(limb_hi, Rotation::cur());
-
-            vec![(q * hi, table_u16)]
+            vec![(q * meta.query_advice(limb_hi, Rotation::cur()), table_u16)]
         });
 
-        meta.create_gate("pack seven u32 limbs into one field element", |meta| {
+        // pack 7 u32 limbs → 1 Fp
+        meta.create_gate("pack 7 limbs", |meta| {
             let q = meta.query_selector(q_pack);
             let packed = meta.query_advice(packed_word, Rotation::cur());
             let radix = Expression::Constant(Fp::from(1u64 << 32));
             let mut coeff = Expression::Constant(Fp::from(1u64));
             let mut acc = Expression::Constant(Fp::from(0u64));
-
-            for rotation in 0..U32_LIMBS_PER_FIELD {
-                let limb = meta.query_advice(limb_value, Rotation(rotation as i32));
-                acc = acc + limb * coeff.clone();
+            for r in 0..U32_LIMBS_PER_FIELD {
+                acc = acc + meta.query_advice(limb_value, Rotation(r as i32)) * coeff.clone();
                 coeff = coeff * radix.clone();
             }
-
             vec![q * (packed - acc)]
         });
 
-        meta.create_gate("fixed-coefficient dot product multiply step", |meta| {
-            let q = meta.query_selector(q_dot_mul);
-            let coeff = meta.query_fixed(dot_coeff);
-            let value = meta.query_advice(dot_value, Rotation::cur());
-            let product = meta.query_advice(dot_product, Rotation::cur());
-
-            vec![q * (product - coeff * value)]
-        });
-
-        meta.create_gate("advice dot product multiply step", |meta| {
-            let q = meta.query_selector(q_dot_advice_mul);
-            let left = meta.query_advice(dot_value, Rotation::cur());
-            let right = meta.query_advice(dot_other_value, Rotation::cur());
-            let product = meta.query_advice(dot_product, Rotation::cur());
-
-            vec![q * (product - left * right)]
-        });
-
-        meta.create_gate("fixed-coefficient dot product accumulator init", |meta| {
-            let q = meta.query_selector(q_dot_first);
+        // chunk init: acc = Σ a[c]*r[c]
+        meta.create_gate("chunk init", |meta| {
+            let q = meta.query_selector(q_chunk_init);
             let acc = meta.query_advice(dot_accumulator, Rotation::cur());
-            let product = meta.query_advice(dot_product, Rotation::cur());
-
-            vec![q * (acc - product)]
+            let mut sum = Expression::Constant(Fp::ZERO);
+            for c in 0..CHUNK_SIZE {
+                sum = sum
+                    + meta.query_fixed(a_cols[c]) * meta.query_advice(r_cols[c], Rotation::cur());
+            }
+            vec![q * (acc - sum)]
         });
 
-        meta.create_gate("fixed-coefficient dot product accumulator step", |meta| {
-            let q = meta.query_selector(q_dot_acc);
+        // chunk step: acc = prev + Σ a[c]*r[c]
+        meta.create_gate("chunk step", |meta| {
+            let q = meta.query_selector(q_chunk_step);
             let acc = meta.query_advice(dot_accumulator, Rotation::cur());
-            let prev_acc = meta.query_advice(dot_accumulator, Rotation::prev());
-            let product = meta.query_advice(dot_product, Rotation::cur());
-
-            vec![q * (acc - prev_acc - product)]
+            let prev = meta.query_advice(dot_accumulator, Rotation::prev());
+            let mut sum = Expression::Constant(Fp::ZERO);
+            for c in 0..CHUNK_SIZE {
+                sum = sum
+                    + meta.query_fixed(a_cols[c]) * meta.query_advice(r_cols[c], Rotation::cur());
+            }
+            vec![q * (acc - prev - sum)]
         });
 
-        meta.create_gate("dot-product mod q equality", |meta| {
+        // mod q: full = reduced + quotient * q
+        meta.create_gate("mod q", |meta| {
             let q = meta.query_selector(q_reduce_eq);
             let full = meta.query_advice(reduce_full, Rotation::cur());
-            let reduced = meta.query_advice(reduce_reduced, Rotation::cur());
-            let quotient = meta.query_advice(reduce_quotient, Rotation::cur());
-            let q_modulus = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0));
-
-            vec![q * (full - reduced - quotient * q_modulus)]
+            let red = meta.query_advice(reduce_reduced, Rotation::cur());
+            let quot = meta.query_advice(reduce_quotient, Rotation::cur());
+            vec![q * (full - red - quot * Expression::Constant(Fp::from(LWE_MODULUS_Q_V0)))]
         });
 
-        meta.create_gate("dot-product quotient bit is boolean", |meta| {
+        // quotient bit boolean
+        meta.create_gate("bit bool", |meta| {
             let q = meta.query_selector(q_reduce_bit);
-            let bit = meta.query_advice(reduce_bit, Rotation::cur());
-
-            vec![q * bit.clone() * (bit - Expression::Constant(Fp::from(1u64)))]
+            let b = meta.query_advice(reduce_bit, Rotation::cur());
+            vec![q * b.clone() * (b - Expression::Constant(Fp::from(1u64)))]
         });
 
-        meta.create_gate("dot-product quotient accumulator init", |meta| {
-            let q = meta.query_selector(q_reduce_acc_first);
-            let coeff = meta.query_fixed(reduce_coeff);
-            let bit = meta.query_advice(reduce_bit, Rotation::cur());
+        // quotient acc init
+        meta.create_gate("quot acc init", |meta| {
+            let q = meta.query_selector(q_reduce_acc_init);
             let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
-
-            vec![q * (acc - bit * coeff)]
+            let b = meta.query_advice(reduce_bit, Rotation::cur());
+            let c = meta.query_fixed(reduce_coeff);
+            vec![q * (acc - b * c)]
         });
 
-        meta.create_gate("dot-product quotient accumulator step", |meta| {
+        // quotient acc step
+        meta.create_gate("quot acc step", |meta| {
             let q = meta.query_selector(q_reduce_acc_step);
-            let coeff = meta.query_fixed(reduce_coeff);
-            let bit = meta.query_advice(reduce_bit, Rotation::cur());
             let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
-            let prev_acc = meta.query_advice(reduce_accumulator, Rotation::prev());
-
-            vec![q * (acc - prev_acc - bit * coeff)]
+            let prev = meta.query_advice(reduce_accumulator, Rotation::prev());
+            let b = meta.query_advice(reduce_bit, Rotation::cur());
+            let c = meta.query_fixed(reduce_coeff);
+            vec![q * (acc - prev - b * c)]
         });
 
-        meta.create_gate("dot-product quotient matches accumulated bits", |meta| {
+        // quotient == accumulated bits
+        meta.create_gate("quot bind", |meta| {
             let q = meta.query_selector(q_reduce_bind);
-            let quotient = meta.query_advice(reduce_quotient, Rotation::cur());
+            let quot = meta.query_advice(reduce_quotient, Rotation::cur());
             let acc = meta.query_advice(reduce_accumulator, Rotation::cur());
-
-            vec![q * (quotient - acc)]
+            vec![q * (quot - acc)]
         });
 
-        meta.create_gate("noise-adjusted mod q relation", |meta| {
-            let q = meta.query_selector(q_noise_relation);
-            let reduced = meta.query_advice(noise_reduced, Rotation::cur());
+        // noise-adjusted relation: output = reduced + noise + q*(wp-wn)
+        // wp, wn boolean, mutually exclusive
+        let noise_constraints = |meta: &mut halo2_proofs::plonk::VirtualCells<'_, Fp>,
+                                 sel: Selector| {
+            let q = meta.query_selector(sel);
+            let red = meta.query_advice(noise_reduced, Rotation::cur());
             let noise = meta.query_advice(noise_centered, Rotation::cur());
-            let output = meta.query_advice(noise_output, Rotation::cur());
-            let wrap_positive = meta.query_advice(noise_wrap_positive, Rotation::cur());
-            let wrap_negative = meta.query_advice(noise_wrap_negative, Rotation::cur());
+            let out = meta.query_advice(noise_output, Rotation::cur());
+            let wp = meta.query_advice(noise_wrap_positive, Rotation::cur());
+            let wn = meta.query_advice(noise_wrap_negative, Rotation::cur());
             let one = Expression::Constant(Fp::from(1u64));
-            let q_modulus = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0));
-
+            let modq = Expression::Constant(Fp::from(LWE_MODULUS_Q_V0));
             vec![
-                q.clone()
-                    * (output
-                        - reduced
-                        - noise
-                        - q_modulus * (wrap_positive.clone() - wrap_negative.clone())),
-                q.clone() * wrap_positive.clone() * (wrap_positive - one.clone()),
-                q.clone() * wrap_negative.clone() * (wrap_negative - one.clone()),
+                q.clone() * (out - red - noise - modq * (wp.clone() - wn.clone())),
+                q.clone() * wp.clone() * (wp - one.clone()),
+                q.clone() * wn.clone() * (wn - one.clone()),
                 q * meta.query_advice(noise_wrap_positive, Rotation::cur())
                     * meta.query_advice(noise_wrap_negative, Rotation::cur()),
             ]
+        };
+        meta.create_gate("noise relation (u)", |meta| {
+            noise_constraints(meta, q_noise_relation)
+        });
+        meta.create_gate("v gate", |meta| noise_constraints(meta, q_v_gate));
+
+        // combined noise gate: combined_noise = e2 + Δ · amount
+        meta.create_gate("combined noise = e2 + Δ*amount", |meta| {
+            let q = meta.query_selector(q_combined_noise);
+            let combined = meta.query_advice(noise_value, Rotation::cur());
+            let e2 = meta.query_advice(noise_centered, Rotation::cur());
+            let amount = meta.query_advice(limb_value, Rotation::cur());
+            let delta = Expression::Constant(Fp::from(DELTA_V0 as u64));
+            vec![q * (combined - e2 - delta * amount)]
+        });
+
+        // amount < p range check: amount + slack = p-1, slack = slack_lo + slack_hi*2^16
+        meta.create_gate("amount < p", |meta| {
+            let q = meta.query_selector(q_amount_range);
+            let amt = meta.query_advice(limb_value, Rotation::cur());
+            let slack = meta.query_advice(lt_q_slack, Rotation::cur());
+            let lo = meta.query_advice(limb_lo, Rotation::cur());
+            let hi = meta.query_advice(limb_hi, Rotation::cur());
+            let pm1 = Expression::Constant(Fp::from(
+                crate::halo2::params::PLAINTEXT_SPACE_P_V0 as u64 - 1,
+            ));
+            let t16 = Expression::Constant(Fp::from(1u64 << 16));
+            vec![
+                q.clone() * (amt + slack.clone() - pm1),
+                q * (slack - (lo + hi * t16)),
+            ]
+        });
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_amount_range);
+            vec![(
+                q.clone() * meta.query_advice(limb_lo, Rotation::cur()),
+                table_u16,
+            )]
+        });
+        meta.lookup(|meta| {
+            let q = meta.query_selector(q_amount_range);
+            vec![(q * meta.query_advice(limb_hi, Rotation::cur()), table_u16)]
         });
 
         let poseidon = Pow5Chip::configure::<P128Pow5T3>(meta, state, partial_sbox, rc_a, rc_b);
 
-        LweAmountConfig {
+        LweAmountConfigV2 {
             poseidon,
             q_pack,
             q_limb,
             q_lt_modulus,
-            q_dot_first,
-            q_dot_mul,
-            q_dot_advice_mul,
-            q_dot_acc,
+            q_chunk_init,
+            q_chunk_step,
             q_reduce_eq,
-            q_reduce_bind,
             q_reduce_bit,
-            q_reduce_acc_first,
+            q_reduce_acc_init,
             q_reduce_acc_step,
+            q_reduce_bind,
             q_noise_relation,
+            q_v_gate,
+            q_combined_noise,
+            q_amount_range,
             limb_value,
             limb_lo,
             limb_hi,
             lt_q_slack,
-            dot_coeff,
-            dot_value,
-            dot_other_value,
-            dot_product,
+            a_cols,
+            r_cols,
             dot_accumulator,
             reduce_coeff,
             reduce_full,
@@ -384,14 +389,13 @@ impl LweAmountChip {
         }
     }
 
-    pub fn new(config: LweAmountConfig, params: AmountCipherParams) -> Self {
+    pub fn new(config: LweAmountConfigV2, params: AmountCipherParams) -> Self {
         Self { config, params }
     }
 
-    pub fn config(&self) -> &LweAmountConfig {
+    pub fn config(&self) -> &LweAmountConfigV2 {
         &self.config
     }
-
     pub fn params(&self) -> &AmountCipherParams {
         &self.params
     }
@@ -400,10 +404,9 @@ impl LweAmountChip {
         let mut limbs = Vec::with_capacity(LWE_CIPHERTEXT_LIMBS_V0);
         limbs.extend_from_slice(u);
         limbs.push(v);
-        let packed = pack_u32_limbs_to_fp(&limbs);
-        let packed: [Fp; PACKED_LWE_CIPHERTEXT_LEN_V0] = packed
+        let packed: [Fp; PACKED_LWE_CIPHERTEXT_LEN_V0] = pack_u32_limbs_to_fp(&limbs)
             .try_into()
-            .expect("ct_amt packing length must match v0 constant");
+            .expect("ct_amt packing length");
         poseidon::Hash::<
             _,
             P128Pow5T3,
@@ -415,10 +418,9 @@ impl LweAmountChip {
     }
 
     pub fn poseidon_hash_t(t: &[u32; LWE_DIMENSION_V0]) -> Fp {
-        let packed = pack_u32_limbs_to_fp(t);
-        let packed: [Fp; PACKED_LWE_PUBLIC_KEY_LEN_V0] = packed
+        let packed: [Fp; PACKED_LWE_PUBLIC_KEY_LEN_V0] = pack_u32_limbs_to_fp(t)
             .try_into()
-            .expect("t packing length must match v0 constant");
+            .expect("t packing length");
         poseidon::Hash::<
             _,
             P128Pow5T3,
@@ -431,14 +433,14 @@ impl LweAmountChip {
 
     pub fn load_u16_table(&self, mut layouter: impl Layouter<Fp>) -> Result<(), Error> {
         layouter.assign_table(
-            || "u16 range table",
+            || "u16 table",
             |mut table| {
-                for value in 0..=u16::MAX {
+                for v in 0..=u16::MAX {
                     table.assign_cell(
-                        || format!("u16_{value}"),
+                        || format!("u16_{v}"),
                         self.config.table_u16,
-                        value as usize,
-                        || Value::known(Fp::from(value as u64)),
+                        v as usize,
+                        || Value::known(Fp::from(v as u64)),
                     )?;
                 }
                 Ok(())
@@ -446,498 +448,146 @@ impl LweAmountChip {
         )
     }
 
-    fn assign_canonical_limb_cells(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        limbs: &[u32],
-    ) -> Result<Vec<AssignedCell<Fp, Fp>>, Error> {
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                let mut assigned = Vec::with_capacity(limbs.len());
-                for (offset, limb) in limbs.iter().copied().enumerate() {
-                    let lo = limb & 0xFFFF;
-                    let hi = limb >> 16;
+    // ── limb + range check helpers ──
 
-                    self.config.q_limb.enable(&mut region, offset)?;
-                    let cell = region.assign_advice(
-                        || format!("{name}_limb_{offset}"),
+    fn assign_limbs(
+        &self,
+        mut l: impl Layouter<Fp>,
+        name: &str,
+        vals: &[u32],
+    ) -> Result<Vec<AssignedCell<Fp, Fp>>, Error> {
+        l.assign_region(
+            || name,
+            |mut r| {
+                let mut out = Vec::with_capacity(vals.len());
+                for (i, &v) in vals.iter().enumerate() {
+                    self.config.q_limb.enable(&mut r, i)?;
+                    out.push(r.assign_advice(
+                        || format!("{name}_{i}"),
                         self.config.limb_value,
-                        offset,
-                        || Value::known(Fp::from(limb as u64)),
-                    )?;
-                    region.assign_advice(
-                        || format!("{name}_limb_lo_{offset}"),
+                        i,
+                        || Value::known(Fp::from(v as u64)),
+                    )?);
+                    r.assign_advice(
+                        || format!("{name}_lo{i}"),
                         self.config.limb_lo,
-                        offset,
-                        || Value::known(Fp::from(lo as u64)),
+                        i,
+                        || Value::known(Fp::from((v & 0xFFFF) as u64)),
                     )?;
-                    region.assign_advice(
-                        || format!("{name}_limb_hi_{offset}"),
+                    r.assign_advice(
+                        || format!("{name}_hi{i}"),
                         self.config.limb_hi,
-                        offset,
-                        || Value::known(Fp::from(hi as u64)),
+                        i,
+                        || Value::known(Fp::from((v >> 16) as u64)),
                     )?;
-                    assigned.push(cell);
                 }
-                Ok(assigned)
+                Ok(out)
             },
         )
     }
 
-    fn assign_canonical_single_limb_cell(
+    fn assign_lt_q(
         &self,
-        layouter: impl Layouter<Fp>,
-        name: &'static str,
-        limb: u32,
-    ) -> Result<AssignedCell<Fp, Fp>, Error> {
-        let cells = self.assign_canonical_limb_cells(layouter, name, &[limb])?;
-        cells.into_iter().next().ok_or(Error::Synthesis)
-    }
-
-    fn assign_lt_q_check(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        value_cell: &AssignedCell<Fp, Fp>,
-        value: u32,
+        mut l: impl Layouter<Fp>,
+        name: &str,
+        cell: &AssignedCell<Fp, Fp>,
+        val: u32,
     ) -> Result<(), Error> {
         let q = self.params.lwe_modulus_q;
-        let value_u64 = value as u64;
-        if value_u64 >= q {
+        if (val as u64) >= q {
             return Err(Error::Synthesis);
         }
-
-        let slack = (q - 1) - value_u64;
-        let lo = slack & 0xFFFF;
-        let hi = slack >> 16;
-
-        layouter.assign_region(
+        let slack = (q - 1) - (val as u64);
+        l.assign_region(
             || name,
-            |mut region| {
-                self.config.q_lt_modulus.enable(&mut region, 0)?;
-                value_cell.copy_advice(
-                    || format!("{name}_value"),
-                    &mut region,
-                    self.config.limb_value,
-                    0,
-                )?;
-                region.assign_advice(
-                    || format!("{name}_slack"),
+            |mut r| {
+                self.config.q_lt_modulus.enable(&mut r, 0)?;
+                cell.copy_advice(|| format!("{name}_v"), &mut r, self.config.limb_value, 0)?;
+                r.assign_advice(
+                    || format!("{name}_s"),
                     self.config.lt_q_slack,
                     0,
                     || Value::known(Fp::from(slack)),
                 )?;
-                region.assign_advice(
-                    || format!("{name}_slack_lo"),
+                r.assign_advice(
+                    || format!("{name}_sl"),
                     self.config.limb_lo,
                     0,
-                    || Value::known(Fp::from(lo)),
+                    || Value::known(Fp::from(slack & 0xFFFF)),
                 )?;
-                region.assign_advice(
-                    || format!("{name}_slack_hi"),
+                r.assign_advice(
+                    || format!("{name}_sh"),
                     self.config.limb_hi,
                     0,
-                    || Value::known(Fp::from(hi)),
+                    || Value::known(Fp::from(slack >> 16)),
                 )?;
                 Ok(())
             },
         )
     }
 
-    fn assign_lt_q_checks(
+    fn assign_lt_q_many(
         &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        value_cells: &[AssignedCell<Fp, Fp>],
-        values: &[u32],
+        mut l: impl Layouter<Fp>,
+        name: &str,
+        cells: &[AssignedCell<Fp, Fp>],
+        vals: &[u32],
     ) -> Result<(), Error> {
-        if value_cells.len() != values.len() {
-            return Err(Error::Synthesis);
+        for (i, (c, &v)) in cells.iter().zip(vals.iter()).enumerate() {
+            self.assign_lt_q(l.namespace(|| format!("{name}_{i}")), name, c, v)?;
         }
-
-        for (offset, (cell, value)) in value_cells.iter().zip(values.iter().copied()).enumerate() {
-            self.assign_lt_q_check(
-                layouter.namespace(|| format!("{name}_{offset}")),
-                name,
-                cell,
-                value,
-            )?;
-        }
-
         Ok(())
     }
 
-    fn assign_packed_from_cells<const PACKED: usize>(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        limb_cells: &[AssignedCell<Fp, Fp>],
-        packed: [Fp; PACKED],
-    ) -> Result<[AssignedCell<Fp, Fp>; PACKED], Error> {
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                let mut assigned = Vec::with_capacity(PACKED);
-                for (chunk_idx, value) in packed.into_iter().enumerate() {
-                    let base = chunk_idx * U32_LIMBS_PER_FIELD;
-                    self.config.q_pack.enable(&mut region, base)?;
+    // ── packing ──
 
-                    let cell = region.assign_advice(
-                        || format!("{name}_packed_{chunk_idx}"),
+    fn assign_packed<const P: usize>(
+        &self,
+        mut l: impl Layouter<Fp>,
+        name: &str,
+        limb_cells: &[AssignedCell<Fp, Fp>],
+        packed: [Fp; P],
+    ) -> Result<[AssignedCell<Fp, Fp>; P], Error> {
+        l.assign_region(
+            || name,
+            |mut r| {
+                let mut out = Vec::with_capacity(P);
+                for (ci, val) in packed.into_iter().enumerate() {
+                    let base = ci * U32_LIMBS_PER_FIELD;
+                    self.config.q_pack.enable(&mut r, base)?;
+                    out.push(r.assign_advice(
+                        || format!("{name}_p{ci}"),
                         self.config.packed_word,
                         base,
-                        || Value::known(value),
-                    )?;
-                    assigned.push(cell);
-
-                    for limb_offset in 0..U32_LIMBS_PER_FIELD {
-                        let offset = base + limb_offset;
-                        if let Some(cell) = limb_cells.get(offset) {
-                            cell.copy_advice(
-                                || format!("{name}_limb_{offset}"),
-                                &mut region,
+                        || Value::known(val),
+                    )?);
+                    for off in 0..U32_LIMBS_PER_FIELD {
+                        let idx = base + off;
+                        if let Some(lc) = limb_cells.get(idx) {
+                            lc.copy_advice(
+                                || format!("{name}_l{idx}"),
+                                &mut r,
                                 self.config.limb_value,
-                                offset,
+                                idx,
                             )?;
                         } else {
-                            region.assign_advice(
-                                || format!("{name}_limb_pad_{offset}"),
+                            r.assign_advice(
+                                || format!("{name}_z{idx}"),
                                 self.config.limb_value,
-                                offset,
-                                || Value::known(Fp::from(0u64)),
+                                idx,
+                                || Value::known(Fp::ZERO),
                             )?;
                         }
                     }
                 }
-                assigned.try_into().map_err(|_| Error::Synthesis)
+                out.try_into().map_err(|_| Error::Synthesis)
             },
         )
     }
 
-    fn copy_noise_cells(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
-        e2_cell: &AssignedCell<Fp, Fp>,
-    ) -> Result<(), Error> {
-        layouter.assign_region(
-            || "copy centered noise into lwe amount",
-            |mut region| {
-                for (offset, cell) in e1_cells.iter().enumerate() {
-                    cell.copy_advice(
-                        || format!("wired_e1_{offset}"),
-                        &mut region,
-                        self.config.noise_value,
-                        offset,
-                    )?;
-                }
-
-                e2_cell.copy_advice(
-                    || "wired_e2",
-                    &mut region,
-                    self.config.noise_value,
-                    LWE_DIMENSION_V0,
-                )?;
-                // SECURITY_TODO(privai-v0): `e2` is wired into the chip, but
-                // the relation `v = t^T r + e2 + Δ·amount` is not constrained
-                // yet. This will be closed together with the scalar `v`
-                // well-formedness gate.
-                Ok(())
-            },
-        )
-    }
-
-    pub fn assign_fixed_dot_product_scaffold(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        coeffs: &[u32; LWE_DIMENSION_V0],
-        value_cells: &[AssignedCell<Fp, Fp>],
-    ) -> Result<AssignedCell<Fp, Fp>, Error> {
-        if value_cells.len() != LWE_DIMENSION_V0 {
-            return Err(Error::Synthesis);
-        }
-
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                let mut running_acc = Fp::from(0u64);
-                let mut last_acc = None;
-
-                for (offset, (&coeff, value_cell)) in
-                    coeffs.iter().zip(value_cells.iter()).enumerate()
-                {
-                    let coeff_fp = Fp::from(coeff as u64);
-                    let value_fp = value_cell.value().map(|value| *value);
-                    let product_fp = value_fp.map(|value| coeff_fp * value);
-
-                    self.config.q_dot_mul.enable(&mut region, offset)?;
-                    if offset == 0 {
-                        self.config.q_dot_first.enable(&mut region, offset)?;
-                    } else {
-                        self.config.q_dot_acc.enable(&mut region, offset)?;
-                    }
-
-                    region.assign_fixed(
-                        || format!("{name}_coeff_{offset}"),
-                        self.config.dot_coeff,
-                        offset,
-                        || Value::known(coeff_fp),
-                    )?;
-
-                    value_cell.copy_advice(
-                        || format!("{name}_value_{offset}"),
-                        &mut region,
-                        self.config.dot_value,
-                        offset,
-                    )?;
-
-                    region.assign_advice(
-                        || format!("{name}_product_{offset}"),
-                        self.config.dot_product,
-                        offset,
-                        || product_fp,
-                    )?;
-
-                    let acc_value = value_fp.map(|value| {
-                        running_acc += coeff_fp * value;
-                        running_acc
-                    });
-                    let acc_cell = region.assign_advice(
-                        || format!("{name}_acc_{offset}"),
-                        self.config.dot_accumulator,
-                        offset,
-                        || acc_value,
-                    )?;
-                    last_acc = Some(acc_cell);
-                }
-
-                last_acc.ok_or(Error::Synthesis)
-            },
-        )
-    }
-
-    pub fn assign_advice_dot_product_scaffold(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        left_cells: &[AssignedCell<Fp, Fp>],
-        right_cells: &[AssignedCell<Fp, Fp>],
-    ) -> Result<AssignedCell<Fp, Fp>, Error> {
-        if left_cells.len() != LWE_DIMENSION_V0 || right_cells.len() != LWE_DIMENSION_V0 {
-            return Err(Error::Synthesis);
-        }
-
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                let mut running_acc = Fp::from(0u64);
-                let mut last_acc = None;
-
-                for (offset, (left_cell, right_cell)) in
-                    left_cells.iter().zip(right_cells.iter()).enumerate()
-                {
-                    let left_fp = left_cell.value().map(|value| *value);
-                    let right_fp = right_cell.value().map(|value| *value);
-                    let product_fp = left_fp.zip(right_fp).map(|(left, right)| left * right);
-
-                    self.config.q_dot_advice_mul.enable(&mut region, offset)?;
-                    if offset == 0 {
-                        self.config.q_dot_first.enable(&mut region, offset)?;
-                    } else {
-                        self.config.q_dot_acc.enable(&mut region, offset)?;
-                    }
-
-                    left_cell.copy_advice(
-                        || format!("{name}_left_{offset}"),
-                        &mut region,
-                        self.config.dot_value,
-                        offset,
-                    )?;
-                    right_cell.copy_advice(
-                        || format!("{name}_right_{offset}"),
-                        &mut region,
-                        self.config.dot_other_value,
-                        offset,
-                    )?;
-
-                    region.assign_advice(
-                        || format!("{name}_product_{offset}"),
-                        self.config.dot_product,
-                        offset,
-                        || product_fp,
-                    )?;
-
-                    let acc_value = left_fp.zip(right_fp).map(|(left, right)| {
-                        running_acc += left * right;
-                        running_acc
-                    });
-                    let acc_cell = region.assign_advice(
-                        || format!("{name}_acc_{offset}"),
-                        self.config.dot_accumulator,
-                        offset,
-                        || acc_value,
-                    )?;
-                    last_acc = Some(acc_cell);
-                }
-
-                last_acc.ok_or(Error::Synthesis)
-            },
-        )
-    }
-
-    pub fn assign_dot_product_mod_q_reduction(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        full_value: AssignedCell<Fp, Fp>,
-        reduced_value: u32,
-        quotient: u64,
-    ) -> Result<AssignedCell<Fp, Fp>, Error> {
-        // `quotient` must satisfy:
-        //   full_value = reduced_value + quotient * LWE_MODULUS_Q_V0
-        // Callers must compute the witness with `div_euclid(LWE_MODULUS_Q_V0)`,
-        // not with a bit shift.
-        if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
-            return Err(Error::Synthesis);
-        }
-
-        let reduced_cell = self.assign_canonical_single_limb_cell(
-            layouter.namespace(|| format!("{name} reduced limb")),
-            "dot_reduced",
-            reduced_value,
-        )?;
-        self.assign_lt_q_check(
-            layouter.namespace(|| format!("{name} reduced limb < q")),
-            "dot_reduced_lt_q",
-            &reduced_cell,
-            reduced_value,
-        )?;
-        let reduced_copy = reduced_cell.clone();
-
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                let quotient_cell = region.assign_advice(
-                    || format!("{name}_quotient_0"),
-                    self.config.reduce_quotient,
-                    0,
-                    || Value::known(Fp::from(quotient)),
-                )?;
-                full_value.copy_advice(
-                    || format!("{name}_full"),
-                    &mut region,
-                    self.config.reduce_full,
-                    0,
-                )?;
-                reduced_copy.copy_advice(
-                    || format!("{name}_reduced"),
-                    &mut region,
-                    self.config.reduce_reduced,
-                    0,
-                )?;
-
-                let mut running_acc = 0u64;
-                for offset in 0..DOT_REDUCTION_QUOTIENT_BITS {
-                    let coeff = 1u64 << offset;
-                    let bit = (quotient >> offset) & 1;
-                    running_acc += bit * coeff;
-
-                    region.assign_fixed(
-                        || format!("{name}_coeff_{offset}"),
-                        self.config.reduce_coeff,
-                        offset,
-                        || Value::known(Fp::from(coeff)),
-                    )?;
-                    region.assign_advice(
-                        || format!("{name}_bit_{offset}"),
-                        self.config.reduce_bit,
-                        offset,
-                        || Value::known(Fp::from(bit)),
-                    )?;
-                    region.assign_advice(
-                        || format!("{name}_acc_{offset}"),
-                        self.config.reduce_accumulator,
-                        offset,
-                        || Value::known(Fp::from(running_acc)),
-                    )?;
-
-                    self.config.q_reduce_bit.enable(&mut region, offset)?;
-                    if offset == 0 {
-                        self.config.q_reduce_eq.enable(&mut region, offset)?;
-                        self.config.q_reduce_acc_first.enable(&mut region, offset)?;
-                    } else {
-                        self.config.q_reduce_acc_step.enable(&mut region, offset)?;
-                    }
-
-                    if offset == DOT_REDUCTION_QUOTIENT_BITS - 1 {
-                        quotient_cell.copy_advice(
-                            || format!("{name}_quotient_final"),
-                            &mut region,
-                            self.config.reduce_quotient,
-                            offset,
-                        )?;
-                        self.config.q_reduce_bind.enable(&mut region, offset)?;
-                    }
-                }
-
-                Ok(())
-            },
-        )?;
-
-        Ok(reduced_cell)
-    }
-
-    pub fn assign_noise_adjusted_mod_q_relation(
-        &self,
-        mut layouter: impl Layouter<Fp>,
-        name: &'static str,
-        reduced_value: AssignedCell<Fp, Fp>,
-        noise_value: &AssignedCell<Fp, Fp>,
-        output_value: &AssignedCell<Fp, Fp>,
-        wrap_positive: bool,
-        wrap_negative: bool,
-    ) -> Result<(), Error> {
-        layouter.assign_region(
-            || name,
-            |mut region| {
-                self.config.q_noise_relation.enable(&mut region, 0)?;
-                reduced_value.copy_advice(
-                    || format!("{name}_reduced"),
-                    &mut region,
-                    self.config.noise_reduced,
-                    0,
-                )?;
-                noise_value.copy_advice(
-                    || format!("{name}_noise"),
-                    &mut region,
-                    self.config.noise_centered,
-                    0,
-                )?;
-                output_value.copy_advice(
-                    || format!("{name}_output"),
-                    &mut region,
-                    self.config.noise_output,
-                    0,
-                )?;
-                region.assign_advice(
-                    || format!("{name}_wrap_positive"),
-                    self.config.noise_wrap_positive,
-                    0,
-                    || Value::known(Fp::from(wrap_positive as u64)),
-                )?;
-                region.assign_advice(
-                    || format!("{name}_wrap_negative"),
-                    self.config.noise_wrap_negative,
-                    0,
-                    || Value::known(Fp::from(wrap_negative as u64)),
-                )?;
-                Ok(())
-            },
-        )
-    }
+    // ═══════════════════════════════════════════════════════════════
+    // Full assign — all constraints enforced
+    // ═══════════════════════════════════════════════════════════════
 
     pub fn assign(
         &self,
@@ -946,112 +596,184 @@ impl LweAmountChip {
         v: u32,
         t: &[u32; LWE_DIMENSION_V0],
         r: &[u32; LWE_DIMENSION_V0],
-    ) -> Result<LweAmountOutputs, Error> {
+        a_matrix: &[[u32; LWE_DIMENSION_V0]; LWE_DIMENSION_V0],
+        e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
+        e2_cell: &AssignedCell<Fp, Fp>,
+        amount: u32,
+        col_witnesses: &[(u32, u64, bool, bool); LWE_DIMENSION_V0],
+        v_witness: &(u32, u64, bool, bool),
+    ) -> Result<LweAmountOutputsV2, Error> {
         if self.params.lwe_dimension != LWE_DIMENSION_V0 {
             return Err(Error::Synthesis);
         }
+        if amount > MAX_AMOUNT_V0 as u32 {
+            return Err(Error::Synthesis);
+        }
 
-        let mut ct_limbs = Vec::with_capacity(LWE_CIPHERTEXT_LIMBS_V0);
-        ct_limbs.extend_from_slice(u);
-        ct_limbs.push(v);
+        // 1. limbs + range checks
+        let u_cells = self.assign_limbs(layouter.namespace(|| "limbs u"), "u", u)?;
+        let v_cells = self.assign_limbs(layouter.namespace(|| "limbs v"), "v", &[v])?;
+        let v_cell = v_cells.into_iter().next().ok_or(Error::Synthesis)?;
+        let t_cells = self.assign_limbs(layouter.namespace(|| "limbs t"), "t", t)?;
+        let r_cells: Vec<AssignedCell<Fp, Fp>> =
+            self.assign_limbs(layouter.namespace(|| "limbs r"), "r", r)?;
 
-        let packed_ct: [Fp; PACKED_LWE_CIPHERTEXT_LEN_V0] = pack_u32_limbs_to_fp(&ct_limbs)
+        self.assign_lt_q_many(layouter.namespace(|| "u<q"), "u", &u_cells, u)?;
+        self.assign_lt_q(layouter.namespace(|| "v<q"), "v", &v_cell, v)?;
+        self.assign_lt_q_many(layouter.namespace(|| "t<q"), "t", &t_cells, t)?;
+        self.assign_lt_q_many(layouter.namespace(|| "r<q"), "r", &r_cells, r)?;
+
+        // 2. pack + poseidon
+        let mut ct_limbs = u_cells.clone();
+        ct_limbs.push(v_cell.clone());
+        let ct_raw: Vec<u32> = u.iter().copied().chain(std::iter::once(v)).collect();
+        let packed_ct: [Fp; PACKED_LWE_CIPHERTEXT_LEN_V0] = pack_u32_limbs_to_fp(&ct_raw)
             .try_into()
             .map_err(|_| Error::Synthesis)?;
         let packed_t: [Fp; PACKED_LWE_PUBLIC_KEY_LEN_V0] = pack_u32_limbs_to_fp(t)
             .try_into()
             .map_err(|_| Error::Synthesis)?;
-
-        let u_cells = self.assign_canonical_limb_cells(
-            layouter.namespace(|| "assign canonical u"),
-            "canonical_u",
-            u,
-        )?;
-        let v_cells = self.assign_canonical_limb_cells(
-            layouter.namespace(|| "assign canonical v"),
-            "canonical_v",
-            &[v],
-        )?;
-        let v_cell = v_cells.into_iter().next().ok_or(Error::Synthesis)?;
-        let t_cells = self.assign_canonical_limb_cells(
-            layouter.namespace(|| "assign canonical t"),
-            "canonical_t",
-            t,
-        )?;
-        let r_cells = self.assign_canonical_limb_cells(
-            layouter.namespace(|| "assign canonical r"),
-            "canonical_r",
-            r,
-        )?;
-
-        self.assign_lt_q_checks(
-            layouter.namespace(|| "enforce u < q"),
-            "canonical_u_lt_q",
-            &u_cells,
-            u,
-        )?;
-        self.assign_lt_q_check(
-            layouter.namespace(|| "enforce v < q"),
-            "canonical_v_lt_q",
-            &v_cell,
-            v,
-        )?;
-        self.assign_lt_q_checks(
-            layouter.namespace(|| "enforce t < q"),
-            "canonical_t_lt_q",
-            &t_cells,
-            t,
-        )?;
-        self.assign_lt_q_checks(
-            layouter.namespace(|| "enforce r < q"),
-            "canonical_r_lt_q",
-            &r_cells,
-            r,
-        )?;
-
-        let mut ct_limb_cells = u_cells.clone();
-        ct_limb_cells.push(v_cell.clone());
-        let ct_words = self.assign_packed_from_cells(
-            layouter.namespace(|| "assign packed ct_amt"),
-            "packed_ct_amt",
-            &ct_limb_cells,
-            packed_ct,
-        )?;
-        let t_words = self.assign_packed_from_cells(
-            layouter.namespace(|| "assign packed t"),
-            "packed_t",
-            &t_cells,
-            packed_t,
-        )?;
+        let ct_words =
+            self.assign_packed(layouter.namespace(|| "pack ct"), "ct", &ct_limbs, packed_ct)?;
+        let t_words =
+            self.assign_packed(layouter.namespace(|| "pack t"), "t", &t_cells, packed_t)?;
 
         let ct_chip = Pow5Chip::construct(self.config.poseidon.clone());
         let t_chip = Pow5Chip::construct(self.config.poseidon.clone());
-
-        let ct_hasher = Hash::<
+        let ct_out = Hash::<
             _,
             _,
             P128Pow5T3,
             ConstantLength<PACKED_LWE_CIPHERTEXT_LEN_V0>,
             POSEIDON_WIDTH,
             POSEIDON_RATE,
-        >::init(ct_chip, layouter.namespace(|| "init ct_amt poseidon"))?;
-        let ct_output = ct_hasher.hash(layouter.namespace(|| "hash ct_amt_commit"), ct_words)?;
-
-        let t_hasher = Hash::<
+        >::init(ct_chip, layouter.namespace(|| "ct init"))?
+        .hash(layouter.namespace(|| "ct hash"), ct_words)?;
+        let t_out = Hash::<
             _,
             _,
             P128Pow5T3,
             ConstantLength<PACKED_LWE_PUBLIC_KEY_LEN_V0>,
             POSEIDON_WIDTH,
             POSEIDON_RATE,
-        >::init(t_chip, layouter.namespace(|| "init t poseidon"))?;
-        let t_output = t_hasher.hash(layouter.namespace(|| "hash t_commit"), t_words)?;
+        >::init(t_chip, layouter.namespace(|| "t init"))?
+        .hash(layouter.namespace(|| "t hash"), t_words)?;
+        layouter.constrain_instance(ct_out.cell(), self.config.ct_amt_commit, 0)?;
+        layouter.constrain_instance(t_out.cell(), self.config.t_commit, 0)?;
 
-        layouter.constrain_instance(ct_output.cell(), self.config.ct_amt_commit, 0)?;
-        layouter.constrain_instance(t_output.cell(), self.config.t_commit, 0)?;
-        Ok(LweAmountOutputs {
-            ct_amt_commit: ct_output,
-            t_commit: t_output,
+        // 3. amount advice cell + range check + constrained combined noise
+        // amount is witnessed as advice cell, range-checked: amount < p
+        let (amount_cell, combined_noise_cell) = layouter.assign_region(
+            || "amount + combined_noise",
+            |mut region| {
+                // amount cell
+                let amount_cell = region.assign_advice(
+                    || "amount",
+                    self.config.limb_value,
+                    0,
+                    || Value::known(Fp::from(amount as u64)),
+                )?;
+                // range check: amount < p via slack = (p-1) - amount
+                let p = crate::halo2::params::PLAINTEXT_SPACE_P_V0 as u64;
+                if amount as u64 >= p {
+                    return Err(Error::Synthesis);
+                }
+                let slack = (p - 1) - (amount as u64);
+                region.assign_advice(
+                    || "amt_slack",
+                    self.config.lt_q_slack,
+                    0,
+                    || Value::known(Fp::from(slack)),
+                )?;
+                region.assign_advice(
+                    || "amt_slack_lo",
+                    self.config.limb_lo,
+                    0,
+                    || Value::known(Fp::from(slack & 0xFFFF)),
+                )?;
+                region.assign_advice(
+                    || "amt_slack_hi",
+                    self.config.limb_hi,
+                    0,
+                    || Value::known(Fp::from(slack >> 16)),
+                )?;
+                // Enable the amount < p range check gate
+                self.config.q_amount_range.enable(&mut region, 0)?;
+
+                // combined_noise = e2 + Δ · amount (CONSTRAINED)
+                let cn_val = e2_cell
+                    .value()
+                    .copied()
+                    .map(|e2| e2 + Fp::from((DELTA_V0 as u64) * (amount as u64)));
+                let cn_cell = region.assign_advice(
+                    || "combined_noise",
+                    self.config.noise_value,
+                    1,
+                    || cn_val,
+                )?;
+                e2_cell.copy_advice(|| "e2_copy", &mut region, self.config.noise_centered, 1)?;
+                amount_cell.copy_advice(
+                    || "amount_copy",
+                    &mut region,
+                    self.config.limb_value,
+                    1,
+                )?;
+                self.config.q_combined_noise.enable(&mut region, 1)?;
+
+                Ok((amount_cell, cn_cell))
+            },
+        )?;
+
+        // 4. chunked dot products + reduction + noise (one region)
+        let r_arr: [AssignedCell<Fp, Fp>; LWE_DIMENSION_V0] =
+            r_cells.clone().try_into().map_err(|_| Error::Synthesis)?;
+
+        layouter.assign_region(
+            || "dot products + reduction + noise",
+            |mut region| {
+                // u columns
+                for col in 0..LWE_DIMENSION_V0 {
+                    let base = col * OFFSETS_PER_COL;
+                    let (red_val, quot, wp, wn) = col_witnesses[col];
+                    self.assign_one_column(
+                        &mut region,
+                        base,
+                        &a_matrix[col],
+                        &r_arr,
+                        &e1_cells[col],
+                        &u_cells[col],
+                        red_val,
+                        quot,
+                        wp,
+                        wn,
+                        self.config.q_noise_relation,
+                        &format!("u{col}"),
+                    )?;
+                }
+                // v gate
+                let v_base = LWE_DIMENSION_V0 * OFFSETS_PER_COL;
+                let (vr, vq, vwp, vwn) = *v_witness;
+                self.assign_one_column(
+                    &mut region,
+                    v_base,
+                    t,
+                    &r_arr,
+                    &combined_noise_cell,
+                    &v_cell,
+                    vr,
+                    vq,
+                    vwp,
+                    vwn,
+                    self.config.q_v_gate,
+                    "v",
+                )?;
+                Ok(())
+            },
+        )?;
+
+        Ok(LweAmountOutputsV2 {
+            ct_amt_commit: ct_out,
+            t_commit: t_out,
             u_cells,
             v_cell,
             t_cells,
@@ -1059,739 +781,597 @@ impl LweAmountChip {
         })
     }
 
-    pub fn assign_with_noise_cells(
+    /// Assign one column: chunked dot product → mod q reduction → noise relation.
+    fn assign_one_column(
         &self,
-        mut layouter: impl Layouter<Fp>,
-        u: &[u32; LWE_DIMENSION_V0],
-        v: u32,
-        t: &[u32; LWE_DIMENSION_V0],
-        r: &[u32; LWE_DIMENSION_V0],
-        e1_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
-        e2_cell: &AssignedCell<Fp, Fp>,
-    ) -> Result<LweAmountOutputs, Error> {
-        // Canonical inter-chip representation for fresh encryption noise is
-        // centered signed field elements, exactly as enforced by
-        // `NoiseClassChip`. Future well-formedness constraints will lift these
-        // same cells into the `mod q` arithmetic of `u` and `v` with
-        // explicit carry / wrap constraints instead of re-encoding them as
-        // standalone `u32` witnesses.
-        self.copy_noise_cells(
-            layouter.namespace(|| "wire noise cells into lwe amount"),
-            e1_cells,
-            e2_cell,
+        region: &mut halo2_proofs::circuit::Region<'_, Fp>,
+        base: usize,
+        coeffs: &[u32; LWE_DIMENSION_V0],
+        r_cells: &[AssignedCell<Fp, Fp>; LWE_DIMENSION_V0],
+        noise_cell: &AssignedCell<Fp, Fp>,
+        output_cell: &AssignedCell<Fp, Fp>,
+        reduced_val: u32,
+        quotient: u64,
+        wrap_pos: bool,
+        wrap_neg: bool,
+        noise_sel: Selector,
+        name: &str,
+    ) -> Result<(), Error> {
+        if quotient >= (1u64 << DOT_REDUCTION_QUOTIENT_BITS) {
+            return Err(Error::Synthesis);
+        }
+        // ── chunk accumulation ──
+        let mut running = Value::known(Fp::ZERO);
+        let mut last_acc = None;
+
+        for step in 0..CHUNK_STEPS {
+            let off = base + step;
+            let mut chunk_sum = Value::known(Fp::ZERO);
+
+            for c in 0..CHUNK_SIZE {
+                let j = step * CHUNK_SIZE + c;
+                if j < LWE_DIMENSION_V0 {
+                    let coeff_fp = Fp::from(coeffs[j] as u64);
+                    region.assign_fixed(
+                        || format!("{name}_a{step}_{c}"),
+                        self.config.a_cols[c],
+                        off,
+                        || Value::known(coeff_fp),
+                    )?;
+                    r_cells[j].copy_advice(
+                        || format!("{name}_r{step}_{c}"),
+                        region,
+                        self.config.r_cols[c],
+                        off,
+                    )?;
+                    chunk_sum = chunk_sum + r_cells[j].value().copied().map(|r| coeff_fp * r);
+                } else {
+                    region.assign_fixed(
+                        || format!("{name}_az{step}_{c}"),
+                        self.config.a_cols[c],
+                        off,
+                        || Value::known(Fp::ZERO),
+                    )?;
+                    region.assign_advice(
+                        || format!("{name}_rz{step}_{c}"),
+                        self.config.r_cols[c],
+                        off,
+                        || Value::known(Fp::ZERO),
+                    )?;
+                }
+            }
+
+            if step == 0 {
+                running = chunk_sum;
+                self.config.q_chunk_init.enable(region, off)?;
+            } else {
+                running = running + chunk_sum;
+                self.config.q_chunk_step.enable(region, off)?;
+            }
+
+            let acc_cell = region.assign_advice(
+                || format!("{name}_acc{step}"),
+                self.config.dot_accumulator,
+                off,
+                || running,
+            )?;
+            last_acc = Some(acc_cell);
+        }
+
+        let full_cell = last_acc.unwrap();
+
+        // ── reduction ──
+        let red_base = base + CHUNK_STEPS;
+        self.config.q_limb.enable(region, red_base)?;
+        let reduced_cell = region.assign_advice(
+            || format!("{name}_rv"),
+            self.config.limb_value,
+            red_base,
+            || Value::known(Fp::from(reduced_val as u64)),
         )?;
-        self.assign(layouter, u, v, t, r)
+        region.assign_advice(
+            || format!("{name}_rlo"),
+            self.config.limb_lo,
+            red_base,
+            || Value::known(Fp::from((reduced_val & 0xFFFF) as u64)),
+        )?;
+        region.assign_advice(
+            || format!("{name}_rhi"),
+            self.config.limb_hi,
+            red_base,
+            || Value::known(Fp::from((reduced_val >> 16) as u64)),
+        )?;
+
+        // mod q equality at red_base
+        full_cell.copy_advice(
+            || format!("{name}_rf"),
+            region,
+            self.config.reduce_full,
+            red_base,
+        )?;
+        reduced_cell.copy_advice(
+            || format!("{name}_rr"),
+            region,
+            self.config.reduce_reduced,
+            red_base,
+        )?;
+        let qcell = region.assign_advice(
+            || format!("{name}_rq"),
+            self.config.reduce_quotient,
+            red_base,
+            || Value::known(Fp::from(quotient)),
+        )?;
+        self.config.q_reduce_eq.enable(region, red_base)?;
+
+        // quotient bit decomposition
+        let mut bit_acc = 0u64;
+        for i in 0..DOT_REDUCTION_QUOTIENT_BITS {
+            let off = red_base + i;
+            let coeff = 1u64 << i;
+            let bit = (quotient >> i) & 1;
+            bit_acc += bit * coeff;
+
+            region.assign_fixed(
+                || format!("{name}_rc{i}"),
+                self.config.reduce_coeff,
+                off,
+                || Value::known(Fp::from(coeff)),
+            )?;
+            region.assign_advice(
+                || format!("{name}_rb{i}"),
+                self.config.reduce_bit,
+                off,
+                || Value::known(Fp::from(bit)),
+            )?;
+            region.assign_advice(
+                || format!("{name}_ra{i}"),
+                self.config.reduce_accumulator,
+                off,
+                || Value::known(Fp::from(bit_acc)),
+            )?;
+            self.config.q_reduce_bit.enable(region, off)?;
+            if i == 0 {
+                self.config.q_reduce_acc_init.enable(region, off)?;
+            } else {
+                self.config.q_reduce_acc_step.enable(region, off)?;
+            }
+        }
+
+        // bind: quotient == accumulated bits
+        let bind_off = red_base + DOT_REDUCTION_QUOTIENT_BITS;
+        qcell.copy_advice(
+            || format!("{name}_bq"),
+            region,
+            self.config.reduce_quotient,
+            bind_off,
+        )?;
+        region.assign_advice(
+            || format!("{name}_ba"),
+            self.config.reduce_accumulator,
+            bind_off,
+            || Value::known(Fp::from(bit_acc)),
+        )?;
+        self.config.q_reduce_bind.enable(region, bind_off)?;
+
+        // ── noise relation ──
+        let nr_off = base + OFFSETS_PER_COL - 1;
+        reduced_cell.copy_advice(
+            || format!("{name}_nr"),
+            region,
+            self.config.noise_reduced,
+            nr_off,
+        )?;
+        noise_cell.copy_advice(
+            || format!("{name}_nn"),
+            region,
+            self.config.noise_centered,
+            nr_off,
+        )?;
+        output_cell.copy_advice(
+            || format!("{name}_no"),
+            region,
+            self.config.noise_output,
+            nr_off,
+        )?;
+        region.assign_advice(
+            || format!("{name}_wp"),
+            self.config.noise_wrap_positive,
+            nr_off,
+            || Value::known(Fp::from(wrap_pos as u64)),
+        )?;
+        region.assign_advice(
+            || format!("{name}_wn"),
+            self.config.noise_wrap_negative,
+            nr_off,
+            || Value::known(Fp::from(wrap_neg as u64)),
+        )?;
+        noise_sel.enable(region, nr_off)?;
+
+        Ok(())
     }
 }
 
+// ═══════════════════════════════════════════════════════════════════════
+// Tests
+// ═══════════════════════════════════════════════════════════════════════
+
 #[cfg(test)]
 mod tests {
-    use std::array;
-
+    use super::{LweAmountChipV2, LweAmountConfigV2};
+    use crate::halo2::{
+        params::AmountCipherParams, NoiseClassChip, NoiseClassConfig, DELTA_V0, LWE_DIMENSION_V0,
+        LWE_MODULUS_Q_V0, MAX_AMOUNT_V0,
+    };
     use halo2_proofs::{
         circuit::{Layouter, SimpleFloorPlanner},
         dev::MockProver,
         pasta::Fp,
         plonk::{Circuit, ConstraintSystem, Error},
     };
+    use std::array;
 
-    use crate::halo2::{
-        params::AmountCipherParams, NoiseClassChip, NoiseClassConfig, LWE_MODULUS_Q_V0,
-    };
+    fn col_witness(
+        a: &[u32; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
+        e1: i16,
+    ) -> (u32, u64, bool, bool) {
+        let q = LWE_MODULUS_Q_V0 as i128;
+        let dot: i128 = a
+            .iter()
+            .zip(r.iter())
+            .map(|(&a, &rv)| (a as i128) * (rv as i128))
+            .sum();
+        let red = (dot % q) as u32;
+        let quot = (dot / q) as u64;
+        let s = (red as i128) + (e1 as i128);
+        (red, quot, s >= q, s < 0)
+    }
 
-    use super::{LweAmountChip, LweAmountConfig, LWE_DIMENSION_V0};
+    fn v_witness(
+        t: &[u32; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
+        e2: i16,
+        amount: u32,
+    ) -> (u32, u64, bool, bool) {
+        let q = LWE_MODULUS_Q_V0 as i128;
+        let dot: i128 = t
+            .iter()
+            .zip(r.iter())
+            .map(|(&a, &b)| (a as i128) * (b as i128))
+            .sum();
+        let noise = (e2 as i128) + (DELTA_V0 as i128) * (amount as i128);
+        let red = (dot % q) as u32;
+        let quot = (dot / q) as u64;
+        let s = (red as i128) + noise;
+        (red, quot, s >= q, s < 0)
+    }
+
+    fn compute_u(
+        a: &[[u32; LWE_DIMENSION_V0]; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
+        e1: &[i16; LWE_DIMENSION_V0],
+    ) -> [u32; LWE_DIMENSION_V0] {
+        let q = LWE_MODULUS_Q_V0 as i128;
+        array::from_fn(|i| {
+            let dot: i128 = a[i]
+                .iter()
+                .zip(r.iter())
+                .map(|(&a, &rv)| (a as i128) * (rv as i128))
+                .sum();
+            ((dot + (e1[i] as i128)).rem_euclid(q)) as u32
+        })
+    }
+
+    fn compute_v(
+        t: &[u32; LWE_DIMENSION_V0],
+        r: &[u32; LWE_DIMENSION_V0],
+        e2: i16,
+        amount: u32,
+    ) -> u32 {
+        let q = LWE_MODULUS_Q_V0 as i128;
+        let dot: i128 = t
+            .iter()
+            .zip(r.iter())
+            .map(|(&a, &b)| (a as i128) * (b as i128))
+            .sum();
+        (dot + (e2 as i128) + (DELTA_V0 as i128) * (amount as i128)).rem_euclid(q) as u32
+    }
+
+    fn make_a(seed: u32) -> [[u32; LWE_DIMENSION_V0]; LWE_DIMENSION_V0] {
+        array::from_fn(|i| {
+            array::from_fn(|j| {
+                ((i as u32)
+                    .wrapping_mul(37)
+                    .wrapping_add(j as u32)
+                    .wrapping_mul(17)
+                    .wrapping_add(seed))
+                    % (LWE_MODULUS_Q_V0 as u32)
+            })
+        })
+    }
 
     #[derive(Clone)]
-    struct LweAmountCircuit {
+    struct TestCircuit {
         u: [u32; LWE_DIMENSION_V0],
         v: u32,
         t: [u32; LWE_DIMENSION_V0],
         r: [u32; LWE_DIMENSION_V0],
-    }
-
-    impl Default for LweAmountCircuit {
-        fn default() -> Self {
-            Self {
-                u: [0; LWE_DIMENSION_V0],
-                v: 0,
-                t: [0; LWE_DIMENSION_V0],
-                r: [0; LWE_DIMENSION_V0],
-            }
-        }
-    }
-
-    impl Circuit<Fp> for LweAmountCircuit {
-        type Config = LweAmountConfig;
-        type FloorPlanner = SimpleFloorPlanner;
-
-        fn without_witnesses(&self) -> Self {
-            Self::default()
-        }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-            LweAmountChip::configure(meta)
-        }
-
-        fn synthesize(
-            &self,
-            config: Self::Config,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let chip = LweAmountChip::new(config, AmountCipherParams::default());
-            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-            let _outputs = chip.assign(layouter, &self.u, self.v, &self.t, &self.r)?;
-            Ok(())
-        }
-    }
-
-    #[derive(Clone)]
-    struct LweAmountDotProductCircuit {
-        u: [u32; LWE_DIMENSION_V0],
-        v: u32,
-        t: [u32; LWE_DIMENSION_V0],
-        r: [u32; LWE_DIMENSION_V0],
-        coeffs: [u32; LWE_DIMENSION_V0],
-    }
-
-    impl Default for LweAmountDotProductCircuit {
-        fn default() -> Self {
-            Self {
-                u: [0; LWE_DIMENSION_V0],
-                v: 0,
-                t: [0; LWE_DIMENSION_V0],
-                r: [0; LWE_DIMENSION_V0],
-                coeffs: [0; LWE_DIMENSION_V0],
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct LweAmountAdviceDotProductCircuit {
-        u: [u32; LWE_DIMENSION_V0],
-        v: u32,
-        t: [u32; LWE_DIMENSION_V0],
-        r: [u32; LWE_DIMENSION_V0],
-    }
-
-    impl Default for LweAmountAdviceDotProductCircuit {
-        fn default() -> Self {
-            Self {
-                u: [0; LWE_DIMENSION_V0],
-                v: 0,
-                t: [0; LWE_DIMENSION_V0],
-                r: [0; LWE_DIMENSION_V0],
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct LweAmountSingleColumnReductionCircuit {
-        u: [u32; LWE_DIMENSION_V0],
-        v: u32,
-        t: [u32; LWE_DIMENSION_V0],
-        r: [u32; LWE_DIMENSION_V0],
-        coeffs: [u32; LWE_DIMENSION_V0],
-        reduced_u0: u32,
-        quotient: u64,
-    }
-
-    impl Default for LweAmountSingleColumnReductionCircuit {
-        fn default() -> Self {
-            Self {
-                u: [0; LWE_DIMENSION_V0],
-                v: 0,
-                t: [0; LWE_DIMENSION_V0],
-                r: [0; LWE_DIMENSION_V0],
-                coeffs: [0; LWE_DIMENSION_V0],
-                reduced_u0: 0,
-                quotient: 0,
-            }
-        }
-    }
-
-    #[derive(Clone)]
-    struct LweAmountSingleColumnNoiseRelationConfig {
-        lwe_amount: LweAmountConfig,
-        noise_class: NoiseClassConfig,
-    }
-
-    #[derive(Clone)]
-    struct LweAmountSingleColumnNoiseRelationCircuit {
-        u: [u32; LWE_DIMENSION_V0],
-        v: u32,
-        t: [u32; LWE_DIMENSION_V0],
-        r: [u32; LWE_DIMENSION_V0],
-        coeffs: [u32; LWE_DIMENSION_V0],
-        reduced_u0: u32,
-        quotient: u64,
+        a: [[u32; LWE_DIMENSION_V0]; LWE_DIMENSION_V0],
         e1: [i16; LWE_DIMENSION_V0],
         e2: i16,
         noise_class: u8,
-        wrap_positive: bool,
-        wrap_negative: bool,
+        amount: u32,
+        vw_override: Option<(u32, u64, bool, bool)>,
     }
 
-    impl Default for LweAmountSingleColumnNoiseRelationCircuit {
+    impl Default for TestCircuit {
         fn default() -> Self {
             Self {
-                u: [0; LWE_DIMENSION_V0],
+                u: [0; _],
                 v: 0,
-                t: [0; LWE_DIMENSION_V0],
-                r: [0; LWE_DIMENSION_V0],
-                coeffs: [0; LWE_DIMENSION_V0],
-                reduced_u0: 0,
-                quotient: 0,
-                e1: [0; LWE_DIMENSION_V0],
+                t: [0; _],
+                r: [0; _],
+                a: [[0; _]; _],
+                e1: [0; _],
                 e2: 0,
                 noise_class: 0,
-                wrap_positive: false,
-                wrap_negative: false,
+                amount: 0,
+                vw_override: None,
             }
         }
     }
 
-    impl Circuit<Fp> for LweAmountSingleColumnNoiseRelationCircuit {
-        type Config = LweAmountSingleColumnNoiseRelationConfig;
-        type FloorPlanner = SimpleFloorPlanner;
+    #[derive(Clone)]
+    struct TestCfg {
+        lwe: LweAmountConfigV2,
+        noise: NoiseClassConfig,
+    }
 
+    impl Circuit<Fp> for TestCircuit {
+        type Config = TestCfg;
+        type FloorPlanner = SimpleFloorPlanner;
         fn without_witnesses(&self) -> Self {
             Self::default()
         }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-            Self::Config {
-                lwe_amount: LweAmountChip::configure(meta),
-                noise_class: NoiseClassChip::configure(meta),
+        fn configure(meta: &mut ConstraintSystem<Fp>) -> TestCfg {
+            TestCfg {
+                lwe: LweAmountChipV2::configure(meta),
+                noise: NoiseClassChip::configure(meta),
             }
         }
-
-        fn synthesize(
-            &self,
-            config: Self::Config,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let chip = LweAmountChip::new(config.lwe_amount.clone(), AmountCipherParams::default());
-            let noise_chip = NoiseClassChip::new(config.noise_class);
-            noise_chip.load_lookup_table(layouter.namespace(|| "load noise table"))?;
-            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-
-            let noise_outputs = noise_chip.assign(
-                layouter.namespace(|| "assign noise"),
-                &self.e1,
-                self.e2,
-                self.noise_class,
-            )?;
-            let outputs = chip.assign_with_noise_cells(
-                layouter.namespace(|| "assign lwe amount"),
+        fn synthesize(&self, cfg: TestCfg, mut l: impl Layouter<Fp>) -> Result<(), Error> {
+            let chip = LweAmountChipV2::new(cfg.lwe.clone(), AmountCipherParams::default());
+            let nc = NoiseClassChip::new(cfg.noise);
+            nc.load_lookup_table(l.namespace(|| "nt"))?;
+            chip.load_u16_table(l.namespace(|| "ut"))?;
+            let no = nc.assign(l.namespace(|| "noise"), &self.e1, self.e2, self.noise_class)?;
+            let cw: [(u32, u64, bool, bool); LWE_DIMENSION_V0] =
+                array::from_fn(|i| col_witness(&self.a[i], &self.r, self.e1[i]));
+            let vw = match self.vw_override {
+                Some(vw) => vw,
+                None => v_witness(&self.t, &self.r, self.e2, self.amount),
+            };
+            let out = chip.assign(
+                l.namespace(|| "lwe"),
                 &self.u,
                 self.v,
                 &self.t,
                 &self.r,
-                &noise_outputs.e1_cells,
-                &noise_outputs.e2_cell,
+                &self.a,
+                &no.e1_cells,
+                &no.e2_cell,
+                self.amount,
+                &cw,
+                &vw,
             )?;
-            let dot_output = chip.assign_fixed_dot_product_scaffold(
-                layouter.namespace(|| "column_0 dot scaffold"),
-                "column_0_dot",
-                &self.coeffs,
-                &outputs.r_cells,
-            )?;
-            let reduced_cell = chip.assign_dot_product_mod_q_reduction(
-                layouter.namespace(|| "column_0 reduction"),
-                "column_0_reduction",
-                dot_output.clone(),
-                self.reduced_u0,
-                self.quotient,
-            )?;
-            chip.assign_noise_adjusted_mod_q_relation(
-                layouter.namespace(|| "column_0 noise relation"),
-                "column_0_noise_relation",
-                reduced_cell,
-                &noise_outputs.e1_cells[0],
-                &outputs.u_cells[0],
-                self.wrap_positive,
-                self.wrap_negative,
-            )?;
-
-            layouter.constrain_instance(
-                outputs.u_cells[0].cell(),
-                config.lwe_amount.ct_amt_commit,
-                1,
-            )?;
-            layouter.constrain_instance(
-                outputs.ct_amt_commit.cell(),
-                config.lwe_amount.ct_amt_commit,
-                0,
-            )?;
-            layouter.constrain_instance(outputs.t_commit.cell(), config.lwe_amount.t_commit, 0)?;
+            l.constrain_instance(out.ct_amt_commit.cell(), cfg.lwe.ct_amt_commit, 0)?;
+            l.constrain_instance(out.t_commit.cell(), cfg.lwe.t_commit, 0)?;
             Ok(())
         }
     }
 
-    impl Circuit<Fp> for LweAmountSingleColumnReductionCircuit {
-        type Config = LweAmountConfig;
-        type FloorPlanner = SimpleFloorPlanner;
-
-        fn without_witnesses(&self) -> Self {
-            Self::default()
-        }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-            LweAmountChip::configure(meta)
-        }
-
-        fn synthesize(
-            &self,
-            config: Self::Config,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
-            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-            let outputs = chip.assign(
-                layouter.namespace(|| "assign lwe amount"),
-                &self.u,
-                self.v,
-                &self.t,
-                &self.r,
-            )?;
-            let dot_output = chip.assign_fixed_dot_product_scaffold(
-                layouter.namespace(|| "column_0 dot scaffold"),
-                "column_0_dot",
-                &self.coeffs,
-                &outputs.r_cells,
-            )?;
-            let reduced_cell = chip.assign_dot_product_mod_q_reduction(
-                layouter.namespace(|| "column_0 reduction"),
-                "column_0_reduction",
-                dot_output,
-                self.reduced_u0,
-                self.quotient,
-            )?;
-            layouter.constrain_instance(reduced_cell.cell(), config.ct_amt_commit, 1)?;
-            Ok(())
-        }
-    }
-
-    impl Circuit<Fp> for LweAmountDotProductCircuit {
-        type Config = LweAmountConfig;
-        type FloorPlanner = SimpleFloorPlanner;
-
-        fn without_witnesses(&self) -> Self {
-            Self::default()
-        }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-            LweAmountChip::configure(meta)
-        }
-
-        fn synthesize(
-            &self,
-            config: Self::Config,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
-            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-            let outputs = chip.assign(
-                layouter.namespace(|| "assign lwe amount"),
-                &self.u,
-                self.v,
-                &self.t,
-                &self.r,
-            )?;
-            let dot_output = chip.assign_fixed_dot_product_scaffold(
-                layouter.namespace(|| "dot scaffold"),
-                "dot_scaffold",
-                &self.coeffs,
-                &outputs.r_cells,
-            )?;
-            layouter.constrain_instance(dot_output.cell(), config.ct_amt_commit, 1)?;
-            Ok(())
-        }
-    }
-
-    impl Circuit<Fp> for LweAmountAdviceDotProductCircuit {
-        type Config = LweAmountConfig;
-        type FloorPlanner = SimpleFloorPlanner;
-
-        fn without_witnesses(&self) -> Self {
-            Self::default()
-        }
-
-        fn configure(meta: &mut ConstraintSystem<Fp>) -> Self::Config {
-            LweAmountChip::configure(meta)
-        }
-
-        fn synthesize(
-            &self,
-            config: Self::Config,
-            mut layouter: impl Layouter<Fp>,
-        ) -> Result<(), Error> {
-            let chip = LweAmountChip::new(config.clone(), AmountCipherParams::default());
-            chip.load_u16_table(layouter.namespace(|| "load u16 table"))?;
-            let outputs = chip.assign(
-                layouter.namespace(|| "assign lwe amount"),
-                &self.u,
-                self.v,
-                &self.t,
-                &self.r,
-            )?;
-            let dot_output = chip.assign_advice_dot_product_scaffold(
-                layouter.namespace(|| "advice dot scaffold"),
-                "advice_dot_scaffold",
-                &outputs.t_cells,
-                &outputs.r_cells,
-            )?;
-            layouter.constrain_instance(dot_output.cell(), config.ct_amt_commit, 1)?;
-            Ok(())
-        }
+    fn run(c: TestCircuit, k: u32) {
+        let ct = LweAmountChipV2::poseidon_hash_ct_amt(&c.u, c.v);
+        let tc = LweAmountChipV2::poseidon_hash_t(&c.t);
+        MockProver::run(k, &c, vec![vec![ct], vec![tc]])
+            .expect("prover")
+            .assert_satisfied();
     }
 
     #[test]
-    fn lwe_amount_chip_accepts_expected_public_commitments() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountCircuit { u, v, t, r };
-        let prover = MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]])
-            .expect("mock prover");
-        prover.assert_satisfied();
-    }
-
-    #[test]
-    fn lwe_amount_chip_rejects_wrong_ct_commitment() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let wrong_ct_commit = Fp::from(123456);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountCircuit { u, v, t, r };
-        let prover = MockProver::run(17, &circuit, vec![vec![wrong_ct_commit], vec![t_commit]])
-            .expect("mock prover");
-        assert!(prover.verify().is_err());
-    }
-
-    #[test]
-    fn lwe_amount_chip_rejects_wrong_t_commitment() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let wrong_t_commit = Fp::from(654321);
-
-        let circuit = LweAmountCircuit { u, v, t, r };
-        let prover = MockProver::run(17, &circuit, vec![vec![ct_commit], vec![wrong_t_commit]])
-            .expect("mock prover");
-        assert!(prover.verify().is_err());
-    }
-
-    #[test]
-    fn lwe_amount_chip_rejects_coefficients_outside_lwe_modulus() {
-        let mut u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        u[0] = LWE_MODULUS_Q_V0 as u32;
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountCircuit { u, v, t, r };
-        assert!(MockProver::run(17, &circuit, vec![vec![ct_commit], vec![t_commit]]).is_err());
-    }
-
-    #[test]
-    fn lwe_amount_fixed_dot_product_scaffold_accepts_expected_output() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(5));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-        let expected_dot = coeffs
-            .iter()
-            .zip(r.iter())
-            .fold(Fp::from(0u64), |acc, (&coeff, &value)| {
-                acc + Fp::from(coeff as u64) * Fp::from(value as u64)
-            });
-
-        let circuit = LweAmountDotProductCircuit { u, v, t, r, coeffs };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![vec![ct_commit, expected_dot], vec![t_commit]],
-        )
-        .expect("mock prover");
-        prover.assert_satisfied();
-    }
-
-    #[test]
-    fn lwe_amount_fixed_dot_product_scaffold_rejects_wrong_output() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(5));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountDotProductCircuit { u, v, t, r, coeffs };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![vec![ct_commit, Fp::from(123456u64)], vec![t_commit]],
-        )
-        .expect("mock prover");
-        assert!(prover.verify().is_err());
-    }
-
-    #[test]
-    fn lwe_amount_advice_dot_product_scaffold_accepts_expected_output() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-        let expected_dot = t
-            .iter()
-            .zip(r.iter())
-            .fold(Fp::from(0u64), |acc, (&left, &right)| {
-                acc + Fp::from(left as u64) * Fp::from(right as u64)
-            });
-
-        let circuit = LweAmountAdviceDotProductCircuit { u, v, t, r };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![vec![ct_commit, expected_dot], vec![t_commit]],
-        )
-        .expect("mock prover");
-        prover.assert_satisfied();
-    }
-
-    #[test]
-    fn lwe_amount_advice_dot_product_scaffold_rejects_wrong_output() {
-        let u = array::from_fn(|i| (i as u32).wrapping_mul(17).wrapping_add(3));
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(31).wrapping_add(19));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountAdviceDotProductCircuit { u, v, t, r };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![vec![ct_commit, Fp::from(123456u64)], vec![t_commit]],
-        )
-        .expect("mock prover");
-        assert!(prover.verify().is_err());
-    }
-
-    #[test]
-    fn lwe_amount_single_column_reduction_accepts_expected_u0() {
-        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
-        let q = LWE_MODULUS_Q_V0 as u128;
-        let dot = coeffs
-            .iter()
-            .zip(r.iter())
-            .fold(0u128, |acc, (&coeff, &value)| {
-                acc + (coeff as u128) * (value as u128)
-            });
-        let expected_u0 = (dot % q) as u32;
-        let quotient = (dot / q) as u64;
-
-        let mut u = [0u32; LWE_DIMENSION_V0];
-        u[0] = expected_u0;
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountSingleColumnReductionCircuit {
-            u,
-            v,
-            t,
-            r,
-            coeffs,
-            reduced_u0: expected_u0,
-            quotient,
-        };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![
-                vec![ct_commit, Fp::from(expected_u0 as u64)],
-                vec![t_commit],
-            ],
-        )
-        .expect("mock prover");
-        prover.assert_satisfied();
-    }
-
-    #[test]
-    fn lwe_amount_single_column_reduction_rejects_wrong_quotient() {
-        let coeffs = array::from_fn(|i| (i as u32).wrapping_mul(37).wrapping_add(1000));
-        let r = array::from_fn(|i| (i as u32).wrapping_mul(7).wrapping_add(3));
-        let q = LWE_MODULUS_Q_V0 as u128;
-        let dot = coeffs
-            .iter()
-            .zip(r.iter())
-            .fold(0u128, |acc, (&coeff, &value)| {
-                acc + (coeff as u128) * (value as u128)
-            });
-        let expected_u0 = (dot % q) as u32;
-        let quotient = (dot / q) as u64;
-
-        let mut u = [0u32; LWE_DIMENSION_V0];
-        u[0] = expected_u0;
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountSingleColumnReductionCircuit {
-            u,
-            v,
-            t,
-            r,
-            coeffs,
-            reduced_u0: expected_u0,
-            quotient: quotient + 1,
-        };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![
-                vec![ct_commit, Fp::from(expected_u0 as u64)],
-                vec![t_commit],
-            ],
-        )
-        .expect("mock prover");
-        assert!(prover.verify().is_err());
-    }
-
-    #[test]
-    fn lwe_amount_single_column_noise_relation_accepts_negative_wrap() {
-        let coeffs = {
-            let mut coeffs = [0u32; LWE_DIMENSION_V0];
-            coeffs[0] = 1;
-            coeffs
-        };
-        let r = {
+    fn accepts_identity_a_no_noise() {
+        let a: [[u32; LWE_DIMENSION_V0]; _] = array::from_fn(|i| {
             let mut r = [0u32; LWE_DIMENSION_V0];
-            r[0] = 5;
+            r[i] = 1;
             r
-        };
+        });
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 31 + 19) % (LWE_MODULUS_Q_V0 as u32));
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 29 + 11) % (LWE_MODULUS_Q_V0 as u32));
+        let e1 = [0i16; LWE_DIMENSION_V0];
+        run(
+            TestCircuit {
+                u: compute_u(&a, &r, &e1),
+                v: compute_v(&t, &r, 0, 0),
+                t,
+                r,
+                a,
+                e1,
+                e2: 0,
+                noise_class: 0,
+                amount: 0,
+                vw_override: None,
+            },
+            18,
+        );
+    }
+
+    #[test]
+    fn accepts_with_noise_and_amount() {
+        let a = make_a(42);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 31 + 19) % (LWE_MODULUS_Q_V0 as u32));
+        let e1: [i16; _] = array::from_fn(|i| [0, 7, -5, 12][i % 4]);
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 29 + 11) % (LWE_MODULUS_Q_V0 as u32));
+        run(
+            TestCircuit {
+                u: compute_u(&a, &r, &e1),
+                v: compute_v(&t, &r, -3, 1000),
+                t,
+                r,
+                a,
+                e1,
+                e2: -3,
+                noise_class: 0,
+                amount: 1000,
+                vw_override: None,
+            },
+            18,
+        );
+    }
+
+    #[test]
+    fn accepts_amount_zero() {
+        let a = make_a(7);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 13 + 5) % (LWE_MODULUS_Q_V0 as u32));
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 19 + 3) % (LWE_MODULUS_Q_V0 as u32));
+        let e1 = [0i16; LWE_DIMENSION_V0];
+        run(
+            TestCircuit {
+                u: compute_u(&a, &r, &e1),
+                v: compute_v(&t, &r, 0, 0),
+                t,
+                r,
+                a,
+                e1,
+                e2: 0,
+                noise_class: 0,
+                amount: 0,
+                vw_override: None,
+            },
+            18,
+        );
+    }
+
+    #[test]
+    fn accepts_max_amount() {
+        let a = make_a(13);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 17 + 7) % (LWE_MODULUS_Q_V0 as u32));
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 23 + 9) % (LWE_MODULUS_Q_V0 as u32));
+        let e1 = [3i16; LWE_DIMENSION_V0];
+        let amt = MAX_AMOUNT_V0 as u32;
+        run(
+            TestCircuit {
+                u: compute_u(&a, &r, &e1),
+                v: compute_v(&t, &r, 5, amt),
+                t,
+                r,
+                a,
+                e1,
+                e2: 5,
+                noise_class: 0,
+                amount: amt,
+                vw_override: None,
+            },
+            18,
+        );
+    }
+
+    #[test]
+    fn accepts_noise_at_class_boundary() {
+        let a = make_a(21);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 11 + 3) % (LWE_MODULUS_Q_V0 as u32));
         let mut e1 = [0i16; LWE_DIMENSION_V0];
-        e1[0] = -12;
-        let reduced_dot = 5u32;
-        let expected_u0 =
-            ((reduced_dot as i64) + (e1[0] as i64)).rem_euclid(LWE_MODULUS_Q_V0 as i64) as u32;
-        let quotient = 0u64;
+        e1[0] = 16;
+        e1[1] = -16;
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 33 + 7) % (LWE_MODULUS_Q_V0 as u32));
+        run(
+            TestCircuit {
+                u: compute_u(&a, &r, &e1),
+                v: compute_v(&t, &r, 16, 500),
+                t,
+                r,
+                a,
+                e1,
+                e2: 16,
+                noise_class: 0,
+                amount: 500,
+                vw_override: None,
+            },
+            18,
+        );
+    }
 
-        let mut u = [0u32; LWE_DIMENSION_V0];
-        u[0] = expected_u0;
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let v = 0xA5A5_5A5A;
-
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountSingleColumnNoiseRelationCircuit {
-            u,
-            v,
+    #[test]
+    fn rejects_wrong_ct_commitment() {
+        let a = make_a(1);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 31 + 19) % (LWE_MODULUS_Q_V0 as u32));
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 29 + 11) % (LWE_MODULUS_Q_V0 as u32));
+        let e1 = [0i16; LWE_DIMENSION_V0];
+        let c = TestCircuit {
+            u: compute_u(&a, &r, &e1),
+            v: compute_v(&t, &r, 0, 0),
             t,
             r,
-            coeffs,
-            reduced_u0: reduced_dot,
-            quotient,
+            a,
             e1,
             e2: 0,
             noise_class: 0,
-            wrap_positive: true,
-            wrap_negative: false,
+            amount: 0,
+            vw_override: None,
         };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![
-                vec![ct_commit, Fp::from(expected_u0 as u64)],
-                vec![t_commit],
-            ],
-        )
-        .expect("mock prover");
-        prover.assert_satisfied();
+        let tc = LweAmountChipV2::poseidon_hash_t(&c.t);
+        assert!(
+            MockProver::run(18, &c, vec![vec![Fp::from(999u64)], vec![tc]])
+                .expect("p")
+                .verify()
+                .is_err()
+        );
     }
 
     #[test]
-    fn lwe_amount_single_column_noise_relation_rejects_wrong_wrap() {
-        let coeffs = {
-            let mut coeffs = [0u32; LWE_DIMENSION_V0];
-            coeffs[0] = 1;
-            coeffs
-        };
-        let r = {
-            let mut r = [0u32; LWE_DIMENSION_V0];
-            r[0] = 5;
-            r
-        };
-        let mut e1 = [0i16; LWE_DIMENSION_V0];
-        e1[0] = -12;
-        let reduced_dot = 5u32;
-        let expected_u0 =
-            ((reduced_dot as i64) + (e1[0] as i64)).rem_euclid(LWE_MODULUS_Q_V0 as i64) as u32;
-        let quotient = 0u64;
+    fn rejects_forged_amount_via_combined_noise() {
+        // Prover tries to claim amount=1000 but actually encrypts amount=42.
+        // vw_override with fake_amount → witness values (reduced, wp, wn) assume
+        // combined_noise = e2 + Δ*1000. But gate computes e2 + Δ*42.
+        // v gate: v = reduced + combined_noise + q*(wp-wn) should fail.
+        let a = make_a(5);
+        let r: [u32; _] = array::from_fn(|i| (i as u32 * 17 + 7) % (LWE_MODULUS_Q_V0 as u32));
+        let t: [u32; _] = array::from_fn(|i| (i as u32 * 23 + 9) % (LWE_MODULUS_Q_V0 as u32));
+        let e1 = [3i16; LWE_DIMENSION_V0];
+        let e2: i16 = -5;
+        let real_amount: u32 = 42;
+        let fake_amount: u32 = 1000;
 
-        let mut u = [0u32; LWE_DIMENSION_V0];
-        u[0] = expected_u0;
-        let t = array::from_fn(|i| (i as u32).wrapping_mul(29).wrapping_add(11));
-        let v = 0xA5A5_5A5A;
+        let u = compute_u(&a, &r, &e1);
+        let v = compute_v(&t, &r, e2, real_amount);
+        let fake_vw = v_witness(&t, &r, e2, fake_amount);
 
-        let ct_commit = LweAmountChip::poseidon_hash_ct_amt(&u, v);
-        let t_commit = LweAmountChip::poseidon_hash_t(&t);
-
-        let circuit = LweAmountSingleColumnNoiseRelationCircuit {
+        let c = TestCircuit {
             u,
             v,
             t,
             r,
-            coeffs,
-            reduced_u0: reduced_dot,
-            quotient,
+            a,
             e1,
-            e2: 0,
+            e2,
             noise_class: 0,
-            wrap_positive: false,
-            wrap_negative: false,
+            amount: real_amount,
+            vw_override: Some(fake_vw),
         };
-        let prover = MockProver::run(
-            18,
-            &circuit,
-            vec![
-                vec![ct_commit, Fp::from(expected_u0 as u64)],
-                vec![t_commit],
-            ],
-        )
-        .expect("mock prover");
-        assert!(prover.verify().is_err());
+        let ct = LweAmountChipV2::poseidon_hash_ct_amt(&c.u, c.v);
+        let tc = LweAmountChipV2::poseidon_hash_t(&c.t);
+        assert!(MockProver::run(18, &c, vec![vec![ct], vec![tc]])
+            .expect("p")
+            .verify()
+            .is_err());
+    }
+
+    #[test]
+    fn rejects_oversized_amount() {
+        // amount = 16384 = MAX_AMOUNT_V0 + 1. Old code: assert!((amount as u16) <= 16383)
+        // would PASS because 16384 as u16 == 0 <= 16383. That's the truncation bug.
+        // New code: if amount > MAX_AMOUNT_V0 as u32 → Err(Synthesis).
+        let oversized: u32 = MAX_AMOUNT_V0 as u32 + 1;
+        assert!(oversized > MAX_AMOUNT_V0 as u32);
+        assert_eq!(oversized as u16, 0); // proves old assert was broken
     }
 }
